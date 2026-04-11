@@ -31,6 +31,7 @@ os.environ["TQDM_DISABLE"] = "1"
 warnings.filterwarnings("ignore")
 
 from scripts.engine.scorer import batch_score, get_recommendation, split_veto_signals
+from scripts.state import save_candidate_snapshot_history
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.config_loader import get_stocks
 from scripts.utils.logger import get_logger
@@ -154,6 +155,7 @@ def run() -> list:
                 _logger.info(f">> 评分 {name}({code})...")
 
         scores = batch_score(core_pool)
+        history_group_id = f"core_pool_scoring:{date_str}:{datetime.now().strftime('%H%M%S')}"
         snapshot_entries, snapshot_meta = build_pool_snapshot_entries(
             scores,
             current_snapshot=current_snapshot,
@@ -162,11 +164,23 @@ def run() -> list:
         )
         snapshot_meta.update({
             "pipeline": "core_pool_scoring",
+            "history_group_id": history_group_id,
             "scored_count": len(scores),
             "source": "core_pool_scoring",
         })
         snapshot_path = save_pool_snapshot(snapshot_entries, snapshot_meta)
         snapshot_meta["snapshot_path"] = snapshot_path
+        save_candidate_snapshot_history(
+            scores,
+            snapshot_date=date_str,
+            pipeline="core_pool_scoring",
+            history_group_id=history_group_id,
+            pool="core",
+            universe="tracked",
+            source="core_pool_scoring",
+            actionable_count=len(scores),
+            metadata=snapshot_meta,
+        )
 
         _logger.info(">> 写入评分报告...")
         report_content = _build_report_content(scores, date_str)
@@ -197,6 +211,7 @@ def run() -> list:
                 "report_path": str(report_path),
                 "core_pool_updated": core_pool_updated,
                 "snapshot_path": snapshot_path,
+                "history_group_id": history_group_id,
                 "pool_snapshot_summary": snapshot_meta.get("summary", {}),
             },
             date_str,

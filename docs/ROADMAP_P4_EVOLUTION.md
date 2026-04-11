@@ -125,6 +125,19 @@
 - [ ] `trade explain <code>` 命令：解释某只股票的评分明细和决策逻辑
 - [ ] 这三个命令的输出格式对 Hermes 友好（结构化 JSON + 人类可读摘要）
 
+### P4-6 历史信号镜像
+
+**问题**：当前历史回测仍以价格重建 + 规则代理为主，缺少“当天系统实际看到了什么”的按日留痕，无法精确回答某只股票为什么没进池、没过分数、被 veto，或因为组合决策而未执行。
+
+**方案**：
+- [x] ledger 增加历史快照表：`market snapshot / pool snapshot / scored candidates / today_decision`
+- [x] 每次 `stock_screener` 运行生成统一 `history_group_id`，把四类对象作为同一次信号运行归档
+- [x] `core_pool_scoring` 同步归档评分历史，供核心池单独复核
+- [ ] `morning / noon / evening` 补齐 market snapshot history，保留时点差异
+- [ ] `historical_pipeline.py` 优先读取历史信号镜像，缺失时才回退到 proxy replay
+- [ ] 新增历史镜像诊断入口：按 `snapshot_date / history_group_id` 查看 market / pool / candidates / decision
+- [ ] 单股验证报告优先引用历史镜像中的真实 miss reason，而不是仅靠事后代理分类
+
 ---
 
 ## P5：参数校准期（持续）

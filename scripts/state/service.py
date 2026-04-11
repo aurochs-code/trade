@@ -182,6 +182,20 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
   detail_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS market_snapshot_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  history_group_id TEXT DEFAULT '',
+  pipeline TEXT DEFAULT '',
+  snapshot_date TEXT NOT NULL,
+  as_of_date TEXT NOT NULL,
+  signal TEXT NOT NULL,
+  source TEXT DEFAULT '',
+  source_chain_json TEXT DEFAULT '[]',
+  updated_at TEXT NOT NULL,
+  detail_json TEXT NOT NULL,
+  metadata_json TEXT DEFAULT '{}'
+);
+
 CREATE TABLE IF NOT EXISTS alert_snapshots (
   id INTEGER PRIMARY KEY CHECK(id = 1),
   snapshot_date TEXT NOT NULL,
@@ -193,6 +207,106 @@ CREATE TABLE IF NOT EXISTS alert_snapshots (
   ack_counts_json TEXT NOT NULL DEFAULT '{}',
   detail_json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS decision_snapshot_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  history_group_id TEXT DEFAULT '',
+  pipeline TEXT DEFAULT '',
+  snapshot_date TEXT NOT NULL,
+  decision_action TEXT DEFAULT '',
+  market_signal TEXT DEFAULT '',
+  updated_at TEXT NOT NULL,
+  detail_json TEXT NOT NULL,
+  metadata_json TEXT DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS candidate_snapshot_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  history_group_id TEXT DEFAULT '',
+  pipeline TEXT DEFAULT '',
+  snapshot_date TEXT NOT NULL,
+  pool TEXT DEFAULT '',
+  universe TEXT DEFAULT '',
+  source TEXT DEFAULT '',
+  candidate_count INTEGER NOT NULL DEFAULT 0,
+  actionable_count INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  metadata_json TEXT DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS candidate_snapshot_entries (
+  snapshot_id INTEGER NOT NULL,
+  rank INTEGER NOT NULL DEFAULT 0,
+  code TEXT NOT NULL,
+  name TEXT DEFAULT '',
+  total_score REAL NOT NULL DEFAULT 0,
+  technical_score REAL NOT NULL DEFAULT 0,
+  fundamental_score REAL NOT NULL DEFAULT 0,
+  flow_score REAL NOT NULL DEFAULT 0,
+  sentiment_score REAL NOT NULL DEFAULT 0,
+  veto_triggered INTEGER NOT NULL DEFAULT 0,
+  veto_signals_json TEXT DEFAULT '[]',
+  passed_text TEXT DEFAULT '',
+  recommendation TEXT DEFAULT '',
+  bucket TEXT DEFAULT '',
+  data_quality TEXT DEFAULT '',
+  note TEXT DEFAULT '',
+  source TEXT DEFAULT '',
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY(snapshot_id, code)
+);
+
+CREATE TABLE IF NOT EXISTS pool_snapshot_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  history_group_id TEXT DEFAULT '',
+  pipeline TEXT DEFAULT '',
+  snapshot_date TEXT NOT NULL,
+  source TEXT DEFAULT '',
+  updated_at TEXT NOT NULL,
+  summary_json TEXT NOT NULL DEFAULT '{}',
+  metadata_json TEXT DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS pool_snapshot_history_entries (
+  snapshot_id INTEGER NOT NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  bucket TEXT NOT NULL,
+  total_score REAL NOT NULL DEFAULT 0,
+  technical_score REAL NOT NULL DEFAULT 0,
+  fundamental_score REAL NOT NULL DEFAULT 0,
+  flow_score REAL NOT NULL DEFAULT 0,
+  sentiment_score REAL NOT NULL DEFAULT 0,
+  veto_triggered INTEGER NOT NULL DEFAULT 0,
+  veto_signals_json TEXT DEFAULT '[]',
+  passed_text TEXT DEFAULT '',
+  note TEXT DEFAULT '',
+  source TEXT DEFAULT '',
+  added_date TEXT DEFAULT '',
+  entry_snapshot_date TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  data_quality TEXT DEFAULT '',
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY(snapshot_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_snapshot_history_lookup
+  ON market_snapshot_history(snapshot_date, history_group_id, updated_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_decision_snapshot_history_lookup
+  ON decision_snapshot_history(snapshot_date, history_group_id, updated_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_candidate_snapshot_history_lookup
+  ON candidate_snapshot_history(snapshot_date, history_group_id, updated_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_candidate_snapshot_entries_lookup
+  ON candidate_snapshot_entries(snapshot_id, rank, total_score DESC, code);
+
+CREATE INDEX IF NOT EXISTS idx_pool_snapshot_history_lookup
+  ON pool_snapshot_history(snapshot_date, history_group_id, updated_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_pool_snapshot_history_entries_lookup
+  ON pool_snapshot_history_entries(snapshot_id, bucket, total_score DESC, code);
 """
 
 
@@ -1736,6 +1850,112 @@ def load_market_snapshot(refresh: bool = False) -> dict:
     return save_market_snapshot(snapshot)
 
 
+def save_market_snapshot_history(
+    snapshot: dict,
+    *,
+    pipeline: str = "",
+    history_group_id: str = "",
+    metadata: dict | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> dict:
+    """Archive a market snapshot for exact historical replay."""
+    own_conn = conn is None
+    if own_conn:
+        context = _connect()
+        conn = context.__enter__()
+    try:
+        snapshot = dict(snapshot or {})
+        metadata = dict(metadata or {})
+        as_of_date = str(snapshot.get("as_of_date", snapshot.get("snapshot_date", _today_str()))).strip() or _today_str()
+        updated_at = str(snapshot.get("updated_at", _now_ts())).strip() or _now_ts()
+        signal = str(snapshot.get("signal", snapshot.get("market_signal", "CLEAR"))).strip().upper() or "CLEAR"
+        row = conn.execute(
+            """
+            INSERT INTO market_snapshot_history(
+              history_group_id, pipeline, snapshot_date, as_of_date, signal,
+              source, source_chain_json, updated_at, detail_json, metadata_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(history_group_id or metadata.get("history_group_id", "")).strip(),
+                str(pipeline or metadata.get("pipeline", "")).strip(),
+                as_of_date,
+                as_of_date,
+                signal,
+                str(snapshot.get("source", "")).strip(),
+                _json_dumps(snapshot.get("source_chain", [])),
+                updated_at,
+                _json_dumps(snapshot.get("indices", {})),
+                _json_dumps(metadata),
+            ),
+        )
+        return {
+            "history_id": int(row.lastrowid),
+            "history_group_id": str(history_group_id or metadata.get("history_group_id", "")).strip(),
+            "pipeline": str(pipeline or metadata.get("pipeline", "")).strip(),
+            "snapshot_date": as_of_date,
+            "as_of_date": as_of_date,
+            "updated_at": updated_at,
+            "signal": signal,
+            "source": str(snapshot.get("source", "")).strip(),
+            "source_chain": list(snapshot.get("source_chain", [])),
+            "indices": dict(snapshot.get("indices", {})) if isinstance(snapshot.get("indices", {}), dict) else {},
+            "metadata": metadata,
+        }
+    finally:
+        if own_conn:
+            context.__exit__(None, None, None)
+
+
+def load_market_snapshot_history(
+    snapshot_date: str | None = None,
+    *,
+    history_group_id: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """Load archived market snapshots."""
+    with _connect() as conn:
+        where = []
+        params: list[Any] = []
+        if snapshot_date:
+            where.append("snapshot_date = ?")
+            params.append(snapshot_date)
+        if history_group_id:
+            where.append("history_group_id = ?")
+            params.append(history_group_id)
+        query = "SELECT * FROM market_snapshot_history"
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY snapshot_date DESC, updated_at DESC, id DESC LIMIT ?"
+        params.append(max(1, int(limit or 20)))
+        rows = conn.execute(query, params).fetchall()
+
+    items = [
+        {
+            "history_id": int(row["id"]),
+            "history_group_id": str(row["history_group_id"] or ""),
+            "pipeline": str(row["pipeline"] or ""),
+            "snapshot_date": str(row["snapshot_date"] or ""),
+            "as_of_date": str(row["as_of_date"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+            "signal": str(row["signal"] or ""),
+            "source": str(row["source"] or ""),
+            "source_chain": _json_loads(row["source_chain_json"], []),
+            "indices": _json_loads(row["detail_json"], {}),
+            "metadata": _json_loads(row["metadata_json"], {}),
+        }
+        for row in rows
+    ]
+    latest = items[0] if items else {}
+    return {
+        "snapshot_date": snapshot_date or str(latest.get("snapshot_date", "")),
+        "history_group_id": history_group_id or str(latest.get("history_group_id", "")),
+        "count": len(items),
+        "items": items,
+        "latest": latest,
+    }
+
+
 def _shadow_trade_snapshot() -> dict:
     empty_advisory = {
         "triggered_signal_count": 0,
@@ -2182,6 +2402,502 @@ def load_alert_snapshot(context: dict | None = None, refresh: bool = False) -> d
     return save_alert_snapshot(snapshot)
 
 
+def save_decision_snapshot_history(
+    today_decision: dict,
+    *,
+    snapshot_date: str | None = None,
+    pipeline: str = "",
+    history_group_id: str = "",
+    metadata: dict | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> dict:
+    """Archive a `today_decision` payload for later exact replay."""
+    own_conn = conn is None
+    if own_conn:
+        context = _connect()
+        conn = context.__enter__()
+    try:
+        today_decision = dict(today_decision or {})
+        metadata = dict(metadata or {})
+        snapshot_date = str(snapshot_date or metadata.get("snapshot_date") or _today_str()).strip() or _today_str()
+        updated_at = str(today_decision.get("updated_at", metadata.get("updated_at", _now_ts()))).strip() or _now_ts()
+        decision_action = str(
+            today_decision.get("decision", today_decision.get("action", today_decision.get("state", "")))
+        ).strip()
+        market_signal = str(today_decision.get("market_signal", "")).strip().upper()
+        row = conn.execute(
+            """
+            INSERT INTO decision_snapshot_history(
+              history_group_id, pipeline, snapshot_date, decision_action,
+              market_signal, updated_at, detail_json, metadata_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(history_group_id or metadata.get("history_group_id", "")).strip(),
+                str(pipeline or metadata.get("pipeline", "")).strip(),
+                snapshot_date,
+                decision_action,
+                market_signal,
+                updated_at,
+                _json_dumps(today_decision),
+                _json_dumps(metadata),
+            ),
+        )
+        return {
+            "history_id": int(row.lastrowid),
+            "history_group_id": str(history_group_id or metadata.get("history_group_id", "")).strip(),
+            "pipeline": str(pipeline or metadata.get("pipeline", "")).strip(),
+            "snapshot_date": snapshot_date,
+            "updated_at": updated_at,
+            "decision_action": decision_action,
+            "market_signal": market_signal,
+            "today_decision": today_decision,
+            "metadata": metadata,
+        }
+    finally:
+        if own_conn:
+            context.__exit__(None, None, None)
+
+
+def load_decision_snapshot_history(
+    snapshot_date: str | None = None,
+    *,
+    history_group_id: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """Load archived `today_decision` rows."""
+    with _connect() as conn:
+        where = []
+        params: list[Any] = []
+        if snapshot_date:
+            where.append("snapshot_date = ?")
+            params.append(snapshot_date)
+        if history_group_id:
+            where.append("history_group_id = ?")
+            params.append(history_group_id)
+        query = "SELECT * FROM decision_snapshot_history"
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY snapshot_date DESC, updated_at DESC, id DESC LIMIT ?"
+        params.append(max(1, int(limit or 20)))
+        rows = conn.execute(query, params).fetchall()
+
+    items = [
+        {
+            "history_id": int(row["id"]),
+            "history_group_id": str(row["history_group_id"] or ""),
+            "pipeline": str(row["pipeline"] or ""),
+            "snapshot_date": str(row["snapshot_date"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+            "decision_action": str(row["decision_action"] or ""),
+            "market_signal": str(row["market_signal"] or ""),
+            "today_decision": _json_loads(row["detail_json"], {}),
+            "metadata": _json_loads(row["metadata_json"], {}),
+        }
+        for row in rows
+    ]
+    latest = items[0] if items else {}
+    return {
+        "snapshot_date": snapshot_date or str(latest.get("snapshot_date", "")),
+        "history_group_id": history_group_id or str(latest.get("history_group_id", "")),
+        "count": len(items),
+        "items": items,
+        "latest": latest,
+    }
+
+
+def save_candidate_snapshot_history(
+    candidates: list[dict],
+    *,
+    snapshot_date: str | None = None,
+    pipeline: str = "",
+    history_group_id: str = "",
+    pool: str = "",
+    universe: str = "",
+    source: str = "",
+    actionable_count: int | None = None,
+    metadata: dict | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> dict:
+    """Archive scored candidates so later replay can use the exact daily outputs."""
+    own_conn = conn is None
+    if own_conn:
+        context = _connect()
+        conn = context.__enter__()
+    try:
+        metadata = dict(metadata or {})
+        snapshot_date = str(snapshot_date or metadata.get("snapshot_date") or _today_str()).strip() or _today_str()
+        updated_at = str(metadata.get("updated_at", _now_ts())).strip() or _now_ts()
+        rows = list(candidates or [])
+        row = conn.execute(
+            """
+            INSERT INTO candidate_snapshot_history(
+              history_group_id, pipeline, snapshot_date, pool, universe, source,
+              candidate_count, actionable_count, updated_at, metadata_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(history_group_id or metadata.get("history_group_id", "")).strip(),
+                str(pipeline or metadata.get("pipeline", "")).strip(),
+                snapshot_date,
+                str(pool or metadata.get("pool", "")).strip(),
+                str(universe or metadata.get("universe", "")).strip(),
+                str(source or metadata.get("source", "")).strip(),
+                len(rows),
+                int(actionable_count if actionable_count is not None else metadata.get("actionable_count", len(rows))),
+                updated_at,
+                _json_dumps(metadata),
+            ),
+        )
+        snapshot_id = int(row.lastrowid)
+        for idx, entry in enumerate(rows, start=1):
+            code = _normalize_code(entry.get("code", ""))
+            if not code:
+                continue
+            conn.execute(
+                """
+                INSERT INTO candidate_snapshot_entries(
+                  snapshot_id, rank, code, name, total_score, technical_score,
+                  fundamental_score, flow_score, sentiment_score, veto_triggered,
+                  veto_signals_json, passed_text, recommendation, bucket, data_quality,
+                  note, source, detail_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot_id,
+                    idx,
+                    code,
+                    str(entry.get("name", code)).strip(),
+                    round(_safe_float(entry.get("total_score", 0)), 4),
+                    round(_safe_float(entry.get("technical_score", 0)), 4),
+                    round(_safe_float(entry.get("fundamental_score", 0)), 4),
+                    round(_safe_float(entry.get("flow_score", 0)), 4),
+                    round(_safe_float(entry.get("sentiment_score", 0)), 4),
+                    1 if bool(entry.get("veto_triggered", False)) else 0,
+                    _json_dumps(entry.get("veto_signals", [])),
+                    str(entry.get("passed_text", "")).strip(),
+                    str(entry.get("recommendation", entry.get("passed_text", ""))).strip(),
+                    str(entry.get("bucket", "")).strip(),
+                    str(entry.get("data_quality", "ok")).strip(),
+                    str(entry.get("note", "")).strip(),
+                    str(entry.get("source", source or metadata.get("source", ""))).strip(),
+                    _json_dumps(entry),
+                ),
+            )
+        return {
+            "history_id": snapshot_id,
+            "history_group_id": str(history_group_id or metadata.get("history_group_id", "")).strip(),
+            "pipeline": str(pipeline or metadata.get("pipeline", "")).strip(),
+            "snapshot_date": snapshot_date,
+            "updated_at": updated_at,
+            "candidate_count": len(rows),
+            "actionable_count": int(actionable_count if actionable_count is not None else metadata.get("actionable_count", len(rows))),
+            "pool": str(pool or metadata.get("pool", "")).strip(),
+            "universe": str(universe or metadata.get("universe", "")).strip(),
+            "source": str(source or metadata.get("source", "")).strip(),
+            "metadata": metadata,
+        }
+    finally:
+        if own_conn:
+            context.__exit__(None, None, None)
+
+
+def load_candidate_snapshot_history(
+    snapshot_date: str | None = None,
+    *,
+    history_group_id: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """Load archived scored-candidate snapshots."""
+    with _connect() as conn:
+        where = []
+        params: list[Any] = []
+        if snapshot_date:
+            where.append("snapshot_date = ?")
+            params.append(snapshot_date)
+        if history_group_id:
+            where.append("history_group_id = ?")
+            params.append(history_group_id)
+        query = "SELECT * FROM candidate_snapshot_history"
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY snapshot_date DESC, updated_at DESC, id DESC LIMIT ?"
+        params.append(max(1, int(limit or 20)))
+        rows = conn.execute(query, params).fetchall()
+        history_ids = [int(row["id"]) for row in rows]
+        entries_by_snapshot: dict[int, list[dict[str, Any]]] = {history_id: [] for history_id in history_ids}
+        if history_ids:
+            placeholders = ",".join("?" for _ in history_ids)
+            entry_rows = conn.execute(
+                f"""
+                SELECT * FROM candidate_snapshot_entries
+                WHERE snapshot_id IN ({placeholders})
+                ORDER BY snapshot_id, rank ASC, total_score DESC, code
+                """,
+                history_ids,
+            ).fetchall()
+            for entry_row in entry_rows:
+                entries_by_snapshot[int(entry_row["snapshot_id"])].append(
+                    _json_loads(entry_row["detail_json"], {})
+                    or {
+                        "code": str(entry_row["code"] or ""),
+                        "name": str(entry_row["name"] or ""),
+                        "total_score": _safe_float(entry_row["total_score"], 0.0),
+                    }
+                )
+
+    items = []
+    for row in rows:
+        history_id = int(row["id"])
+        candidates = entries_by_snapshot.get(history_id, [])
+        items.append({
+            "history_id": history_id,
+            "history_group_id": str(row["history_group_id"] or ""),
+            "pipeline": str(row["pipeline"] or ""),
+            "snapshot_date": str(row["snapshot_date"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+            "pool": str(row["pool"] or ""),
+            "universe": str(row["universe"] or ""),
+            "source": str(row["source"] or ""),
+            "candidate_count": int(row["candidate_count"] or 0),
+            "actionable_count": int(row["actionable_count"] or 0),
+            "candidates": candidates,
+            "metadata": _json_loads(row["metadata_json"], {}),
+        })
+    latest = items[0] if items else {}
+    return {
+        "snapshot_date": snapshot_date or str(latest.get("snapshot_date", "")),
+        "history_group_id": history_group_id or str(latest.get("history_group_id", "")),
+        "count": len(items),
+        "items": items,
+        "latest": latest,
+    }
+
+
+def _resolve_signal_history_group_id(conn: sqlite3.Connection, snapshot_date: str) -> str:
+    for table in (
+        "candidate_snapshot_history",
+        "decision_snapshot_history",
+        "pool_snapshot_history",
+        "market_snapshot_history",
+    ):
+        row = conn.execute(
+            f"""
+            SELECT history_group_id
+            FROM {table}
+            WHERE snapshot_date = ? AND TRIM(COALESCE(history_group_id, '')) <> ''
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """,
+            (snapshot_date,),
+        ).fetchone()
+        if row and str(row["history_group_id"] or "").strip():
+            return str(row["history_group_id"]).strip()
+    return ""
+
+
+def load_daily_signal_snapshot_bundle(snapshot_date: str, history_group_id: str | None = None) -> dict:
+    """Load a best-effort historical signal bundle for one trading day."""
+    resolved_group_id = ""
+    with _connect() as conn:
+        resolved_group_id = str(history_group_id or "").strip() or _resolve_signal_history_group_id(conn, snapshot_date)
+
+    market = load_market_snapshot_history(snapshot_date, history_group_id=resolved_group_id or None, limit=1).get("latest", {})
+    pool = load_pool_snapshot_history(snapshot_date, history_group_id=resolved_group_id or None, limit=1).get("latest", {})
+    decision = load_decision_snapshot_history(snapshot_date, history_group_id=resolved_group_id or None, limit=1).get("latest", {})
+    candidates = load_candidate_snapshot_history(snapshot_date, history_group_id=resolved_group_id or None, limit=1).get("latest", {})
+
+    missing = [
+        name
+        for name, value in (
+            ("market_snapshot", market),
+            ("pool_snapshot", pool),
+            ("today_decision", decision),
+            ("scored_candidates", candidates),
+        )
+        if not value
+    ]
+    status = "ok" if not missing else ("partial" if len(missing) < 4 else "missing")
+    return {
+        "status": status,
+        "snapshot_date": snapshot_date,
+        "history_group_id": resolved_group_id,
+        "missing_components": missing,
+        "market_snapshot": market,
+        "pool_snapshot": pool,
+        "today_decision": decision.get("today_decision", {}) if decision else {},
+        "decision_snapshot": decision,
+        "scored_candidates": candidates.get("candidates", []) if candidates else [],
+        "candidate_snapshot": candidates,
+    }
+
+
+def save_pool_snapshot_history(
+    snapshot: dict,
+    *,
+    pipeline: str = "",
+    history_group_id: str = "",
+    metadata: dict | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> dict:
+    """Archive a full pool snapshot for later exact replay."""
+    own_conn = conn is None
+    if own_conn:
+        context = _connect()
+        conn = context.__enter__()
+    try:
+        snapshot = dict(snapshot or {})
+        metadata = dict(metadata or snapshot.get("metadata", {}) or {})
+        snapshot_date = str(snapshot.get("snapshot_date", metadata.get("snapshot_date", _today_str()))).strip() or _today_str()
+        updated_at = str(snapshot.get("updated_at", metadata.get("updated_at", _now_ts()))).strip() or _now_ts()
+        source = str(snapshot.get("source", metadata.get("source", ""))).strip()
+        summary = dict(snapshot.get("summary", {}) if isinstance(snapshot.get("summary", {}), dict) else {})
+        row = conn.execute(
+            """
+            INSERT INTO pool_snapshot_history(
+              history_group_id, pipeline, snapshot_date, source, updated_at,
+              summary_json, metadata_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(history_group_id or metadata.get("history_group_id", "")).strip(),
+                str(pipeline or metadata.get("pipeline", "")).strip(),
+                snapshot_date,
+                source,
+                updated_at,
+                _json_dumps(summary),
+                _json_dumps(metadata),
+            ),
+        )
+        history_id = int(row.lastrowid)
+        for entry in snapshot.get("entries", []) if isinstance(snapshot.get("entries", []), list) else []:
+            code = _normalize_code(entry.get("code", ""))
+            if not code:
+                continue
+            entry_metadata = entry.get("metadata", {}) if isinstance(entry.get("metadata", {}), dict) else {}
+            data_quality = str(entry.get("data_quality", entry_metadata.get("data_quality", "ok")) or "ok").strip()
+            conn.execute(
+                """
+                INSERT INTO pool_snapshot_history_entries(
+                  snapshot_id, code, name, bucket, total_score, technical_score,
+                  fundamental_score, flow_score, sentiment_score, veto_triggered,
+                  veto_signals_json, passed_text, note, source, added_date,
+                  entry_snapshot_date, updated_at, data_quality, detail_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    history_id,
+                    code,
+                    str(entry.get("name", code)).strip(),
+                    str(entry.get("bucket", "avoid")).strip() or "avoid",
+                    round(_safe_float(entry.get("total_score", 0)), 4),
+                    round(_safe_float(entry.get("technical_score", 0)), 4),
+                    round(_safe_float(entry.get("fundamental_score", 0)), 4),
+                    round(_safe_float(entry.get("flow_score", 0)), 4),
+                    round(_safe_float(entry.get("sentiment_score", 0)), 4),
+                    1 if bool(entry.get("veto_triggered", False)) else 0,
+                    _json_dumps(entry.get("veto_signals", [])),
+                    str(entry.get("passed_text", "")).strip(),
+                    str(entry.get("note", "")).strip(),
+                    str(entry.get("source", source)).strip(),
+                    str(entry.get("added_date", snapshot_date)).strip(),
+                    str(entry.get("snapshot_date", snapshot_date)).strip(),
+                    str(entry.get("updated_at", updated_at)).strip(),
+                    data_quality,
+                    _json_dumps(entry),
+                ),
+            )
+        return {
+            "history_id": history_id,
+            "history_group_id": str(history_group_id or metadata.get("history_group_id", "")).strip(),
+            "pipeline": str(pipeline or metadata.get("pipeline", "")).strip(),
+            "snapshot_date": snapshot_date,
+            "updated_at": updated_at,
+            "source": source,
+            "summary": summary,
+            "metadata": metadata,
+        }
+    finally:
+        if own_conn:
+            context.__exit__(None, None, None)
+
+
+def load_pool_snapshot_history(
+    snapshot_date: str | None = None,
+    *,
+    history_group_id: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """Load archived pool snapshots."""
+    with _connect() as conn:
+        where = []
+        params: list[Any] = []
+        if snapshot_date:
+            where.append("snapshot_date = ?")
+            params.append(snapshot_date)
+        if history_group_id:
+            where.append("history_group_id = ?")
+            params.append(history_group_id)
+        query = "SELECT * FROM pool_snapshot_history"
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY snapshot_date DESC, updated_at DESC, id DESC LIMIT ?"
+        params.append(max(1, int(limit or 20)))
+        rows = conn.execute(query, params).fetchall()
+        history_ids = [int(row["id"]) for row in rows]
+        entries_by_snapshot: dict[int, list[dict[str, Any]]] = {history_id: [] for history_id in history_ids}
+        if history_ids:
+            placeholders = ",".join("?" for _ in history_ids)
+            entry_rows = conn.execute(
+                f"""
+                SELECT * FROM pool_snapshot_history_entries
+                WHERE snapshot_id IN ({placeholders})
+                ORDER BY snapshot_id, CASE bucket WHEN 'core' THEN 0 WHEN 'watch' THEN 1 ELSE 2 END, total_score DESC, code
+                """,
+                history_ids,
+            ).fetchall()
+            for entry_row in entry_rows:
+                entries_by_snapshot[int(entry_row["snapshot_id"])].append(
+                    _json_loads(entry_row["detail_json"], {})
+                    or {
+                        "code": str(entry_row["code"] or ""),
+                        "name": str(entry_row["name"] or ""),
+                        "bucket": str(entry_row["bucket"] or ""),
+                        "total_score": _safe_float(entry_row["total_score"], 0.0),
+                    }
+                )
+
+    items = []
+    for row in rows:
+        history_id = int(row["id"])
+        entries = entries_by_snapshot.get(history_id, [])
+        core_pool = [entry for entry in entries if str(entry.get("bucket", "")).strip() == "core"]
+        watch_pool = [entry for entry in entries if str(entry.get("bucket", "")).strip() == "watch"]
+        other_entries = [entry for entry in entries if str(entry.get("bucket", "")).strip() not in {"core", "watch"}]
+        items.append({
+            "history_id": history_id,
+            "history_group_id": str(row["history_group_id"] or ""),
+            "pipeline": str(row["pipeline"] or ""),
+            "snapshot_date": str(row["snapshot_date"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+            "source": str(row["source"] or ""),
+            "metadata": _json_loads(row["metadata_json"], {}),
+            "entries": entries,
+            "core_pool": core_pool,
+            "watch_pool": watch_pool,
+            "other_entries": other_entries,
+            "summary": _json_loads(row["summary_json"], {}),
+        })
+    latest = items[0] if items else {}
+    return {
+        "snapshot_date": snapshot_date or str(latest.get("snapshot_date", "")),
+        "history_group_id": history_group_id or str(latest.get("history_group_id", "")),
+        "count": len(items),
+        "items": items,
+        "latest": latest,
+    }
+
+
 def save_pool_snapshot(entries: list[dict], metadata: dict | None = None, conn: sqlite3.Connection | None = None) -> dict:
     """Persist the latest pool snapshot and project it back to YAML/Obsidian."""
     own_conn = conn is None
@@ -2316,6 +3032,15 @@ def save_pool_snapshot(entries: list[dict], metadata: dict | None = None, conn: 
             _meta_set(conn, "pool_snapshot_meta", _json_dumps({"snapshot_date": snapshot_date, **metadata}))
         snapshot["projection_paths"] = projection_paths
         snapshot["db_path"] = str(_db_path())
+        history_record = save_pool_snapshot_history(
+            snapshot,
+            pipeline=str(metadata.get("pipeline", "")).strip(),
+            history_group_id=str(metadata.get("history_group_id", "")).strip(),
+            metadata=metadata,
+            conn=conn,
+        )
+        snapshot["history_id"] = history_record.get("history_id")
+        snapshot["history_group_id"] = history_record.get("history_group_id", "")
         return snapshot
     finally:
         if own_conn:

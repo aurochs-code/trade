@@ -1,6 +1,6 @@
 # 交易系统任务跟踪
 
-更新时间：2026-04-10
+更新时间：2026-04-11
 
 说明：
 
@@ -138,6 +138,18 @@
 备注：`doctor` now 输出 `data_source_health`，聚合最近 pipeline 运行、缓存新鲜度、字段缺失率、评分数据质量和最后成功时间。
 - [x] 数据质量买入门禁
 备注：`data_quality=degraded/error` 的新增买入建议降级为人工复核/blocked；池子晋级、筛选建议和影子交易自动买入不再把降级数据当作自动买入依据。
+- [x] 历史信号镜像任务拆解入文档
+备注：把 `market snapshot / pool snapshot / scored candidates / today_decision` 的历史归档能力拆成状态层、流水线接入、回测接入、CLI/报告四段任务。
+- [x] 历史快照状态层建模
+备注：ledger 新增历史快照表，支持按 `snapshot_date / history_group_id` 读取 market / pool / candidates / decision，并可组合成单日信号 bundle。
+- [x] 历史快照首条生产链路接入
+备注：`stock_screener` 运行时按统一 `history_group_id` 落盘 market / pool / scored candidates / today_decision；`core_pool_scoring` 同步落盘评分历史。
+- [ ] 历史信号镜像回放引擎
+备注：`historical_pipeline.py` 优先读取每日历史快照，缺失时才回退到当前 proxy replay。
+- [ ] 历史信号镜像 CLI / 诊断
+备注：增加按日查看某次 `history_group_id` 的 market / pool / candidates / decision，支持单股命中/漏判解释。
+- [ ] 盘前/午间/收盘市场快照归档补齐
+备注：`morning / noon / evening` 统一按日写入 market snapshot history，保留时点差异。
 
 ---
 

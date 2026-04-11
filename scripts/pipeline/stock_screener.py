@@ -33,6 +33,12 @@ import akshare as ak
 from scripts.engine.scorer import batch_score, data_quality_blocks_auto_buy, get_recommendation
 from scripts.engine.composite import build_today_decision
 from scripts.mx.cli_tools import MXCommandError, dispatch_mx_command, list_mx_command_metadata, mx_command_groups
+from scripts.state import (
+    load_market_snapshot,
+    save_candidate_snapshot_history,
+    save_decision_snapshot_history,
+    save_market_snapshot_history,
+)
 from scripts.utils.obsidian import ObsidianVault
 from scripts.utils.cache import load_json_cache, save_json_cache
 from scripts.utils.config_loader import get_stocks, get_strategy
@@ -652,6 +658,7 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
             if not r.get("veto_triggered", False) and not data_quality_blocks_auto_buy(r)
         ]
         today_decision = build_today_decision(strategy_cfg)
+        history_group_id = f"screener:{today_str}:{datetime.now().strftime('%H%M%S')}"
         pool_suggestions, pool_meta = evaluate_pool_actions(
             scored,
             stocks_cfg,
@@ -666,8 +673,54 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
                 **pool_meta,
                 "pool": pool,
                 "universe": universe,
+                "pipeline": "stock_screener",
+                "history_group_id": history_group_id,
                 "source": source,
             })
+
+        history_meta = {
+            "snapshot_date": today_str,
+            "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "history_group_id": history_group_id,
+            "pipeline": "stock_screener",
+            "pool": pool,
+            "universe": universe,
+            "source": source,
+            "pool_snapshot_path": snapshot_path,
+            "pool_snapshot_summary": pool_meta.get("snapshot_summary", {}),
+            "candidate_count": len(candidates),
+            "scored_count": len(scored),
+            "actionable_count": len(actionable),
+            "used_cache": resolution_meta.get("used_cache", False),
+            "cache_path": resolution_meta.get("cache_path", ""),
+            "cache_hit_source": resolution_meta.get("cache_hit_source", ""),
+            "source_chain": resolution_meta.get("source_chain", []),
+        }
+        market_snapshot = load_market_snapshot()
+        save_market_snapshot_history(
+            market_snapshot,
+            pipeline="stock_screener",
+            history_group_id=history_group_id,
+            metadata=history_meta,
+        )
+        save_decision_snapshot_history(
+            today_decision,
+            snapshot_date=today_str,
+            pipeline="stock_screener",
+            history_group_id=history_group_id,
+            metadata=history_meta,
+        )
+        save_candidate_snapshot_history(
+            scored,
+            snapshot_date=today_str,
+            pipeline="stock_screener",
+            history_group_id=history_group_id,
+            pool=pool,
+            universe=universe,
+            source=source,
+            actionable_count=len(actionable),
+            metadata=history_meta,
+        )
 
         _logger.info(">> 写入筛选报告...")
         report_path = _write_screening_result(scored, pool_name, source)
@@ -714,6 +767,7 @@ def run(pool: str = "watch", universe: str = "tracked") -> list:
                 "cache_hit_source": resolution_meta.get("cache_hit_source", ""),
                 "source_chain": resolution_meta.get("source_chain", []),
                 "today_decision": today_decision,
+                "history_group_id": history_group_id,
                 "pool_suggestions": {
                     key: len(value)
                     for key, value in pool_suggestions.items()
