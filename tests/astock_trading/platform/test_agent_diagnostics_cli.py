@@ -109,6 +109,26 @@ def test_propose_plan_json_is_non_executing_via_bin_trade(tmp_path):
     assert "actions" in payload
 
 
+def test_notify_propose_plan_dry_run_json_via_bin_trade(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "notify", "propose-plan", "--dry-run", "--json"],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "dry_run"
+    assert payload["notification"]["target"] == "discord"
+    assert "交易计划" in payload["embed"]["title"]
+    assert payload["plan"]["execution_allowed"] is False
+
+
 def test_diagnose_strategy_json_reports_parameter_profile_need(tmp_path):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"

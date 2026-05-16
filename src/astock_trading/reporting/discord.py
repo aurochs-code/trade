@@ -457,6 +457,157 @@ def format_sentiment_embed(alerts: list[dict]) -> dict:
     )
 
 
+def format_propose_plan_embed(plan: dict) -> dict:
+    """交易计划摘要 → Discord embed dict。"""
+    diagnostics = plan.get("diagnostics", {}) or {}
+    inputs = diagnostics.get("inputs", {}) or {}
+    pool = inputs.get("candidate_pool", {}) or {}
+    data_sources = inputs.get("data_sources", {}) or {}
+    actions = plan.get("actions", []) or []
+    findings = diagnostics.get("findings", []) or []
+
+    execution_allowed = bool(plan.get("execution_allowed"))
+    execution_text = "允许自动执行" if execution_allowed else "禁止自动执行"
+    color = COLORS["profit_alert"] if execution_allowed else COLORS["info"]
+
+    fields = [
+        _field("执行状态", execution_text),
+        _field(
+            "健康状态",
+            f"{diagnostics.get('status', 'unknown')} / data={data_sources.get('status', 'unknown')}",
+        ),
+        _field(
+            "候选池",
+            "total={total} core={core} watch={watch}\nlatest={latest}".format(
+                total=pool.get("total", 0),
+                core=pool.get("core_count", 0),
+                watch=pool.get("watch_count", 0),
+                latest=pool.get("latest_scored_at", "-"),
+            ),
+            inline=False,
+        ),
+    ]
+
+    if findings:
+        fields.append(_field("阻断/发现", "\n".join(f"- {item}" for item in findings[:5]), inline=False))
+
+    if actions:
+        action_lines = [
+            f"- [{item.get('priority', '-')}] {item.get('type', '-')}：{item.get('reason', '')}"
+            for item in actions[:5]
+        ]
+        fields.append(_field("建议动作", "\n".join(action_lines), inline=False))
+    else:
+        fields.append(_field("建议动作", "暂无", inline=False))
+
+    required_missing = data_sources.get("required_missing", []) or []
+    optional_missing = data_sources.get("optional_missing", []) or []
+    if required_missing or optional_missing:
+        fields.append(_field(
+            "数据源缺口",
+            f"required={','.join(required_missing) or '-'}\noptional={','.join(optional_missing) or '-'}",
+            inline=False,
+        ))
+
+    return _embed(
+        title=f"交易计划 — {local_today_str()}",
+        color=color,
+        fields=fields,
+        footer="A-Stock Trading · propose_plan",
+    )
+
+
+def format_daily_inspection_embed(summary: dict) -> dict:
+    """每日巡检摘要 → Discord embed dict。"""
+    failed_commands = summary.get("failed_commands", []) or []
+    required_missing = summary.get("required_missing", []) or []
+    optional_missing = summary.get("optional_missing", []) or []
+    pool = summary.get("candidate_pool", {}) or {}
+    plan_actions = summary.get("plan_actions", []) or []
+
+    has_problem = (
+        bool(failed_commands)
+        or summary.get("health_status") == "failed"
+        or summary.get("diagnose_health_status") == "failed"
+        or bool(required_missing)
+    )
+    color = COLORS["stop_alert"] if has_problem else COLORS["info"]
+
+    fields = [
+        _field(
+            "系统状态",
+            "doctor={doctor}\nhealth={health}\ndiagnose={diagnose}".format(
+                doctor=summary.get("doctor_status", "unknown"),
+                health=summary.get("health_status", "unknown"),
+                diagnose=summary.get("diagnose_health_status", "unknown"),
+            ),
+        ),
+        _field(
+            "运行状态",
+            "failed_runs={failed}\nrunning={running}".format(
+                failed=summary.get("failed_runs_count", 0),
+                running=summary.get("running_runs_count", 0),
+            ),
+        ),
+        _field(
+            "数据源",
+            "status={status}\nrequired={required}\noptional={optional}".format(
+                status=summary.get("data_source_status", "unknown"),
+                required=",".join(required_missing) or "-",
+                optional=",".join(optional_missing) or "-",
+            ),
+            inline=False,
+        ),
+        _field(
+            "候选池",
+            "total={total} core={core} watch={watch}".format(
+                total=pool.get("total", pool.get("total_count", 0)),
+                core=pool.get("core_count", 0),
+                watch=pool.get("watch_count", 0),
+            ),
+        ),
+        _field("人工确认", f"待确认 {summary.get('pending_manual_trades', 0)}"),
+        _field(
+            "模拟盘",
+            f"持仓 {summary.get('paper_positions', 0)} / 资产 ¥{summary.get('paper_total_asset', 0):,.0f}",
+        ),
+    ]
+
+    if failed_commands:
+        fields.append(_field(
+            "命令失败",
+            "\n".join(f"- {item.get('name')} exit={item.get('returncode')}" for item in failed_commands[:5]),
+            inline=False,
+        ))
+
+    if plan_actions:
+        action_lines = [
+            f"- [{item.get('priority', '-')}] {item.get('type', '-')}"
+            for item in plan_actions[:5]
+        ]
+        fields.append(_field("交易计划", "\n".join(action_lines), inline=False))
+    else:
+        fields.append(_field("交易计划", "暂无动作", inline=False))
+
+    report_path = _short_report_path(str(summary.get("report_path", "")))
+    if report_path:
+        fields.append(_field("报告", report_path, inline=False))
+
+    return _embed(
+        title=f"每日巡检 — {summary.get('date', local_today_str())}",
+        color=color,
+        fields=fields,
+        footer="A-Stock Trading · daily_inspection",
+    )
+
+
+def _short_report_path(path: str) -> str:
+    marker = "trade-vault/"
+    if marker in path:
+        return path[path.index(marker):]
+    return path
+
+
 def format_sector_heatmap_embed(sectors: list[dict], title: str = "") -> dict:
     """行业热力图 → Discord embed dict。
 

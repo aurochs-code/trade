@@ -10,6 +10,7 @@ from astock_trading.platform.events import EventStore
 from astock_trading.reporting.discord import (
     format_evening_embed, format_morning_embed,
     format_scoring_embed, format_stop_alert_embed,
+    format_propose_plan_embed, format_daily_inspection_embed,
 )
 from astock_trading.reporting.obsidian import ObsidianProjector
 from astock_trading.reporting.projectors import ProjectionUpdater
@@ -58,6 +59,74 @@ def _seed(event_store, db):
                  "style": "momentum", "veto_triggered": False},
         metadata={"run_id": "run_1"},
     )
+
+
+def test_format_propose_plan_embed_summarizes_blocking_plan():
+    embed = format_propose_plan_embed({
+        "execution_allowed": False,
+        "diagnostics": {
+            "status": "warning",
+            "findings": ["candidate core pool is empty"],
+            "inputs": {
+                "candidate_pool": {
+                    "total": 1,
+                    "core_count": 0,
+                    "watch_count": 1,
+                    "latest_scored_at": "2026-05-16T00:00:00+00:00",
+                },
+                "data_sources": {
+                    "status": "warning",
+                    "required_missing": [],
+                    "optional_missing": ["core_pool"],
+                },
+            },
+        },
+        "actions": [
+            {
+                "type": "review_core_pool",
+                "priority": "high",
+                "reason": "auto_trade buy-side requires fresh core candidates",
+            }
+        ],
+    })
+
+    assert "交易计划" in embed["title"]
+    values = "\n".join(field["value"] for field in embed["fields"])
+    assert "禁止自动执行" in values
+    assert "core=0" in values
+    assert "review_core_pool" in values
+    assert "candidate core pool is empty" in values
+
+
+def test_format_daily_inspection_embed_summarizes_health_and_report_path():
+    embed = format_daily_inspection_embed({
+        "date": "2026-05-16",
+        "report_path": "/Users/hxh/Documents/a-stock-trading/trade-vault/02-巡检/2026-05-16.md",
+        "failed_commands": [{"name": "health", "returncode": 1}],
+        "doctor_status": "ok",
+        "health_status": "warning",
+        "diagnose_health_status": "warning",
+        "data_source_status": "warning",
+        "required_missing": [],
+        "optional_missing": ["core_pool"],
+        "candidate_pool": {"total": 1, "core_count": 0, "watch_count": 1},
+        "failed_runs_count": 0,
+        "running_runs_count": 0,
+        "pending_manual_trades": 2,
+        "paper_positions": 4,
+        "paper_total_asset": 205212.46,
+        "plan_execution_allowed": False,
+        "plan_actions": [{"type": "review_core_pool", "priority": "high"}],
+    })
+
+    assert "每日巡检" in embed["title"]
+    values = "\n".join(field["value"] for field in embed["fields"])
+    assert "doctor=ok" in values
+    assert "health=warning" in values
+    assert "health" in values
+    assert "core_pool" in values
+    assert "待确认 2" in values
+    assert "trade-vault/02-巡检/2026-05-16.md" in values
 
 
 class TestProjectionUpdater:
