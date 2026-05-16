@@ -48,22 +48,19 @@ class EventRepository:
     ) -> str:
         """
         追加一条事件。自动递增 stream_version。
-        使用 BEGIN IMMEDIATE 保证 version 查询和 INSERT 的原子性。
+        通过 event_streams 分配每个 stream 的 next_version，并在同一事务中写入事件。
+        SQLite 使用 BEGIN IMMEDIATE 串行化写入；MySQL 通过 event_streams 行锁保持一致性。
 
         Returns:
             event_id
         """
         metadata = metadata or {}
-        event_id = _new_id()
 
-        for attempt in range(3):
+        for attempt in range(5):
+            event_id = _new_id()
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                row = self._conn.execute(
-                    "SELECT MAX(stream_version) FROM event_log WHERE stream = ?",
-                    (stream,),
-                ).fetchone()
-                next_version = (row[0] or 0) + 1 if row else 1
+                next_version = self._next_stream_version(stream, stream_type)
 
                 self._conn.execute(
                     """INSERT INTO event_log
@@ -81,14 +78,60 @@ class EventRepository:
                         _now_iso(),
                     ),
                 )
+                self._conn.execute(
+                    "UPDATE event_streams SET next_version = ?, updated_at = ? WHERE stream = ?",
+                    (next_version + 1, _now_iso(), stream),
+                )
                 self._conn.execute("COMMIT")
                 break
             except Exception as exc:
                 self._conn.execute("ROLLBACK")
-                if attempt < 2 and _is_unique_conflict(exc):
+                if attempt < 4 and _is_unique_conflict(exc):
+                    self._repair_stream_version(stream)
                     continue
                 raise
         return event_id
+
+    def _next_stream_version(self, stream: str, stream_type: str) -> int:
+        row = self._select_stream_row(stream, for_update=True)
+        if not row:
+            next_version = self._legacy_next_stream_version(stream)
+            self._conn.execute(
+                """INSERT OR IGNORE INTO event_streams
+                   (stream, stream_type, next_version, updated_at)
+                   VALUES (?, ?, ?, ?)""",
+                (stream, stream_type, next_version, _now_iso()),
+            )
+            row = self._select_stream_row(stream, for_update=True)
+        if not row:
+            raise RuntimeError(f"Failed to allocate event stream version for {stream}")
+        return int(row["next_version"])
+
+    def _select_stream_row(self, stream: str, *, for_update: bool = False):
+        sql = "SELECT stream, stream_type, next_version FROM event_streams WHERE stream = ?"
+        if for_update and str(getattr(self._conn, "dialect", "")).startswith("mysql"):
+            sql += " FOR UPDATE"
+        return self._conn.execute(sql, (stream,)).fetchone()
+
+    def _legacy_next_stream_version(self, stream: str) -> int:
+        row = self._conn.execute(
+            "SELECT MAX(stream_version) FROM event_log WHERE stream = ?",
+            (stream,),
+        ).fetchone()
+        return (row[0] or 0) + 1 if row else 1
+
+    def _repair_stream_version(self, stream: str) -> None:
+        next_version = self._legacy_next_stream_version(stream)
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._conn.execute(
+                "UPDATE event_streams SET next_version = ?, updated_at = ? WHERE stream = ?",
+                (next_version, _now_iso(), stream),
+            )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
 
     def query(
         self,

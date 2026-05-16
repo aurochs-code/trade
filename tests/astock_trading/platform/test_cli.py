@@ -7,6 +7,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from typer.testing import CliRunner
+
 
 def _cli_env(tmp_path: Path) -> dict:
     env = os.environ.copy()
@@ -29,7 +31,7 @@ def test_doctor_json_via_bin_trade(tmp_path):
 
     payload = json.loads(result.stdout)
     assert payload["status"] == "ok"
-    assert payload["db"]["schema_version"] == 2
+    assert payload["db"]["schema_version"] == 3
     assert payload["config"]["version"].startswith("v")
     assert "installed" in payload["mcp"]
     assert payload["timezone"] == "Asia/Shanghai"
@@ -126,6 +128,17 @@ def test_health_json_via_bin_trade(tmp_path):
     assert "checks" in payload["data_sources"]
 
 
+def test_health_diagnostics_mask_database_password():
+    from astock_trading.platform.cli.health import _diagnostic_database_url
+
+    url = "mysql+pymysql://root:123456@127.0.0.1:33306/astock_trading?charset=utf8mb4"
+
+    masked = _diagnostic_database_url(url)
+
+    assert "123456" not in masked
+    assert masked == "mysql+pymysql://root:***@127.0.0.1:33306/astock_trading?charset=utf8mb4"
+
+
 def test_data_sources_status_help_via_bin_trade():
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
@@ -171,6 +184,50 @@ def test_run_pipeline_help_includes_data_source_health_override():
     )
 
     assert "--ignore-data-source-health" in result.stdout
+    assert "--json" in result.stdout
+    for pipeline in [
+        "morning",
+        "noon",
+        "intraday_monitor",
+        "evening",
+        "scoring",
+        "weekly",
+        "monthly",
+        "sentiment",
+        "auto_trade",
+    ]:
+        assert pipeline in result.stdout
+
+
+def test_run_pipeline_json_reports_skip_without_text(monkeypatch):
+    from astock_trading.platform.cli import app
+    import astock_trading.platform.cli.pipelines as pipelines_cli
+    import astock_trading.pipeline.context as pipeline_context
+
+    class FakeRunJournal:
+        def is_completed_today(self, pipeline_type):
+            return False
+
+    class FakeConn:
+        def close(self):
+            pass
+
+    class FakeContext:
+        run_journal = FakeRunJournal()
+        conn = FakeConn()
+        config_version = "test"
+
+    monkeypatch.setattr(pipelines_cli, "is_trading_day", lambda: False)
+    monkeypatch.setattr(pipeline_context, "build_context", lambda: FakeContext())
+
+    result = CliRunner().invoke(app, ["run-pipeline", "morning", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "skipped"
+    assert payload["pipeline"] == "morning"
+    assert payload["reason"] == "non_trading_day"
+    assert result.stderr == ""
 
 
 def test_db_maintenance_help_via_bin_trade():
@@ -207,7 +264,7 @@ def test_db_status_initializes_schema_version_via_bin_trade(tmp_path):
     )
 
     payload = json.loads(result.stdout)
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
 
 
 def test_removed_sqlite_maintenance_commands_via_bin_trade():
@@ -276,6 +333,216 @@ def test_machine_readable_runtime_commands_via_bin_trade(tmp_path):
             text=True,
         )
         assert json.loads(result.stdout) == []
+
+
+def test_screener_help_via_bin_trade():
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "screener", "--help"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "选股" in result.stdout
+    assert "run" in result.stdout
+    assert "score" in result.stdout
+    assert "candidates" in result.stdout
+    assert "promote" in result.stdout
+    assert "reject" in result.stdout
+
+
+def test_screener_candidates_json_via_bin_trade(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "screener", "candidates", "--json"],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == []
+
+
+def test_screener_promote_updates_candidates_via_bin_trade(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+    env = _cli_env(tmp_path)
+
+    promoted = subprocess.run(
+        [
+            str(cli),
+            "screener",
+            "promote",
+            "002138",
+            "--name",
+            "双环传动",
+            "--score",
+            "7.2",
+            "--to",
+            "core",
+            "--json",
+        ],
+        cwd=root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(promoted.stdout)
+    assert payload["status"] == "promoted"
+    assert payload["code"] == "002138"
+    assert payload["pool_tier"] == "core"
+
+    listed = subprocess.run(
+        [str(cli), "screener", "candidates", "--tier", "core", "--json"],
+        cwd=root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    candidates = json.loads(listed.stdout)
+    assert candidates == [
+        {
+            "code": "002138",
+            "pool_tier": "core",
+            "name": "双环传动",
+            "score": 7.2,
+            "added_at": candidates[0]["added_at"],
+            "last_scored_at": candidates[0]["last_scored_at"],
+            "streak_days": 0,
+            "note": "manual_promote",
+        }
+    ]
+
+
+def test_portfolio_status_json_via_bin_trade(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "status", "--json"],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload == {
+        "holding_count": 0,
+        "total_cost_cents": 0,
+        "total_market_cents": 0,
+        "unrealized_pnl_cents": 0,
+        "positions": [],
+    }
+
+
+def test_record_buy_json_via_bin_trade(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [
+            str(cli),
+            "record-buy",
+            "002138",
+            "100",
+            "15.00",
+            "--name",
+            "双环传动",
+            "--style",
+            "momentum",
+            "--reason",
+            "manual_test",
+            "--yes",
+            "--json",
+        ],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "recorded"
+    assert payload["side"] == "buy"
+    assert payload["code"] == "002138"
+    assert payload["shares"] == 100
+    assert payload["price_cents"] == 1500
+    assert payload["fee_cents"] == 0
+    assert payload["order"]["broker"] == "manual"
+    assert payload["audit"]["ok"] is True
+    assert payload["position_before"] is None
+    assert payload["position_after"]["code"] == "002138"
+
+
+def test_record_sell_json_via_bin_trade(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+    env = _cli_env(tmp_path)
+
+    subprocess.run(
+        [
+            str(cli),
+            "record-buy",
+            "002138",
+            "100",
+            "15.00",
+            "--name",
+            "双环传动",
+            "--style",
+            "momentum",
+            "--yes",
+            "--json",
+        ],
+        cwd=root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = subprocess.run(
+        [
+            str(cli),
+            "record-sell",
+            "002138",
+            "100",
+            "16.00",
+            "--reason",
+            "manual_exit",
+            "--yes",
+            "--json",
+        ],
+        cwd=root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "recorded"
+    assert payload["side"] == "sell"
+    assert payload["code"] == "002138"
+    assert payload["shares"] == 100
+    assert payload["price_cents"] == 1600
+    assert payload["order"]["broker"] == "manual"
+    assert payload["audit"]["ok"] is True
+    assert payload["position_before"]["code"] == "002138"
+    assert payload["position_after"] is None
 
 
 def test_sqlite_to_mysql_migration_dry_run_json_via_bin_trade():

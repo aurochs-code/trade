@@ -13,7 +13,21 @@ import pydash as _
 try:
     from .headers import build_headers
 except ImportError:
-    from headers import build_headers
+    try:
+        from headers import build_headers
+    except ImportError:
+        def build_headers(cookie: str = "") -> dict:
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0 Safari/537.36"
+                ),
+                "Referer": "http://www.iwencai.com/",
+            }
+            if cookie:
+                headers["Cookie"] = cookie
+            return headers
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +35,8 @@ logger = logging.getLogger(__name__)
 _COOKIE_PATH = os.path.join(os.path.dirname(__file__), "cookie.txt")
 
 def load_cookie() -> str:
+    if not os.path.exists(_COOKIE_PATH):
+        return ""
     with open(_COOKIE_PATH) as f:
         return f.read().strip()
 

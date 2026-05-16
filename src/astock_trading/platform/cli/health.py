@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+from sqlalchemy.engine import make_url
 
 from astock_trading.platform.cli.common import json_or_text, project_root
 from astock_trading.platform.config import ConfigRegistry
@@ -39,6 +40,14 @@ def _resolve_vault_path() -> Optional[Path]:
     if not path.is_absolute():
         path = paths_file.parent.parent / path
     return path
+
+
+def _diagnostic_database_url(value: object) -> str:
+    raw = str(value)
+    try:
+        return make_url(raw).render_as_string(hide_password=True)
+    except Exception:
+        return raw
 
 
 def _latest_run_status(conn, run_type: str) -> dict:
@@ -87,7 +96,7 @@ def register_health_commands(app: typer.Typer) -> None:
             result = {
                 "status": "ok",
                 "db": {
-                    "path": str(path),
+                    "path": _diagnostic_database_url(path),
                     "schema_version": version,
                     "events": event_count,
                     "runs": run_count,
@@ -165,7 +174,7 @@ def register_health_commands(app: typer.Typer) -> None:
                 if failed or active_running_rows or stale_running or data_source_health["status"] == "warning"
                 else "ok",
                 "db": {
-                    "path": str(path),
+                    "path": _diagnostic_database_url(path),
                     "schema_version": get_schema_version(conn),
                     "events": conn.execute("SELECT COUNT(*) FROM event_log").fetchone()[0],
                     "runs": conn.execute("SELECT COUNT(*) FROM run_log").fetchone()[0],

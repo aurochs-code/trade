@@ -38,12 +38,11 @@ class TestTradeLogger:
     def test_buy_writes_daily_log(self, env):
         env["svc"].execute_buy("002138", "双环传动", 100, 1500, "momentum", "run_1")
 
-        # 日志目录应该有文件
-        log_dir = env["vault"] / "02-运行" / "日志"
-        assert log_dir.exists()
-        logs = list(log_dir.glob("*.md"))
-        assert len(logs) >= 1
-        content = logs[0].read_text()
+        inspection = env["vault"] / "02-巡检"
+        assert inspection.exists()
+        reports = list(inspection.glob("*.md"))
+        assert len(reports) >= 1
+        content = reports[0].read_text()
         assert "买入" in content
 
     def test_buy_writes_artifact(self, env):

@@ -68,3 +68,20 @@ launchctl load ~/Library/LaunchAgents/com.astock_trading.trade.health.plist
 - 数据库达到百万级以上事件且查询明显变慢
 
 不需要 FastAPI 时，Agent 和人工操作统一走 `bin/trade` / `bin/trade mcp`。
+
+## MCP 本地配置与秘密管理
+
+MCP Server 的稳定入口是：
+
+```bash
+bin/trade mcp
+```
+
+本机 Agent 配置可参考 `config/mcp.example.json`，复制为工作区外部或本地未跟踪的 `.mcp.json` 后再填入真实环境变量。不要提交 `.mcp.json`、cookie、session、token、runtime cache、日志或数据库 dump。
+
+`config/mcp_server.yaml` 是本项目的 MCP 治理配置：
+
+- `read_only` / `analysis` tools 可自动批准，但不得下单。
+- `state_change` tools 会写入本地状态、行情缓存、运行记录或报告产物，必须确认。
+- `high_risk` tools 可能触发模拟盘买卖、撤单或自动交易，必须人工确认。
+- 未分类的新 tool 默认按需要确认处理，直到补齐治理分类。

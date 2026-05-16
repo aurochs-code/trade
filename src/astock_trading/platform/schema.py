@@ -35,6 +35,16 @@ event_log = Table(
     Index("idx_event_log_occurred", "occurred_at"),
 )
 
+event_streams = Table(
+    "event_streams",
+    metadata,
+    Column("stream", String(255), primary_key=True),
+    Column("stream_type", String(64), nullable=False),
+    Column("next_version", Integer, nullable=False),
+    Column("updated_at", String(64), nullable=False),
+    Index("idx_event_streams_type", "stream_type"),
+)
+
 config_versions = Table(
     "config_versions",
     metadata,

@@ -48,6 +48,76 @@ def test_stream_version_auto_increment(store: EventStore):
     ]
 
 
+def test_append_updates_event_stream_metadata(store: EventStore):
+    store.append("order:streamed", "order", "order.created", {"code": "001"})
+    store.append("order:streamed", "order", "order.filled", {"code": "001"})
+
+    row = store._conn.execute(
+        "SELECT stream, stream_type, next_version FROM event_streams WHERE stream = ?",
+        ("order:streamed",),
+    ).fetchone()
+
+    assert dict(row) == {
+        "stream": "order:streamed",
+        "stream_type": "order",
+        "next_version": 3,
+    }
+
+
+def test_append_recovers_event_stream_metadata_for_legacy_events(tmp_path):
+    db_path = tmp_path / "legacy-events.db"
+    init_db(db_path)
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            """INSERT INTO event_log
+               (event_id, stream, stream_type, stream_version, event_type,
+                payload_json, metadata_json, occurred_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("legacy_evt", "legacy:1", "legacy", 1, "legacy.created", "{}", "{}", "2026-01-01T00:00:00+00:00"),
+        )
+        store = EventStore(conn)
+
+        store.append("legacy:1", "legacy", "legacy.updated", {"ok": True})
+
+        events = store.get_stream("legacy:1")
+        assert [event["stream_version"] for event in events] == [1, 2]
+        row = conn.execute(
+            "SELECT next_version FROM event_streams WHERE stream = ?",
+            ("legacy:1",),
+        ).fetchone()
+        assert row["next_version"] == 3
+    finally:
+        conn.close()
+
+
+def test_append_repairs_stale_event_stream_metadata(tmp_path):
+    db_path = tmp_path / "stale-streams.db"
+    init_db(db_path)
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    try:
+        store = EventStore(conn)
+        store.append("stale:1", "stale", "stale.created", {"ok": True})
+        conn.execute(
+            "UPDATE event_streams SET next_version = 1 WHERE stream = ?",
+            ("stale:1",),
+        )
+
+        store.append("stale:1", "stale", "stale.updated", {"ok": True})
+
+        events = store.get_stream("stale:1")
+        assert [event["stream_version"] for event in events] == [1, 2]
+        row = conn.execute(
+            "SELECT next_version FROM event_streams WHERE stream = ?",
+            ("stale:1",),
+        ).fetchone()
+        assert row["next_version"] == 3
+    finally:
+        conn.close()
+
+
 def test_duplicate_stream_version_raises(store: EventStore):
     """Same stream + version should violate UNIQUE constraint."""
     store.append("s:1", "test", "a", {"x": 1})

@@ -1,0 +1,2 @@
+# Copy this file to cookie.txt locally when pywencai access requires a browser cookie.
+# Do not commit real cookie values.

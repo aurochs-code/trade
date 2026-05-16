@@ -7,29 +7,26 @@ reporting/obsidian.py — Obsidian vault 投影
   01-状态/池子/观察池.md           ← write_watch_pool()
   01-状态/池子/决策池.md           ← write_decision_pool()
   01-状态/账户/账户总览.md         ← write_account_overview()
-  02-运行/日志/{date}.md           ← write_daily_log()
-  02-运行/当日输出/{date}.md       ← write_daily_output_index()
-  02-运行/当日输出/评分_{date}.md  ← write_scoring_report()
-  02-运行/信号快照/{date}.md       ← write_signal_snapshot()
-  02-运行/模拟盘/模拟盘_{date}.md  ← write_paper_report()
-  02-运行/模拟盘/交易记录.md       ← append_paper_trade_log()
+  02-巡检/{date}.md                ← write_daily_log()/write_daily_output_index()
+  04-决策/候选池/最新评分.md        ← write_scoring_report()
+  03-分析/历史模拟盘交易记录.md      ← append_paper_trade_log()
   04-决策/今日决策.md              ← write_today_decision()
   04-决策/候选池/候选池总览.md     ← write_candidate_pool_overview()
-  04-决策/筛选结果/*.md            ← write_screening_result()
-  04-决策/筛选结果/池子调整建议_*.md ← write_pool_adjustment()
 
-所有写入都是从投影表/event_log 生成，可删可重建。
+trade-vault 只保留人读摘要；原始事实以 MySQL 为准。
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Optional
 
 from astock_trading.platform.events import EventStore
 from astock_trading.platform.time import iso_to_local, local_date_bounds_utc
 from astock_trading.platform.time import local_now_str, local_today_str
+from astock_trading.reporting.screening_result import render_screening_result
 
 _logger = logging.getLogger(__name__)
 
@@ -61,6 +58,70 @@ class ObsidianProjector:
 
     def _today(self) -> str:
         return local_today_str()
+
+    def _clean_section_body(self, body: str) -> str:
+        lines = body.strip().splitlines()
+        if lines and lines[0] == "---":
+            for idx in range(1, len(lines)):
+                if lines[idx] == "---":
+                    lines = lines[idx + 1:]
+                    break
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        if lines and lines[0].startswith("# "):
+            lines.pop(0)
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        return "\n".join(lines).strip()
+
+    def _daily_inspection_base(self, run_id: str | None = None) -> tuple[str, str]:
+        today = self._today()
+        now = self._now()
+        path = f"02-巡检/{today}.md"
+        header = "\n".join(
+            [
+                "---",
+                f"date: {today}",
+                f"updated_at: {now}",
+                "type: daily_inspection",
+                "tags: [巡检, 自动更新]",
+                "---",
+                "",
+                f"# 收盘巡检 - {today}",
+                "",
+                "## 结论",
+                "",
+                "- 待 Agent 收盘后补充综合结论。",
+            ]
+        )
+
+        existing = ""
+        if self._vault:
+            full = self._vault / path
+            if full.exists():
+                existing = full.read_text(encoding="utf-8").rstrip()
+        if not existing:
+            existing = header
+        return path, existing
+
+    def _append_daily_inspection(self, title: str, body: str, run_id: str | None = None) -> str:
+        path, existing = self._daily_inspection_base(run_id)
+        run_line = f"\n\nrun_id: `{run_id}`\n" if run_id else ""
+        content = f"{existing}\n\n## {title}\n{run_line}\n{self._clean_section_body(body)}\n"
+        self._write(path, content)
+        return content
+
+    def _upsert_daily_inspection(self, title: str, body: str, run_id: str | None = None) -> str:
+        path, existing = self._daily_inspection_base(run_id)
+        run_line = f"\n\nrun_id: `{run_id}`\n" if run_id else ""
+        section = f"## {title}\n{run_line}\n{self._clean_section_body(body)}\n"
+        pattern = re.compile(rf"\n## {re.escape(title)}\n.*?(?=\n## |\Z)", re.DOTALL)
+        if pattern.search(existing):
+            content = pattern.sub("\n" + section.rstrip(), existing).rstrip() + "\n"
+        else:
+            content = f"{existing}\n\n{section}"
+        self._write(path, content)
+        return content
 
     # ------------------------------------------------------------------
     # 01-状态/持仓/持仓概览.md
@@ -274,51 +335,21 @@ class ObsidianProjector:
         return content
 
     # ------------------------------------------------------------------
-    # 02-运行/日志/{date}.md
+    # 02-巡检/{date}.md
     # ------------------------------------------------------------------
 
     def write_daily_log(self, run_id: str, report: str) -> str:
-        """写入/追加今日日志。"""
-        today = self._today()
-        path = f"02-运行/日志/{today}.md"
-
-        # 如果文件已存在，追加内容
-        if self._vault:
-            full = self._vault / path
-            if full.exists():
-                existing = full.read_text(encoding="utf-8")
-                content = existing.rstrip() + "\n\n" + report.strip() + "\n"
-                self._write(path, content)
-                return content
-
-        # 新建
-        now = self._now()
-        lines = [
-            "---",
-            f"date: {today}",
-            f"updated_at: {now}",
-            f"run_id: {run_id}",
-            "type: journal",
-            "tags: [交易日志, 自动更新]",
-            "---",
-            "",
-            f"# {today} 交易日志",
-            "",
-            report,
-        ]
-        content = "\n".join(lines) + "\n"
-        self._write(path, content)
-        return content
+        """把运行日志追加进当天巡检报告。"""
+        return self._append_daily_inspection("运行日志", report, run_id)
 
     # ------------------------------------------------------------------
-    # 02-运行/当日输出/评分_{date}.md
+    # 04-决策/候选池/最新评分.md
     # ------------------------------------------------------------------
 
     def write_scoring_report(self, run_id: str, scores: list[dict]) -> str:
         """写入评分报告。"""
         today = self._today()
         now = self._now()
-        ts = local_now_str("%H%M%S")
 
         lines = [
             "---",
@@ -350,9 +381,7 @@ class ObsidianProjector:
             )
 
         content = "\n".join(lines) + "\n"
-        # 同时写到两个位置：当日输出 + 筛选结果
-        self._write(f"02-运行/当日输出/评分_{today}.md", content)
-        self._write(f"04-决策/筛选结果/核心池_评分报告_{today}_{ts}.md", content)
+        self._write("04-决策/候选池/最新评分.md", content)
         return content
 
     # ------------------------------------------------------------------
@@ -484,7 +513,7 @@ class ObsidianProjector:
         return content
 
     # ------------------------------------------------------------------
-    # 02-运行/信号快照/{date}.md
+    # 02-巡检/{date}.md
     # ------------------------------------------------------------------
 
     def write_signal_snapshot(
@@ -494,7 +523,7 @@ class ObsidianProjector:
         market_signal: str = "",
         decision: dict | None = None,
     ) -> str:
-        """从大盘信号 + 池子 + 决策生成信号快照。"""
+        """从大盘信号 + 池子 + 决策生成巡检中的信号摘要。"""
         today = self._today()
         now = self._now()
 
@@ -515,10 +544,10 @@ class ObsidianProjector:
             f"updated_at: {now}",
             "type: signal_snapshot",
             f"date: {today}",
-            "tags: [信号快照, 自动更新]",
+            "tags: [巡检, 信号, 自动更新]",
             "---",
             "",
-            f"# 信号快照 · {today}",
+            f"# 信号摘要 · {today}",
             "",
             "## 大盘信号",
             "",
@@ -573,15 +602,14 @@ class ObsidianProjector:
         ])
 
         content = "\n".join(lines) + "\n"
-        self._write(f"02-运行/信号快照/{today}.md", content)
-        return content
+        return self._upsert_daily_inspection("信号与候选池", content, run_id)
 
     # ------------------------------------------------------------------
-    # 02-运行/当日输出/{date}.md
+    # 02-巡检/{date}.md
     # ------------------------------------------------------------------
 
     def write_daily_output_index(self, run_id: str) -> str:
-        """从 run_log 聚合当日所有 pipeline 运行，生成当日输出索引。"""
+        """从 run_log 聚合当日所有 pipeline 运行，生成每日巡检报告。"""
         today = self._today()
         now = self._now()
 
@@ -609,12 +637,12 @@ class ObsidianProjector:
         lines = [
             "---",
             f"updated_at: {now}",
-            "type: daily_output_index",
+            "type: daily_inspection",
             f"date: {today}",
-            "tags: [当日输出, 自动更新]",
+            "tags: [巡检, 自动更新]",
             "---",
             "",
-            f"# 当日输出 · {today}",
+            f"# 收盘巡检 - {today}",
             "",
             f"共 {total_runs} 个运行记录，{len(latest)} 个 pipeline。",
             "",
@@ -635,18 +663,15 @@ class ObsidianProjector:
 
         lines.extend([
             "", "## 相关文件", "",
-            f"- 日志: [[{today}]]",
             "- 今日决策: [[今日决策]]",
             "- 账户总览: [[账户总览]]",
-            f"- 信号快照: [[{today}]]",
             "- 核心池: [[核心池]]",
             "", "---", "",
             f"> 自动生成于 {now}",
         ])
 
         content = "\n".join(lines) + "\n"
-        self._write(f"02-运行/当日输出/{today}.md", content)
-        return content
+        return self._upsert_daily_inspection("Pipeline 运行状态", content, run_id)
 
     # ------------------------------------------------------------------
     # 04-决策/候选池/候选池总览.md
@@ -750,7 +775,7 @@ class ObsidianProjector:
         return content
 
     # ------------------------------------------------------------------
-    # 04-决策/筛选结果/*.md — 筛选结果
+    # 04-决策/候选池/最新筛选.md — 筛选结果
     # ------------------------------------------------------------------
 
     def write_screening_result(
@@ -759,96 +784,30 @@ class ObsidianProjector:
         query: str,
         scores: list[dict],
         added_to_watch: list[dict] | None = None,
+        buy_threshold: float = 5.5,
+        watch_threshold: float = 5.0,
     ) -> str:
         """写入筛选结果（综合 + 市场扫描候选）。"""
         today = self._today()
         now = self._now()
-        ts = local_now_str("%Y%m%d_%H%M%S")
-        added_to_watch = added_to_watch or []
-
-        lines = [
-            "---",
-            f"date: {today}",
-            f"updated_at: {now}",
-            f"run_id: {run_id}",
-            "type: screening_result",
-            "tags: [筛选结果, 自动更新]",
-            "---",
-            "",
-            f"# 筛选结果 — {today}",
-            "",
-            f"筛选条件：{query}",
-            f"命中 {len(scores)} 只",
-            "",
-            "| # | 名称 | 代码 | 总分 | 技术 | 基本面 | 资金 | 舆情 | 风格 | 状态 |",
-            "|---|------|------|------|------|--------|------|------|------|------|",
-        ]
-
-        for i, s in enumerate(scores, 1):
-            total = float(s.get("total_score", s.get("total", 0)) or 0)
-            veto = s.get("veto_triggered", False)
-            if veto:
-                status = "🚫否决"
-            elif total >= 6.5:
-                status = "✅可买"
-            elif total >= 5:
-                status = "🟡观察"
-            else:
-                status = "❌规避"
-            lines.append(
-                f"| {i} | {s.get('name', '')} | {s.get('code', '')} "
-                f"| **{total:.1f}** "
-                f"| {float(s.get('technical_score', 0) or 0):.1f} "
-                f"| {float(s.get('fundamental_score', 0) or 0):.1f} "
-                f"| {float(s.get('flow_score', 0) or 0):.1f} "
-                f"| {float(s.get('sentiment_score', 0) or 0):.1f} "
-                f"| {s.get('style', '')} | {status} |"
-            )
-
-        if added_to_watch:
-            lines.extend(["", "## 新增观察池", ""])
-            for a in added_to_watch:
-                lines.append(f"- {a.get('name', '')}（{a.get('code', '')}）评分 {a.get('score', 0):.1f}")
-
-        lines.extend(["", "---", "", f"> 自动生成于 {now}"])
-
-        content = "\n".join(lines) + "\n"
-        # 写综合结果
-        self._write(f"04-决策/筛选结果/筛选结果_综合_{ts}.md", content)
-
-        # 高分候选单独写一份市场扫描候选
-        candidates = [s for s in scores
-                      if float(s.get("total_score", 0) or 0) >= 5
-                      and not s.get("veto_triggered")]
-        if candidates:
-            cand_lines = [
-                "---",
-                f"date: {today}",
-                f"updated_at: {now}",
-                "type: market_scan_candidate",
-                "tags: [市场扫描, 候选, 自动更新]",
-                "---",
-                "",
-                f"# 市场扫描候选 — {today}",
-                "",
-                "| # | 名称 | 代码 | 总分 | 风格 | 建议 |",
-                "|---|------|------|------|------|------|",
-            ]
-            for i, s in enumerate(candidates, 1):
-                total = float(s.get("total_score", 0) or 0)
-                suggestion = "可买入" if total >= 6.5 else "观察"
-                cand_lines.append(
-                    f"| {i} | {s.get('name', '')} | {s.get('code', '')} "
-                    f"| {total:.1f} | {s.get('style', '')} | {suggestion} |"
-                )
-            cand_lines.extend(["", "---", "", f"> 自动生成于 {now}"])
-            cand_content = "\n".join(cand_lines) + "\n"
-            self._write(f"04-决策/筛选结果/市场扫描候选_{ts}.md", cand_content)
+        content, candidate_content = render_screening_result(
+            today=today,
+            now=now,
+            run_id=run_id,
+            query=query,
+            scores=scores,
+            added_to_watch=added_to_watch,
+            buy_threshold=buy_threshold,
+            watch_threshold=watch_threshold,
+        )
+        self._write("04-决策/候选池/最新筛选.md", content)
+        if candidate_content:
+            self._write("04-决策/候选池/市场扫描候选.md", candidate_content)
 
         return content
 
     # ------------------------------------------------------------------
-    # 04-决策/筛选结果/池子调整建议_*.md
+    # 04-决策/候选池/池子调整建议.md
     # ------------------------------------------------------------------
 
     def write_pool_adjustment(
@@ -865,7 +824,6 @@ class ObsidianProjector:
 
         today = self._today()
         now = self._now()
-        ts = local_now_str("%Y%m%d_%H%M%S")
 
         lines = [
             "---",
@@ -903,11 +861,11 @@ class ObsidianProjector:
         lines.extend(["---", "", f"> 自动生成于 {now}"])
 
         content = "\n".join(lines) + "\n"
-        self._write(f"04-决策/筛选结果/池子调整建议_{ts}.md", content)
+        self._write("04-决策/候选池/池子调整建议.md", content)
         return content
 
     # ------------------------------------------------------------------
-    # 02-运行/模拟盘/模拟盘_{date}.md — 模拟盘日报
+    # 02-巡检/{date}.md — 模拟盘摘要
     # ------------------------------------------------------------------
 
     def write_paper_report(
@@ -931,7 +889,6 @@ class ObsidianProjector:
         """
         today = self._today()
         now = self._now()
-        ts = local_now_str("%Y%m%d")
         market_indices = market_indices or {}
 
         total_asset = balance.get("total_asset", 0)
@@ -1059,18 +1016,17 @@ class ObsidianProjector:
         lines.extend(["---", "", f"> 本报告由模拟盘自动交易引擎自动生成", ""])
 
         content = "\n".join(lines) + "\n"
-        self._write(f"02-运行/模拟盘/模拟盘_{ts}.md", content)
-        return content
+        return self._upsert_daily_inspection("模拟盘", content, run_id)
 
     # ------------------------------------------------------------------
-    # 02-运行/模拟盘/交易记录.md — 追加交易记录
+    # 03-分析/历史模拟盘交易记录.md — 追加交易记录
     # ------------------------------------------------------------------
 
     def append_paper_trade_log(
         self,
         trades: list[dict],
     ) -> str | None:
-        """追加模拟盘交易记录到交易记录.md。
+        """追加模拟盘交易记录到历史留档。
 
         Args:
             trades: list of {"time", "side", "name", "code", "shares", "price", "amount", "reason"}
@@ -1078,7 +1034,7 @@ class ObsidianProjector:
         if not trades or not self._vault:
             return None
 
-        path = "02-运行/模拟盘/交易记录.md"
+        path = "03-分析/历史模拟盘交易记录.md"
         full = self._vault / path
 
         # 如果文件不存在，创建表头

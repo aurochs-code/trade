@@ -61,15 +61,19 @@ from astock_trading.market.store import MarketStore
 from astock_trading.reporting.projectors import ProjectionUpdater
 from astock_trading.reporting.reports import ReportGenerator
 from astock_trading.reporting.obsidian import ObsidianProjector
-from astock_trading.risk.service import RiskService
 from astock_trading.risk.sizing import calc_position_size
-from astock_trading.platform.pipeline_policy import should_skip_pipeline
+from astock_trading.platform.mcp_tools.agent import (
+    diagnose_health_payload,
+    explain_run_payload,
+    propose_plan_payload,
+)
+from astock_trading.platform.mcp_tools.pipeline import build_pipeline_context, run_pipeline_payload
 from astock_trading.strategy.models import ScoringWeights, MarketSignal, MarketState
 from astock_trading.strategy.scorer import Scorer
 from astock_trading.strategy.decider import Decider
 from astock_trading.strategy.service import StrategyService
 from astock_trading.strategy.timer import compute_market_signal
-from astock_trading.platform.time import is_trading_day, local_now, local_now_str, local_today, local_today_str
+from astock_trading.platform.time import is_trading_day, local_now_str, local_today
 
 _logger = logging.getLogger(__name__)
 
@@ -168,7 +172,7 @@ def _init():
     thresholds = cfg.get("scoring", {}).get("thresholds", {})
     pos_cfg = cfg.get("risk", {}).get("position", {})
     decider = Decider(
-        buy_threshold=thresholds.get("buy", 6.5),
+        buy_threshold=thresholds.get("buy", 5.5),
         watch_threshold=thresholds.get("watch", 5.0),
         reject_threshold=thresholds.get("reject", 4.0),
         single_max_pct=pos_cfg.get("single_max", 0.20),
@@ -386,8 +390,29 @@ def trade_trade_events(days: int = 7) -> str:
 
 @mcp.tool()
 @_safe
+def trade_diagnose_health() -> str:
+    """只读诊断运行健康、数据源和候选池状态。"""
+    return json.dumps(diagnose_health_payload(_conn), ensure_ascii=False, default=str)
+
+
+@mcp.tool()
+@_safe
+def trade_explain_run(run_id: str) -> str:
+    """只读解释单次 pipeline run 的状态、事件和失败原因。"""
+    return json.dumps(explain_run_payload(_conn, run_id), ensure_ascii=False, default=str)
+
+
+@mcp.tool()
+@_safe
+def trade_propose_plan() -> str:
+    """生成不执行交易的 Agent 交易计划。"""
+    return json.dumps(propose_plan_payload(_conn), ensure_ascii=False, default=str)
+
+
+@mcp.tool()
+@_safe
 def trade_screener(query: str = "") -> str:
-    """选股筛选 → 批量评分 → 评分≥6.5自动加入观察池。"""
+    """选股筛选 → 批量评分 → 达到配置阈值自动加入观察池。"""
     adapter = MXScreenerAdapter()
     cfg = _config_snapshot.data.get("strategy", {}) if _config_snapshot else {}
     q = query.strip() or cfg.get("screening", {}).get("mx_query", "")
@@ -416,8 +441,11 @@ def trade_screener(query: str = "") -> str:
         projector = ProjectionUpdater(_event_store, _conn)
         projector.sync_market_state(index_data)
 
-    events = _event_store.query(event_type="score.calculated")
-    run_scores = [e["payload"] for e in events if e.get("metadata", {}).get("run_id") == run_id]
+    events = _event_store.query(
+        event_type="score.calculated",
+        metadata_filter={"run_id": run_id},
+    )
+    run_scores = [e["payload"] for e in events]
     run_scores.sort(key=lambda x: x.get("total_score", 0), reverse=True)
 
     # 已在池中的 codes
@@ -425,25 +453,41 @@ def trade_screener(query: str = "") -> str:
         "SELECT code FROM projection_candidate_pool"
     ).fetchall()}
 
-    # 评分≥6.5 且不在池中 → 加入观察池
+    threshold = float(
+        cfg.get("pool_management", {}).get("promote_min_score")
+        or cfg.get("scoring", {}).get("thresholds", {}).get("buy")
+        or 5.5
+    )
+
+    # 达到配置阈值且不在池中 → 加入观察池
     projector = ProjectionUpdater(_event_store, _conn)
     added = []
     for s in run_scores:
         code = s.get("code", "")
         total = s.get("total_score", 0)
-        if total >= 6.5 and code and code not in existing and not s.get("veto_triggered"):
-            projector.sync_candidate_pool([{
+        if total >= threshold and code and code not in existing and not s.get("veto_triggered"):
+            entry = {
                 "code": code, "name": s.get("name", ""),
                 "pool_tier": "watch", "score": total,
-            }])
+                "note": "mcp_screener_auto_watch",
+            }
+            projector.sync_candidate_pool([entry])
+            _event_store.append(
+                stream=f"candidate:{code}",
+                stream_type="candidate",
+                event_type="candidate.added",
+                payload=entry,
+                metadata={"source": "mcp.trade_screener", "run_id": run_id},
+            )
             added.append({"code": code, "name": s.get("name", ""), "score": total})
+            existing.add(code)
 
     # 写 Obsidian 筛选结果
     obsidian = ObsidianProjector(_event_store, _conn, _resolve_vault())
-    obsidian.write_screening_result(run_id, q, run_scores, added)
+    obsidian.write_screening_result(run_id, q, run_scores, added, buy_threshold=threshold)
 
     return json.dumps({
-        "screened": len(results), "scored": run_scores, "added_to_watch": added,
+        "screened": len(results), "threshold": threshold, "scored": run_scores, "added_to_watch": added,
     }, ensure_ascii=False, default=str)
 
 
@@ -883,64 +927,19 @@ def trade_backtest(
 @_safe
 def trade_run_pipeline(pipeline_type: str) -> str:
     """运行指定 pipeline（完整流程，带幂等检查）。"""
-    skip_reason = should_skip_pipeline(
-        pipeline_type,
-        is_trading_day=is_trading_day(),
-        is_completed_today=_run_journal.is_completed_today(pipeline_type),
+    ctx = build_pipeline_context(
+        conn=_conn,
+        event_store=_event_store,
+        run_journal=_run_journal,
+        config_snapshot=_config_snapshot,
+        market_svc=_market_svc,
+        strategy_svc=_strategy_svc,
+        exec_svc=_exec_svc,
+        reporter=_report_gen,
+        vault_path=_resolve_vault(),
     )
-    if skip_reason == "non_trading_day":
-        return json.dumps(
-            {"status": "skipped", "reason": f"今日（{local_today_str()}）非交易日，{pipeline_type} 跳过"},
-            ensure_ascii=False,
-        )
-    if skip_reason == "completed_today":
-        return json.dumps({"status": "skipped", "reason": f"{pipeline_type} 今日已完成"}, ensure_ascii=False)
-
-    config_version = _config_snapshot.version if _config_snapshot else "unknown"
-    run_id = _run_journal.start_run(pipeline_type, config_version)
-
-    try:
-        # 构建 pipeline context（复用已初始化的 services）
-        from astock_trading.pipeline.context import PipelineContext
-        ctx = PipelineContext(
-            conn=_conn, event_store=_event_store, run_journal=_run_journal,
-            config_snapshot=_config_snapshot, market_svc=_market_svc,
-            strategy_svc=_strategy_svc, risk_svc=RiskService(_event_store),
-            exec_svc=_exec_svc, projector=ProjectionUpdater(_event_store, _conn),
-            reporter=_report_gen,
-            obsidian=ObsidianProjector(_event_store, _conn, _resolve_vault()),
-        )
-
-        if pipeline_type == "morning":
-            from astock_trading.pipeline.morning import run
-        elif pipeline_type == "noon":
-            from astock_trading.pipeline.noon import run
-        elif pipeline_type == "intraday_monitor":
-            from astock_trading.pipeline.intraday_monitor import run
-        elif pipeline_type == "scoring":
-            from astock_trading.pipeline.scoring import run
-        elif pipeline_type == "evening":
-            from astock_trading.pipeline.evening import run
-        elif pipeline_type == "weekly":
-            from astock_trading.pipeline.weekly import run
-        elif pipeline_type == "monthly":
-            from astock_trading.pipeline.weekly import _generate_monthly_review
-            _generate_monthly_review(ctx, run_id, local_now())
-            _run_journal.complete_run(run_id, artifacts={"result": "ok"})
-            return json.dumps({"status": "completed", "run_id": run_id, "pipeline": "monthly"}, ensure_ascii=False)
-        elif pipeline_type == "sentiment":
-            from astock_trading.pipeline.sentiment import run
-        else:
-            _run_journal.fail_run(run_id, f"Unknown pipeline: {pipeline_type}")
-            return json.dumps({"error": f"Unknown pipeline: {pipeline_type}"}, ensure_ascii=False)
-
-        result = run(ctx, run_id)
-        _run_journal.complete_run(run_id, artifacts={"result": "ok"})
-        return json.dumps({"status": "completed", "run_id": run_id, "pipeline": pipeline_type, **{k: v for k, v in result.items() if k != "discord_embed"}}, ensure_ascii=False, default=str)
-
-    except Exception as e:
-        _run_journal.fail_run(run_id, str(e))
-        return json.dumps({"status": "failed", "run_id": run_id, "error": str(e)}, ensure_ascii=False)
+    outcome = run_pipeline_payload(ctx, pipeline_type, is_trading_day=is_trading_day())
+    return json.dumps(outcome, ensure_ascii=False, default=str)
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@
 ## 架构图
 
 ```
-CLI (typer) / MCP Server (FastMCP stdio)
+CLI (typer) / MCP Server (FastMCP stdio via bin/trade mcp)
          │
          ▼
 ┌────────────────────────────────────────────────────────┐
@@ -80,7 +80,7 @@ src/astock_trading/
 │   ├── config.py          # ConfigRegistry (版本化 freeze)
 │   ├── runs.py            # RunJournal (幂等 lifecycle)
 │   ├── cli/               # typer CLI command modules
-│   └── mcp_server.py      # FastMCP Server (13 tools)
+│   └── mcp_server.py      # FastMCP Server tools
 ├── market/
 │   ├── models.py          # StockQuote, TechnicalIndicators, StockSnapshot, ...
 │   ├── adapters.py        # Protocol + AkShare/MX adapters
@@ -119,23 +119,18 @@ tests/astock_trading/
 └── reporting/             # Projectors, Reports, Discord, Obsidian
 ```
 
-## MCP Tools (13 个)
+## MCP Tools
 
-| Tool | 说明 |
+稳定入口是 `bin/trade mcp`。不要直接运行 `src/astock_trading/platform/mcp_server.py` 或其他内部模块。
+
+MCP 工具按治理风险分类，具体清单和审批策略由 `config/mcp_server.yaml` 维护：
+
+| 分类 | 说明 |
 |------|------|
-| trade_market_signal | 大盘择时信号 |
-| trade_score_stock | 单股四维评分 |
-| trade_score_batch | 批量评分 |
-| trade_portfolio | 当前持仓 |
-| trade_pool_status | 核心池/观察池 |
-| trade_check_risk | 单票风控 |
-| trade_check_portfolio_risk | 组合风控 |
-| trade_calc_position | 仓位计算 |
-| trade_screener | 选股筛选 |
-| trade_score_history | 历史评分 |
-| trade_trade_events | 交易记录 |
-| trade_run_pipeline | 运行 pipeline |
-| trade_backtest | 策略回测 |
+| read_only | 只读取本地投影、运行状态、交易记录或模拟盘状态 |
+| analysis | 执行评分、风控、仓位、选股或外部市场信息分析，不下单 |
+| state_change | 写入本地状态、行情缓存、运行记录、watchlist、回测或报告产物 |
+| high_risk | 自动交易、模拟盘买入/卖出/撤单等可能改变账户状态的操作 |
 
 ## 设计约束
 

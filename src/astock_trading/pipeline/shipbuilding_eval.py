@@ -159,9 +159,11 @@ async def run_shipbuilding_scoring():
 
     # 3. 初始化 PipelineContext（用于获取 Scorer）
     _logger.info("[step3] 初始化评分器...")
+    buy_threshold = 5.5
     try:
         ctx = build_context()
         scorer = ctx.strategy_svc._scorer
+        buy_threshold = float(ctx.cfg.get("scoring", {}).get("thresholds", {}).get("buy", 5.5))
         _logger.info(f"[step3] 评分器就绪，权重: tech={scorer.weights.technical} "
                      f"fund={scorer.weights.fundamental} flow={scorer.weights.flow} "
                      f"sent={scorer.weights.sentiment}")
@@ -195,12 +197,12 @@ async def run_shipbuilding_scoring():
     # 汇总统计
     totals = [r.total for r in results]
     avg = sum(totals) / len(totals) if totals else 0
-    passed = sum(1 for r in results if r.total >= 6.5)
+    passed = sum(1 for r in results if r.total >= buy_threshold)
     vetoed = sum(1 for r in results if r.veto_triggered)
 
     print("-" * 80)
     print(f"📊 汇总: 共 {len(results)} 只 | 平均分 {avg:.1f} | "
-          f"达标(≥6.5) {passed} 只 | 否决 {vetoed} 只")
+          f"达标(≥{buy_threshold:.1f}) {passed} 只 | 否决 {vetoed} 只")
 
     # 入场信号股票
     entry_signals = [r for r in results if r.entry_signal]
@@ -210,15 +212,3 @@ async def run_shipbuilding_scoring():
             print(f"   {r.name}({r.code}) 评分:{r.total:.1f}")
 
     return results
-
-
-def main():
-    results = asyncio.run(run_shipbuilding_scoring())
-    if results:
-        _logger.info(f"评分完成，共 {len(results)} 只股票")
-    else:
-        _logger.error("评分失败或无有效数据")
-
-
-if __name__ == "__main__":
-    main()

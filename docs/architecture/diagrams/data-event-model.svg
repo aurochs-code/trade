@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1540" height="840" viewBox="0 0 1540 840" role="img" aria-labelledby="title desc">
+  <title id="title">Data and event model</title>
+  <desc id="desc">Data and event model showing append-only event log, config versions, run log, market observations and projections rebuilt from events.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10z" fill="#334155"/></marker>
+    <style>
+      .bg{fill:#fbfdff}.fact{fill:#f5f3ff;stroke:#a78bfa;stroke-width:2}.svc{fill:#fff7ed;stroke:#fb923c;stroke-width:2}.read{fill:#ecfdf5;stroke:#34d399;stroke-width:2}.cfg{fill:#eff6ff;stroke:#60a5fa;stroke-width:2}.warn{fill:#fef2f2;stroke:#f87171;stroke-width:2}.h{font:700 26px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#0f172a}.t{font:700 17px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#0f172a}.s{font:400 13px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#475569}.m{font:600 13px ui-monospace,SFMono-Regular,Menlo,monospace;fill:#334155}.line{fill:none;stroke:#334155;stroke-width:2.2;marker-end:url(#arrow)}.dash{fill:none;stroke:#64748b;stroke-width:2;stroke-dasharray:7 6;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect class="bg" width="1540" height="840"/>
+  <text class="h" x="52" y="56">核心流程 5：数据模型与事件内核</text>
+  <text class="s" x="54" y="84">系统采用“事件事实 + 可重建投影”的结构；配置与运行记录提供审计上下文。</text>
+
+  <rect class="svc" x="70" y="160" rx="14" width="320" height="190"/>
+  <text class="t" x="102" y="196">写事件的业务服务</text>
+  <text class="s" x="104" y="228">StrategyService：score / decision</text>
+  <text class="s" x="104" y="254">RiskService：risk.*</text>
+  <text class="s" x="104" y="280">ExecutionService：order / position</text>
+  <text class="s" x="104" y="306">auto_trade：paper_trade.*</text>
+
+  <rect class="fact" x="470" y="126" rx="16" width="400" height="260"/>
+  <text class="t" x="502" y="164">event_log：事实源</text>
+  <text class="m" x="504" y="200">event_id PK</text>
+  <text class="m" x="504" y="226">stream + stream_version UNIQUE</text>
+  <text class="m" x="504" y="252">stream_type / event_type</text>
+  <text class="m" x="504" y="278">payload_json / metadata_json</text>
+  <text class="m" x="504" y="304">occurred_at UTC ISO</text>
+  <text class="s" x="504" y="340">append-only；同一 stream 自动递增版本</text>
+
+  <rect class="cfg" x="950" y="126" rx="14" width="250" height="120"/>
+  <text class="t" x="982" y="162">config_versions</text>
+  <text class="s" x="984" y="194">配置合并、校验、hash</text>
+  <text class="s" x="984" y="220">每个 run 使用 frozen snapshot</text>
+
+  <rect class="cfg" x="950" y="288" rx="14" width="250" height="120"/>
+  <text class="t" x="982" y="324">run_log</text>
+  <text class="s" x="984" y="356">run_id / run_type / scope</text>
+  <text class="s" x="984" y="382">status / artifacts / error</text>
+
+  <rect class="cfg" x="1265" y="206" rx="14" width="210" height="120"/>
+  <text class="t" x="1297" y="242">market 数据</text>
+  <text class="m" x="1299" y="274">market_observations</text>
+  <text class="m" x="1299" y="300">market_bars</text>
+
+  <rect class="read" x="240" y="570" rx="14" width="280" height="160"/>
+  <text class="t" x="272" y="606">ProjectionUpdater</text>
+  <text class="s" x="274" y="638">从 event_log 重建/同步</text>
+  <text class="s" x="274" y="664">positions / orders / balances</text>
+  <text class="s" x="274" y="690">candidate_pool / market_state</text>
+
+  <rect class="read" x="610" y="536" rx="14" width="330" height="226"/>
+  <text class="t" x="642" y="572">projection_*：查询状态</text>
+  <text class="m" x="644" y="606">projection_positions</text>
+  <text class="m" x="644" y="632">projection_orders</text>
+  <text class="m" x="644" y="658">projection_balances</text>
+  <text class="m" x="644" y="684">projection_candidate_pool</text>
+  <text class="m" x="644" y="710">projection_market_state</text>
+  <text class="s" x="644" y="738">允许删除后从事件重建</text>
+
+  <rect class="read" x="1030" y="570" rx="14" width="300" height="160"/>
+  <text class="t" x="1062" y="606">读模型消费者</text>
+  <text class="s" x="1064" y="638">CLI status / candidates / health</text>
+  <text class="s" x="1064" y="664">ReportGenerator</text>
+  <text class="s" x="1064" y="690">ObsidianProjector / Discord</text>
+
+  <rect class="warn" x="68" y="430" rx="12" width="320" height="104"/>
+  <text class="t" x="100" y="466">存储约束</text>
+  <text class="s" x="102" y="498">金额统一 *_cents 整数；JSON 存 *_json</text>
+  <text class="s" x="102" y="522">运行态 MySQL；SQLite 只用于测试/历史迁移</text>
+
+  <path class="line" d="M390 255 H470"/>
+  <path class="line" d="M870 206 H950"/>
+  <path class="line" d="M870 304 C910 304 912 348 950 348"/>
+  <path class="line" d="M1200 266 H1265"/>
+  <path class="line" d="M670 386 C640 485 420 500 380 570"/>
+  <path class="line" d="M520 650 H610"/>
+  <path class="line" d="M940 650 H1030"/>
+  <path class="dash" d="M1075 246 V288"/>
+  <path class="dash" d="M1370 326 C1320 480 1050 500 880 536"/>
+</svg>

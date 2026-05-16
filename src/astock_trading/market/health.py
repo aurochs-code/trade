@@ -32,6 +32,8 @@ DEFAULT_EXPECTATIONS = (
     DataSourceExpectation("basic_info", ("basic_info",), 168, False),
 )
 
+DEFAULT_CANDIDATE_POOL_MAX_AGE_HOURS = 24
+
 
 def _parse_dt(value: str) -> datetime:
     dt = datetime.fromisoformat(value)
@@ -74,11 +76,57 @@ def _latest_for_kinds(conn, kinds: tuple[str, ...]) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def _candidate_pool_health(
+    conn,
+    *,
+    now: datetime,
+    max_age_hours: int,
+) -> dict[str, dict]:
+    row = conn.execute(
+        """SELECT
+               COUNT(*) AS total_count,
+               SUM(CASE WHEN pool_tier = 'core' THEN 1 ELSE 0 END) AS core_count,
+               MAX(COALESCE(NULLIF(last_scored_at, ''), added_at)) AS latest_scored_at
+           FROM projection_candidate_pool"""
+    ).fetchone()
+    total_count = int(row["total_count"] or 0)
+    core_count = int(row["core_count"] or 0)
+    latest_scored_at = row["latest_scored_at"]
+
+    if latest_scored_at:
+        observed = _parse_dt(latest_scored_at)
+        age_hours = (now - observed).total_seconds() / 3600
+        freshness_status = "healthy" if age_hours <= max_age_hours else "degraded"
+        rounded_age = round(age_hours, 2)
+    else:
+        freshness_status = "down"
+        rounded_age = None
+
+    return {
+        "candidate_pool_freshness": {
+            "status": freshness_status,
+            "required": False,
+            "latest_scored_at": latest_scored_at,
+            "age_hours": rounded_age,
+            "max_age_hours": max_age_hours,
+            "total_count": total_count,
+            "core_count": core_count,
+        },
+        "core_pool": {
+            "status": "healthy" if core_count > 0 else "empty",
+            "required": False,
+            "total_count": total_count,
+            "core_count": core_count,
+        },
+    }
+
+
 def evaluate_data_source_health(
     conn,
     *,
     now: Optional[datetime] = None,
     max_age_hours: Optional[int] = None,
+    candidate_pool_max_age_hours: Optional[int] = None,
     expectations: tuple[DataSourceExpectation, ...] = DEFAULT_EXPECTATIONS,
 ) -> dict:
     """汇总数据源健康状态。
@@ -134,6 +182,20 @@ def evaluate_data_source_health(
                 required_missing.append(expected.name)
             else:
                 optional_missing.append(expected.name)
+
+    pool_checks = _candidate_pool_health(
+        conn,
+        now=now,
+        max_age_hours=(
+            candidate_pool_max_age_hours
+            or max_age_hours
+            or DEFAULT_CANDIDATE_POOL_MAX_AGE_HOURS
+        ),
+    )
+    checks.update(pool_checks)
+    for name, item in pool_checks.items():
+        if item["status"] != "healthy":
+            optional_missing.append(name)
 
     status = "failed" if required_missing else "warning" if optional_missing else "ok"
     return {

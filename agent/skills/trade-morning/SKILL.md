@@ -34,4 +34,4 @@
 
 - 大盘 RED/CLEAR 时，明确提示"禁止新开仓"
 - 持仓有止损预警时，突出显示并建议操作
-- 核心池评分 ≥7 且大盘 GREEN 时，标记为"可买入"
+- 核心池评分达到 `config/strategy.yaml` 的 `scoring.thresholds.buy`（当前 5.5）且大盘 GREEN 时，标记为"可买入"

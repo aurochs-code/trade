@@ -1,0 +1,138 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1040" viewBox="0 0 1600 1040" role="img" aria-labelledby="title desc">
+  <title id="title">A-Stock Trading overall architecture</title>
+  <desc id="desc">Overall architecture diagram for CLI, MCP, platform kernel, domain services, database, external providers, Obsidian and Discord outputs.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <style>
+      .bg { fill: #f8fafc; }
+      .band { fill: #eef6ff; stroke: #93c5fd; stroke-width: 2; }
+      .kernel { fill: #ecfdf5; stroke: #34d399; stroke-width: 2; }
+      .service { fill: #fff7ed; stroke: #fb923c; stroke-width: 2; }
+      .store { fill: #f5f3ff; stroke: #a78bfa; stroke-width: 2; }
+      .external { fill: #f1f5f9; stroke: #94a3b8; stroke-width: 2; }
+      .warn { fill: #fef2f2; stroke: #f87171; stroke-width: 2; }
+      .title { font: 700 30px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #0f172a; }
+      .h { font: 700 19px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #0f172a; }
+      .t { font: 500 15px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #1e293b; }
+      .s { font: 400 13px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #475569; }
+      .mono { font: 600 14px ui-monospace, SFMono-Regular, Menlo, monospace; fill: #334155; }
+      .line { fill: none; stroke: #334155; stroke-width: 2.2; marker-end: url(#arrow); }
+      .dash { fill: none; stroke: #64748b; stroke-width: 2; stroke-dasharray: 7 6; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="1040"/>
+  <text class="title" x="54" y="60">A-Stock Trading 项目整体架构</text>
+  <text class="s" x="56" y="88">运行入口固定为 bin/trade 与 bin/trade mcp；运行态 DB 依赖 ASTOCK_DATABASE_URL 指向 MySQL。</text>
+
+  <rect class="band" x="54" y="130" rx="14" width="310" height="190"/>
+  <text class="h" x="82" y="166">入口层</text>
+  <text class="mono" x="86" y="202">bin/trade ...</text>
+  <text class="s" x="88" y="226">Typer CLI：pipeline、status、screener、db、events</text>
+  <text class="mono" x="86" y="262">bin/trade mcp</text>
+  <text class="s" x="88" y="286">FastMCP stdio tools：评分、风控、模拟盘、数据查询</text>
+
+  <rect class="external" x="54" y="372" rx="14" width="310" height="220"/>
+  <text class="h" x="82" y="408">调度与操作者</text>
+  <text class="t" x="86" y="444">launchd / crontab</text>
+  <text class="s" x="88" y="468">盘前、午盘、盘中监控、收盘、周报</text>
+  <text class="t" x="86" y="506">Agent / 人工录入</text>
+  <text class="s" x="88" y="530">record-buy / record-sell / manual-trades</text>
+  <text class="t" x="86" y="568">MCP Client</text>
+
+  <rect class="kernel" x="445" y="120" rx="16" width="470" height="250"/>
+  <text class="h" x="475" y="158">platform：运行内核</text>
+  <text class="t" x="478" y="196">ConfigRegistry</text>
+  <text class="s" x="650" y="196">冻结 config_version，run 内不可变</text>
+  <text class="t" x="478" y="232">RunJournal</text>
+  <text class="s" x="650" y="232">run_id、幂等、completed/failed</text>
+  <text class="t" x="478" y="268">EventStore</text>
+  <text class="s" x="650" y="268">append-only event_log，stream version</text>
+  <text class="t" x="478" y="304">Database / SQLAlchemyCompatConnection</text>
+  <text class="s" x="650" y="330">MySQL 运行态，SQLite 仅测试/迁移</text>
+
+  <rect class="service" x="438" y="440" rx="14" width="218" height="198"/>
+  <text class="h" x="468" y="476">market</text>
+  <text class="t" x="468" y="510">MarketService</text>
+  <text class="s" x="468" y="536">并发抓取、fallback、缓存、限流</text>
+  <text class="s" x="468" y="562">MarketStore：observations / bars</text>
+  <text class="s" x="468" y="588">指标：MA、RSI、量比、动量</text>
+
+  <rect class="service" x="690" y="440" rx="14" width="218" height="198"/>
+  <text class="h" x="720" y="476">strategy</text>
+  <text class="t" x="720" y="510">StrategyService</text>
+  <text class="s" x="720" y="536">Scorer 四维评分</text>
+  <text class="s" x="720" y="562">Decider 买入/观察/拒绝</text>
+  <text class="s" x="720" y="588">Timer 大盘择时</text>
+
+  <rect class="service" x="942" y="440" rx="14" width="218" height="198"/>
+  <text class="h" x="972" y="476">risk</text>
+  <text class="t" x="972" y="510">RiskService</text>
+  <text class="s" x="972" y="536">止损、移动止盈、时间止损</text>
+  <text class="s" x="972" y="562">MA 离场、组合风控</text>
+  <text class="s" x="972" y="588">仓位 sizing</text>
+
+  <rect class="service" x="1194" y="440" rx="14" width="246" height="198"/>
+  <text class="h" x="1224" y="476">execution</text>
+  <text class="t" x="1224" y="510">ExecutionService</text>
+  <text class="s" x="1224" y="536">OrderManager / PositionManager</text>
+  <text class="s" x="1224" y="562">SimulatedBroker / MXBroker</text>
+  <text class="s" x="1224" y="588">手动成交补录与一致性审计</text>
+
+  <rect class="service" x="750" y="712" rx="14" width="330" height="170"/>
+  <text class="h" x="780" y="748">reporting</text>
+  <text class="t" x="780" y="782">ProjectionUpdater</text>
+  <text class="s" x="950" y="782">event → projection</text>
+  <text class="t" x="780" y="816">ReportGenerator</text>
+  <text class="s" x="950" y="816">event/projection → markdown</text>
+  <text class="t" x="780" y="850">ObsidianProjector / Discord</text>
+
+  <rect class="store" x="1030" y="128" rx="16" width="500" height="256"/>
+  <text class="h" x="1060" y="166">MySQL 运行数据库</text>
+  <text class="mono" x="1064" y="206">event_log</text>
+  <text class="s" x="1234" y="206">唯一事实源；业务事实只 append</text>
+  <text class="mono" x="1064" y="240">config_versions / run_log</text>
+  <text class="s" x="1234" y="240">配置版本与运行审计</text>
+  <text class="mono" x="1064" y="274">market_observations / market_bars</text>
+  <text class="s" x="1234" y="274">行情观测与历史 K 线</text>
+  <text class="mono" x="1064" y="308">projection_*</text>
+  <text class="s" x="1234" y="308">持仓、订单、资金、池子、大盘状态</text>
+  <text class="mono" x="1064" y="342">report_artifacts</text>
+
+  <rect class="external" x="422" y="724" rx="14" width="250" height="180"/>
+  <text class="h" x="452" y="760">外部数据源</text>
+  <text class="s" x="456" y="794">AStockSignal / MX / AkShare</text>
+  <text class="s" x="456" y="822">Mootdx / BaoStock</text>
+  <text class="s" x="456" y="850">Tencent 财务 / Baidu 资金流</text>
+  <text class="s" x="456" y="878">CLS / 东财 / 巨潮 / F10</text>
+
+  <rect class="external" x="1160" y="724" rx="14" width="330" height="180"/>
+  <text class="h" x="1190" y="760">输出与交易外部面</text>
+  <text class="s" x="1194" y="794">trade-vault：Obsidian 文件投影</text>
+  <text class="s" x="1194" y="822">Discord：embed / alert 推送</text>
+  <text class="s" x="1194" y="850">MX 模拟盘：持仓、资金、委托、成交</text>
+  <text class="s" x="1194" y="878">人工券商 App：成交后补录</text>
+
+  <rect class="warn" x="72" y="770" rx="12" width="275" height="112"/>
+  <text class="h" x="98" y="807">边界约束</text>
+  <text class="s" x="102" y="838">不直接执行 src/**/*.py</text>
+  <text class="s" x="102" y="864">自动化读写优先 --json</text>
+
+  <path class="line" d="M364 220 C396 220 410 220 445 220"/>
+  <path class="line" d="M364 482 C398 482 410 318 445 318"/>
+  <path class="line" d="M916 246 C960 246 980 246 1030 246"/>
+  <path class="line" d="M680 370 C640 405 592 420 548 440"/>
+  <path class="line" d="M680 370 C720 405 768 420 798 440"/>
+  <path class="line" d="M800 370 C874 405 982 418 1050 440"/>
+  <path class="line" d="M900 370 C1040 412 1160 420 1288 440"/>
+  <path class="line" d="M656 540 C670 540 674 540 690 540"/>
+  <path class="line" d="M908 540 C922 540 926 540 942 540"/>
+  <path class="line" d="M1160 540 C1174 540 1178 540 1194 540"/>
+  <path class="dash" d="M547 724 C547 675 547 666 547 638"/>
+  <path class="line" d="M915 638 C915 670 915 684 915 712"/>
+  <path class="line" d="M1080 798 C1112 798 1128 798 1160 798"/>
+  <path class="dash" d="M1280 384 C1280 410 1280 418 1280 440"/>
+  <path class="dash" d="M915 712 C1080 660 1120 402 1280 384"/>
+</svg>

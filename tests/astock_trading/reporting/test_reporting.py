@@ -14,6 +14,7 @@ from astock_trading.reporting.discord import (
 from astock_trading.reporting.obsidian import ObsidianProjector
 from astock_trading.reporting.projectors import ProjectionUpdater
 from astock_trading.reporting.reports import ReportGenerator
+from astock_trading.reporting.screening_result import render_screening_result
 
 
 @pytest.fixture
@@ -175,3 +176,60 @@ class TestObsidianProjector:
         content = ObsidianProjector(event_store, db).write_scoring_report(
             "run_1", [{"name": "A", "code": "001", "total_score": 7.5, "style": "momentum"}])
         assert "7.5" in content
+
+    def test_screening_result_uses_configured_buy_threshold(self, event_store, db):
+        content = ObsidianProjector(event_store, db).write_screening_result(
+            "run_1",
+            "test query",
+            [{"name": "A", "code": "001", "total_score": 5.6, "veto_triggered": False}],
+            buy_threshold=5.5,
+        )
+
+        assert "✅可买" in content
+
+    def test_write_screening_result_writes_main_and_candidate_files(
+        self, event_store, db, tmp_path
+    ):
+        vault = tmp_path / "vault"
+        projector = ObsidianProjector(event_store, db, vault_path=str(vault))
+
+        content = projector.write_screening_result(
+            "run_1",
+            "test query",
+            [{"name": "A", "code": "001", "total_score": 5.6, "veto_triggered": False}],
+            buy_threshold=5.5,
+            watch_threshold=5.0,
+        )
+
+        assert (vault / "04-决策" / "候选池" / "最新筛选.md").read_text(
+            encoding="utf-8"
+        ) == content
+        candidate_path = vault / "04-决策" / "候选池" / "市场扫描候选.md"
+        assert "可买入" in candidate_path.read_text(encoding="utf-8")
+
+
+class TestScreeningResultRendering:
+    def test_render_screening_result_threshold_statuses(self):
+        content, candidate_content = render_screening_result(
+            today="2026-05-16",
+            now="2026-05-16 09:30:00",
+            run_id="run_1",
+            query="test query",
+            scores=[
+                {"name": "Buy", "code": "001", "total_score": 6.0},
+                {"name": "Watch", "code": "002", "total_score": 5.0},
+                {"name": "Avoid", "code": "003", "total_score": 4.9},
+                {"name": "Veto", "code": "004", "total_score": 9.0, "veto_triggered": True},
+            ],
+            buy_threshold=5.5,
+            watch_threshold=5.0,
+        )
+
+        assert "✅可买" in content
+        assert "🟡观察" in content
+        assert "❌规避" in content
+        assert "🚫否决" in content
+        assert candidate_content is not None
+        assert "| Buy | 001 | 6.0 |  | 可买入 |" in candidate_content
+        assert "| Watch | 002 | 5.0 |  | 观察 |" in candidate_content
+        assert "Veto" not in candidate_content

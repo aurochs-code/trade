@@ -1,37 +1,92 @@
-# A-Stock Trading MCP Server 配置
+# A-Stock Trading MCP Server governance
 #
-# 启动方式：
+# Stable entrypoint:
 #   bin/trade mcp
-# 业务日期解释默认按 Asia/Shanghai；事件时间戳仍使用 UTC ISO
 #
-# 外部 Agent 连接配置示例（放到 Agent 自己的 MCP 配置中）：
-#   {
-#     "mcpServers": {
-#       "astock_trading-trade": {
-#         "command": "/path/to/a-stock-trading/bin/trade",
-#         "args": ["mcp"],
-#         "env": {
-#           "ASTOCK_DATABASE_URL": "mysql+pymysql://user:password@127.0.0.1:33306/astock_trading?charset=utf8mb4"
-#         }
-#       }
-#     }
-#   }
+# External Agent connection examples belong in local, untracked MCP client
+# config such as .mcp.json. Do not commit real database URLs, cookies,
+# sessions, tokens, or other runtime secrets.
 
 server:
   name: astock_trading-trade
   transport: stdio
+  entrypoint:
+    command: bin/trade
+    args:
+      - mcp
 
-# 查询类 tools 自动批准（无副作用）
+tool_policy:
+  # Unknown or newly added tools must be reviewed and classified before use.
+  default_for_unclassified: require_confirm
+
+  categories:
+    read_only:
+      description: Read existing local projections, events, status, or remote account status without changing state.
+      tools:
+        - trade_portfolio
+        - trade_pool_status
+        - trade_score_history
+        - trade_trade_events
+        - trade_diagnose_health
+        - trade_explain_run
+        - trade_propose_plan
+        - trade_paper_status
+        - trade_mock_portfolio
+        - trade_mock_balance
+        - trade_mock_orders
+        - trade_watchlist
+
+    analysis:
+      description: Compute or fetch analysis that must not place, cancel, or simulate orders.
+      tools:
+        - trade_market_signal
+        - trade_score_stock
+        - trade_score_batch
+        - trade_check_risk
+        - trade_check_portfolio_risk
+        - trade_calc_position
+        - trade_northbound_realtime
+        - trade_concept_blocks
+        - trade_mx_data
+
+    state_change:
+      description: Writes local DB/cache/reports/watchlists or creates durable run/backtest artifacts.
+      require_confirmation: true
+      tools:
+        - trade_run_pipeline
+        - trade_backtest
+        - trade_screener
+        - trade_fetch_history
+        - trade_watchlist_manage
+        - trade_hot_stocks
+        - trade_baidu_fund_flow
+        - trade_daily_dragon_tiger
+        - trade_dragon_tiger
+        - trade_lockup_expiry
+        - trade_industry_comparison
+        - trade_announcements
+        - trade_research_reports
+        - trade_stock_news
+        - trade_cls_flash
+        - trade_global_news
+        - trade_basic_info
+        - trade_f10
+
+    high_risk:
+      description: May place/cancel simulated orders or execute automated trading logic.
+      require_confirmation: true
+      tools:
+        - trade_auto_trade
+        - trade_mock_buy
+        - trade_mock_sell
+        - trade_mock_cancel
+
 auto_approve:
-  - trade_market_signal
-  - trade_portfolio
-  - trade_pool_status
-  - trade_score_history
-  - trade_trade_events
-  - trade_check_risk
-  - trade_check_portfolio_risk
+  categories:
+    - read_only
+    - analysis
 
-# 需要确认的 tools（有副作用）
 require_confirm:
-  - trade_run_pipeline
-  - trade_backtest
+  categories:
+    - state_change
+    - high_risk

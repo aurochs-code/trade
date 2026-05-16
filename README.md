@@ -20,7 +20,10 @@
 - `bin/trade db status`：查看数据库状态
 - `bin/trade run-pipeline morning`：执行盘前 pipeline
 - `bin/trade run-pipeline scoring`：执行评分 pipeline
-- `bin/trade run-pipeline auto_trade`：执行模拟盘自动交易
+- `bin/trade screener run --query "近20日放量突破，市值100亿以上" --json`：执行选股筛选
+- `bin/trade screener candidates --json`：查看候选池
+- `bin/trade status --json`：查看持仓
+- `bin/trade paper status --json`：查看模拟盘
 - `bin/trade fetch-history 600036 --count 500`：拉取历史 K 线
 - `bin/trade backtest 600036,000001 2025-01-01 2025-12-31`：运行回测
 - `bin/trade continuation-validate 600036,000001 --start 2026-01-01 --end 2026-03-31 --json`：运行短线续涨验证
@@ -31,6 +34,6 @@
 
 - `00-系统`：仪表盘、使用指南、模板
 - `01-状态`：持仓、账户、池子
-- `02-运行`：日志、模拟盘、信号快照、当日输出
+- `02-巡检`：每日收盘后由 Agent 生成的巡检报告
 - `03-分析`：周复盘、月复盘、专题分析、策略体检
-- `04-决策`：今日决策、候选池、筛选结果、个股解释
+- `04-决策`：今日决策、候选池和交易结论

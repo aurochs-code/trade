@@ -16,7 +16,7 @@ from typing import Optional
 from astock_trading.platform.database import Database, SQLAlchemyCompatConnection
 
 _BASE_SCHEMA_VERSION = 1
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 # ---------------------------------------------------------------------------
 # Schema DDL
@@ -45,6 +45,16 @@ CREATE INDEX IF NOT EXISTS idx_event_log_stream
     ON event_log(stream);
 CREATE INDEX IF NOT EXISTS idx_event_log_occurred
     ON event_log(occurred_at);
+
+CREATE TABLE IF NOT EXISTS event_streams (
+    stream          TEXT PRIMARY KEY,
+    stream_type     TEXT NOT NULL,
+    next_version    INTEGER NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_streams_type
+    ON event_streams(stream_type);
 """
 
 _SCHEMA_SQL_2 = """\
@@ -291,8 +301,24 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS event_streams (
+               stream          TEXT PRIMARY KEY,
+               stream_type     TEXT NOT NULL,
+               next_version    INTEGER NOT NULL,
+               updated_at      TEXT NOT NULL
+           )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_event_streams_type "
+        "ON event_streams(stream_type)"
+    )
+
+
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_to_v2,
+    3: _migrate_to_v3,
 }
 
 

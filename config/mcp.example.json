@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "astock_trading-trade": {
+      "command": "/absolute/path/to/a-stock-trading/bin/trade",
+      "args": ["mcp"],
+      "env": {
+        "ASTOCK_DATABASE_URL": "mysql+pymysql://USER:PASSWORD@HOST:3306/a_stock_trading?charset=utf8mb4"
+      }
+    }
+  }
+}

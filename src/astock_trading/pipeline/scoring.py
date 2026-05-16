@@ -177,7 +177,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
             lines.append(f"- ❌ {r.get('name', '')}({r['code']}) 移出池子（评分 {r['score']:.1f}）")
     ctx.obsidian.write_daily_log(run_id, "\n".join(lines))
 
-    # 刷新当日输出索引
+    # 刷新每日巡检报告
     ctx.obsidian.write_daily_output_index(run_id)
 
     # 7. Discord embed

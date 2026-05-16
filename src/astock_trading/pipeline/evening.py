@@ -77,13 +77,13 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     ctx.obsidian.write_portfolio_status()
     ctx.obsidian.write_account_overview()
 
-    # 信号快照（收盘后生成当日完整快照）
+    # 巡检信号摘要（收盘后生成当日完整摘要）
     ctx.obsidian.write_signal_snapshot(
         run_id=run_id,
         market_state_detail=market_state.detail,
         market_signal=signal,
     )
-    # 当日输出索引（聚合当日所有 pipeline 运行）
+    # 巡检报告（聚合当日所有 pipeline 运行）
     ctx.obsidian.write_daily_output_index(run_id)
     # 候选池总览
     ctx.obsidian.write_candidate_pool_overview()

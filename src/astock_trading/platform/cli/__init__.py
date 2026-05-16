@@ -11,6 +11,7 @@ from astock_trading.platform.cli.agent import register_agent_context
 from astock_trading.platform.cli.config import config_app
 from astock_trading.platform.cli.data_sources import data_sources_app, register_check_data_sources
 from astock_trading.platform.cli.db import db_app
+from astock_trading.platform.cli.diagnostics import register_diagnostics_commands
 from astock_trading.platform.cli.events import events_app
 from astock_trading.platform.cli.health import register_health_commands
 from astock_trading.platform.cli.manual_trades import manual_trades_app
@@ -19,6 +20,7 @@ from astock_trading.platform.cli.paper import paper_app
 from astock_trading.platform.cli.pipelines import register_pipeline_commands
 from astock_trading.platform.cli.research import register_research_commands
 from astock_trading.platform.cli.runs import runs_app
+from astock_trading.platform.cli.screener import screener_app
 from astock_trading.platform.cli.trading import register_trading_commands
 from astock_trading.platform.database import MissingDatabaseUrl
 
@@ -32,7 +34,9 @@ app.add_typer(events_app)
 app.add_typer(data_sources_app)
 app.add_typer(manual_trades_app)
 app.add_typer(paper_app)
+app.add_typer(screener_app)
 register_agent_context(app)
+register_diagnostics_commands(app)
 register_health_commands(app)
 register_market_data_commands(app)
 register_check_data_sources(app)

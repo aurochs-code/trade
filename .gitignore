@@ -5,6 +5,8 @@ __pycache__/
 *.log
 *.db
 .env
+.mcp.json
+.mcp.*.json
 .venv/
 .venv312/
 .venv314/
@@ -12,6 +14,12 @@ miaoxiang/
 筛选结果/
 cron.log
 logs/
+cookies/
+sessions/
+session/
+runtime/
+data/sources/pywencai/cookie.txt
+data/sources/pywencai/headers.py
 data/runtime/
 data/cache/
 data/mx_output/
@@ -30,4 +38,9 @@ trade-vault/.obsidian/
 data/astock_trading.db-shm
 data/astock_trading.db-wal
 data/backups/
+*.cookie
+*.cookies
+*.session
+*.sqlite
+*.sqlite3
 src/astock_trading.egg-info/

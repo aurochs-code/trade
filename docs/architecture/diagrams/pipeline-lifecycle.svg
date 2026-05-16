@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1540" height="760" viewBox="0 0 1540 760" role="img" aria-labelledby="title desc">
+  <title id="title">Pipeline lifecycle flow</title>
+  <desc id="desc">Pipeline lifecycle from CLI or MCP through context construction, gates, run journal, pipeline module, reporting, completion and failure handling.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10z" fill="#334155"/></marker>
+    <style>
+      .bg { fill:#fbfdff; }
+      .box { fill:#eff6ff; stroke:#60a5fa; stroke-width:2; }
+      .gate { fill:#fff7ed; stroke:#fb923c; stroke-width:2; }
+      .db { fill:#f5f3ff; stroke:#a78bfa; stroke-width:2; }
+      .ok { fill:#ecfdf5; stroke:#34d399; stroke-width:2; }
+      .fail { fill:#fef2f2; stroke:#f87171; stroke-width:2; }
+      .h { font:700 26px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; fill:#0f172a; }
+      .t { font:700 17px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; fill:#0f172a; }
+      .s { font:400 13px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; fill:#475569; }
+      .m { font:600 13px ui-monospace,SFMono-Regular,Menlo,monospace; fill:#334155; }
+      .line { fill:none; stroke:#334155; stroke-width:2.2; marker-end:url(#arrow); }
+      .dash { fill:none; stroke:#64748b; stroke-width:2; stroke-dasharray:7 6; marker-end:url(#arrow); }
+    </style>
+  </defs>
+  <rect class="bg" width="1540" height="760"/>
+  <text class="h" x="52" y="56">核心流程 1：Pipeline 运行生命周期</text>
+  <text class="s" x="54" y="84">CLI 与 MCP 最终都进入同一组 pipeline module；每次 run 冻结配置并写入 run_log。</text>
+
+  <rect class="box" x="54" y="142" rx="12" width="210" height="118"/>
+  <text class="t" x="82" y="178">触发入口</text>
+  <text class="m" x="84" y="210">bin/trade run-pipeline</text>
+  <text class="m" x="84" y="236">trade_run_pipeline()</text>
+
+  <rect class="box" x="326" y="142" rx="12" width="240" height="118"/>
+  <text class="t" x="354" y="178">构建上下文</text>
+  <text class="s" x="356" y="208">init_db / connect</text>
+  <text class="s" x="356" y="232">EventStore / RunJournal</text>
+  <text class="s" x="356" y="252">Market / Strategy / Risk / Execution / Reporting</text>
+
+  <rect class="gate" x="632" y="120" rx="12" width="260" height="160"/>
+  <text class="t" x="664" y="156">运行 gate</text>
+  <text class="s" x="666" y="188">交易日检查：非交易日跳过</text>
+  <text class="s" x="666" y="214">同日 completed 幂等跳过</text>
+  <text class="s" x="666" y="240">CLI 额外检查数据源健康</text>
+  <text class="s" x="666" y="264">MCP 路径只做 trading/idempotency</text>
+
+  <rect class="db" x="958" y="120" rx="12" width="250" height="160"/>
+  <text class="t" x="990" y="156">启动 run</text>
+  <text class="s" x="992" y="188">ConfigRegistry.freeze()</text>
+  <text class="s" x="992" y="214">写 config_versions</text>
+  <text class="s" x="992" y="240">RunJournal.start_run()</text>
+  <text class="m" x="992" y="264">run_id + config_version</text>
+
+  <rect class="box" x="1260" y="120" rx="12" width="230" height="160"/>
+  <text class="t" x="1290" y="156">选择 pipeline</text>
+  <text class="s" x="1292" y="188">morning / noon / evening</text>
+  <text class="s" x="1292" y="214">intraday_monitor / scoring</text>
+  <text class="s" x="1292" y="240">weekly / sentiment / auto_trade</text>
+
+  <rect class="box" x="310" y="390" rx="14" width="340" height="170"/>
+  <text class="t" x="342" y="426">执行业务流程</text>
+  <text class="s" x="344" y="458">MarketService 采集行情与指标</text>
+  <text class="s" x="344" y="484">StrategyService 写 score / decision 事件</text>
+  <text class="s" x="344" y="510">RiskService 写 risk 事件</text>
+  <text class="s" x="344" y="536">ExecutionService 写 order / position 事件</text>
+
+  <rect class="db" x="738" y="390" rx="14" width="300" height="170"/>
+  <text class="t" x="770" y="426">事实与投影</text>
+  <text class="m" x="772" y="458">event_log</text>
+  <text class="s" x="902" y="458">append-only</text>
+  <text class="m" x="772" y="486">projection_*</text>
+  <text class="s" x="902" y="486">状态查询表</text>
+  <text class="m" x="772" y="514">market_observations</text>
+  <text class="m" x="772" y="540">report_artifacts</text>
+
+  <rect class="ok" x="1126" y="390" rx="14" width="280" height="170"/>
+  <text class="t" x="1158" y="426">输出与完成</text>
+  <text class="s" x="1160" y="458">Obsidian 日志/状态/报告</text>
+  <text class="s" x="1160" y="484">Discord embed 推送</text>
+  <text class="s" x="1160" y="510">RunJournal.complete_run()</text>
+  <text class="m" x="1160" y="538">status=completed</text>
+
+  <rect class="fail" x="738" y="620" rx="12" width="300" height="90"/>
+  <text class="t" x="770" y="656">异常路径</text>
+  <text class="s" x="772" y="684">RunJournal.fail_run(error, artifacts)</text>
+
+  <path class="line" d="M264 200 H326"/>
+  <path class="line" d="M566 200 H632"/>
+  <path class="line" d="M892 200 H958"/>
+  <path class="line" d="M1208 200 H1260"/>
+  <path class="line" d="M1375 280 C1375 350 650 330 505 390"/>
+  <path class="line" d="M650 475 H738"/>
+  <path class="line" d="M1038 475 H1126"/>
+  <path class="dash" d="M885 560 V620"/>
+  <path class="dash" d="M1038 665 C1150 665 1245 616 1266 560"/>
+</svg>

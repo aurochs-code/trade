@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from astock_trading.pipeline.context import PipelineContext
 from astock_trading.pipeline.paper_account import PaperAccount, PaperPosition, PaperBalance
@@ -60,6 +60,145 @@ def _now_iso() -> str:
 def _get_auto_trade_cfg(ctx: PipelineContext) -> dict:
     """读取 auto_trade 配置段。"""
     return ctx.cfg.get("auto_trade", {})
+
+
+def _parse_iso(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _buy_guard_max_age_hours(ctx: PipelineContext, cfg: dict) -> int:
+    guard_cfg = cfg.get("buy_guard", {})
+    scoring_cfg = ctx.cfg.get("scoring", {})
+    for value in (
+        guard_cfg.get("max_age_hours"),
+        cfg.get("candidate_pool_max_age_hours"),
+        scoring_cfg.get("max_age_hours"),
+        scoring_cfg.get("freshness_max_age_hours"),
+    ):
+        if value:
+            return int(value)
+    return 24
+
+
+def _candidate_pool_state(ctx: PipelineContext, now: datetime, max_age_hours: int) -> dict:
+    row = ctx.conn.execute(
+        """SELECT
+               COUNT(*) AS total_count,
+               SUM(CASE WHEN pool_tier = 'core' THEN 1 ELSE 0 END) AS core_count,
+               MAX(COALESCE(NULLIF(last_scored_at, ''), added_at)) AS latest_scored_at
+           FROM projection_candidate_pool"""
+    ).fetchone()
+    total_count = int(row["total_count"] or 0)
+    core_count = int(row["core_count"] or 0)
+    latest_scored_at = row["latest_scored_at"]
+    latest = _parse_iso(latest_scored_at)
+    age_hours = (now - latest).total_seconds() / 3600 if latest else None
+    return {
+        "total_count": total_count,
+        "core_count": core_count,
+        "latest_scored_at": latest_scored_at,
+        "age_hours": round(age_hours, 2) if age_hours is not None else None,
+        "max_age_hours": max_age_hours,
+        "fresh": age_hours is not None and age_hours <= max_age_hours,
+    }
+
+
+def _fresh_decision_events(ctx: PipelineContext, now: datetime, max_age_hours: int) -> list[dict]:
+    since = (now - timedelta(hours=max_age_hours)).isoformat()
+    events = ctx.event_store.query(
+        event_type="decision.suggested",
+        since=since,
+        limit=100,
+    )
+    fresh = []
+    for event in events:
+        occurred = _parse_iso(event.get("occurred_at", ""))
+        if occurred and now - timedelta(hours=max_age_hours) <= occurred <= now:
+            fresh.append(event)
+    return fresh
+
+
+def _record_buy_diagnostic(
+    ctx: PipelineContext,
+    run_id: str,
+    reason: str,
+    message: str,
+    details: dict,
+) -> dict:
+    diagnostic = {
+        "reason": reason,
+        "message": message,
+        "details": details,
+        "checked_at": _now_iso(),
+    }
+    ctx.event_store.append(
+        stream="paper:diagnostic",
+        stream_type="paper_trade",
+        event_type="auto_trade.diagnostic",
+        payload=diagnostic,
+        metadata={"run_id": run_id, "account": "paper"},
+    )
+    return diagnostic
+
+
+def _buy_side_diagnostics(
+    ctx: PipelineContext,
+    run_id: str,
+    cfg: dict,
+    now: datetime | None = None,
+) -> list[dict]:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    max_age_hours = _buy_guard_max_age_hours(ctx, cfg)
+    pool = _candidate_pool_state(ctx, current, max_age_hours)
+    diagnostics: list[dict] = []
+
+    if pool["core_count"] <= 0:
+        diagnostics.append(
+            _record_buy_diagnostic(
+                ctx,
+                run_id,
+                "core_pool_empty",
+                "核心候选池为空，禁止自动买入",
+                pool,
+            )
+        )
+        return diagnostics
+
+    if not pool["fresh"]:
+        diagnostics.append(
+            _record_buy_diagnostic(
+                ctx,
+                run_id,
+                "scoring_inputs_stale",
+                "候选池评分已过期，禁止自动买入",
+                pool,
+            )
+        )
+        return diagnostics
+
+    decisions = _fresh_decision_events(ctx, current, max_age_hours)
+    if not decisions:
+        diagnostics.append(
+            _record_buy_diagnostic(
+                ctx,
+                run_id,
+                "no_fresh_decision_events",
+                "未发现新鲜的决策事件，禁止自动买入",
+                {"max_age_hours": max_age_hours},
+            )
+        )
+
+    return diagnostics
 
 
 def _calc_buy_shares(price: float, cash: float, position_pct: float, total_asset: float) -> int:
@@ -148,6 +287,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
 
     sells: list[dict] = []
     buys: list[dict] = []
+    diagnostics: list[dict] = []
     trade_count = 0
 
     # ------------------------------------------------------------------
@@ -172,6 +312,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         buys = _score_and_buy(
             ctx, paper, balance, exposure_pct, available_cash,
             market_state, run_id, cfg, dry_run, remaining_trades,
+            diagnostics=diagnostics,
         )
     elif trade_count < max_daily_trades:
         _logger.info("[auto_trade] 当前不在买入时间窗口，跳过自动买入")
@@ -236,7 +377,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     if trade_rows:
         ctx.obsidian.append_paper_trade_log(trade_rows)
 
-    # 刷新当日输出索引
+    # 刷新每日巡检报告
     ctx.obsidian.write_daily_output_index(run_id)
 
     result = {
@@ -247,6 +388,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         "paper_total_asset": balance.total_asset,
         "buys": buys,
         "sells": sells,
+        "diagnostics": diagnostics,
         "window_state": window_state,
         "discord_embed": embed,
     }
@@ -414,6 +556,7 @@ def _score_and_buy(
     cfg: dict,
     dry_run: bool,
     max_trades: int,
+    diagnostics: list[dict] | None = None,
 ) -> list[dict]:
     """从公共池读取评分，决策后自动买入。"""
 
@@ -452,8 +595,25 @@ def _score_and_buy(
         _logger.info(f"[auto_trade] 本周已买 {weekly_buy_count}/{weekly_max}，禁止买入")
         return []
 
+    buy_diagnostics = _buy_side_diagnostics(ctx, run_id, cfg)
+    if buy_diagnostics:
+        if diagnostics is not None:
+            diagnostics.extend(buy_diagnostics)
+        _logger.warning(
+            "[auto_trade] 买入前置检查未通过: "
+            + ", ".join(d["reason"] for d in buy_diagnostics)
+        )
+        return []
+
     # 读公共池评分（最近一次 scoring pipeline 的结果）
-    candidates = _get_buy_candidates(ctx, run_id, market_state, exposure_pct, weekly_buy_count)
+    candidates = _get_buy_candidates(
+        ctx,
+        run_id,
+        market_state,
+        exposure_pct,
+        weekly_buy_count,
+        max_age_hours=_buy_guard_max_age_hours(ctx, cfg),
+    )
 
     if not candidates:
         _logger.info("[auto_trade] 无符合条件的买入候选")
@@ -506,25 +666,27 @@ def _get_buy_candidates(
     market_state,
     exposure_pct: float,
     weekly_buy_count: int,
+    max_age_hours: int = 24,
 ) -> list[dict]:
     """
     从公共池获取买入候选。
 
-    优先用最近 scoring pipeline 的决策事件，
-    fallback 到核心池评分 + 实时决策。
+    只使用新鲜的 scoring/decision 事件，避免核心池静态数据过期时静默买入。
     """
-    # 方式 1：查最近的 decision.suggested 事件中 action=BUY 的
+    now = datetime.now(timezone.utc)
+    since = (now - timedelta(hours=max_age_hours)).isoformat()
     recent_decisions = ctx.event_store.query(
         event_type="decision.suggested",
+        since=since,
         limit=50,
     )
 
     candidates = []
     seen = set()
-    today_start_utc, today_end_utc = local_date_bounds_utc()
 
     for ev in recent_decisions:
-        if not (today_start_utc <= ev.get("occurred_at", "") < today_end_utc):
+        occurred = _parse_iso(ev.get("occurred_at", ""))
+        if not occurred or not (now - timedelta(hours=max_age_hours) <= occurred <= now):
             continue
         p = ev.get("payload", {})
         if p.get("action") != "BUY":
@@ -540,21 +702,6 @@ def _get_buy_candidates(
             "position_pct": p.get("position_pct", 0),
             "price": 0,  # 需要实时获取
         })
-
-    if not candidates:
-        # 方式 2：从核心池取高分股票
-        rows = ctx.conn.execute(
-            "SELECT code, name, score FROM projection_candidate_pool "
-            "WHERE pool_tier = 'core' AND score >= ? ORDER BY score DESC LIMIT 10",
-            (ctx.cfg.get("scoring", {}).get("thresholds", {}).get("buy", 6.5),),
-        ).fetchall()
-        for r in rows:
-            candidates.append({
-                "code": r["code"],
-                "name": r["name"] or r["code"],
-                "score": r["score"] or 0,
-                "price": 0,
-            })
 
     if not candidates:
         return []

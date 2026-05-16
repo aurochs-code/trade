@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1540" height="780" viewBox="0 0 1540 780" role="img" aria-labelledby="title desc">
+  <title id="title">Manual trade and event projection flow</title>
+  <desc id="desc">Manual trade recording flow from CLI through ExecutionService, order and position events, projections, audit and Obsidian trade logger.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10z" fill="#334155"/></marker>
+    <style>
+      .bg{fill:#fbfdff}.box{fill:#eff6ff;stroke:#60a5fa;stroke-width:2}.svc{fill:#fff7ed;stroke:#fb923c;stroke-width:2}.db{fill:#f5f3ff;stroke:#a78bfa;stroke-width:2}.ok{fill:#ecfdf5;stroke:#34d399;stroke-width:2}.warn{fill:#fef2f2;stroke:#f87171;stroke-width:2}.h{font:700 26px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#0f172a}.t{font:700 17px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#0f172a}.s{font:400 13px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#475569}.m{font:600 13px ui-monospace,SFMono-Regular,Menlo,monospace;fill:#334155}.line{fill:none;stroke:#334155;stroke-width:2.2;marker-end:url(#arrow)}.dash{fill:none;stroke:#64748b;stroke-width:2;stroke-dasharray:7 6;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect class="bg" width="1540" height="780"/>
+  <text class="h" x="52" y="56">核心流程 3：手动成交补录、事件与投影</text>
+  <text class="s" x="54" y="84">实盘成交不直接调 broker；成交后通过 CLI 补录，系统用事件事实驱动订单、持仓和资金投影。</text>
+
+  <rect class="box" x="58" y="150" rx="12" width="250" height="140"/>
+  <text class="t" x="90" y="186">人工成交补录</text>
+  <text class="m" x="92" y="218">record-buy CODE SHARES PRICE</text>
+  <text class="m" x="92" y="244">record-sell CODE SHARES PRICE</text>
+  <text class="s" x="92" y="270">--yes --json；卖出当前只支持全仓</text>
+
+  <rect class="svc" x="380" y="150" rx="14" width="270" height="140"/>
+  <text class="t" x="412" y="186">ExecutionService</text>
+  <text class="s" x="414" y="218">record_buy / record_sell</text>
+  <text class="s" x="414" y="244">校验 shares / price / 持仓</text>
+  <text class="s" x="414" y="270">broker=manual，绕过外部下单</text>
+
+  <rect class="svc" x="722" y="120" rx="14" width="270" height="120"/>
+  <text class="t" x="754" y="156">OrderManager</text>
+  <text class="m" x="756" y="188">order.created</text>
+  <text class="m" x="756" y="214">order.filled</text>
+
+  <rect class="svc" x="722" y="300" rx="14" width="270" height="130"/>
+  <text class="t" x="754" y="336">PositionManager</text>
+  <text class="m" x="756" y="368">position.opened</text>
+  <text class="m" x="756" y="394">position.closed</text>
+
+  <rect class="db" x="1066" y="170" rx="14" width="310" height="180"/>
+  <text class="t" x="1098" y="206">event_log</text>
+  <text class="s" x="1100" y="238">stream: order:&lt;code&gt;:&lt;order_id&gt;</text>
+  <text class="s" x="1100" y="264">stream: position:&lt;code&gt;</text>
+  <text class="s" x="1100" y="290">stream_version 严格递增</text>
+  <text class="s" x="1100" y="316">metadata 记录 run/manual source</text>
+
+  <rect class="db" x="420" y="535" rx="14" width="320" height="150"/>
+  <text class="t" x="452" y="571">projection 表</text>
+  <text class="m" x="454" y="604">projection_orders</text>
+  <text class="m" x="454" y="630">projection_positions</text>
+  <text class="m" x="454" y="656">projection_balances</text>
+
+  <rect class="ok" x="820" y="535" rx="14" width="320" height="150"/>
+  <text class="t" x="852" y="571">一致性审计</text>
+  <text class="s" x="854" y="604">audit_manual_trade_consistency()</text>
+  <text class="s" x="854" y="630">校验 order / position / balance / event 是否匹配</text>
+  <text class="m" x="854" y="656">返回 JSON audit.ok/issues</text>
+
+  <rect class="ok" x="1208" y="535" rx="14" width="250" height="150"/>
+  <text class="t" x="1240" y="571">交易日志输出</text>
+  <text class="s" x="1242" y="604">TradeLogger hook</text>
+  <text class="s" x="1242" y="630">Obsidian vault</text>
+  <text class="s" x="1242" y="656">持仓概览可被刷新</text>
+
+  <rect class="warn" x="58" y="535" rx="12" width="270" height="118"/>
+  <text class="t" x="88" y="571">重要边界</text>
+  <text class="s" x="90" y="604">业务事实以 event_log 为准</text>
+  <text class="s" x="90" y="630">投影可删可重建</text>
+
+  <path class="line" d="M308 220 H380"/>
+  <path class="line" d="M650 220 H722"/>
+  <path class="line" d="M650 250 C690 250 690 365 722 365"/>
+  <path class="line" d="M992 180 C1022 180 1036 230 1066 250"/>
+  <path class="line" d="M992 365 C1040 365 1038 310 1066 290"/>
+  <path class="line" d="M1221 350 C1190 475 700 455 580 535"/>
+  <path class="line" d="M740 610 H820"/>
+  <path class="line" d="M1140 610 H1208"/>
+  <path class="dash" d="M580 535 C600 456 740 430 857 430"/>
+</svg>

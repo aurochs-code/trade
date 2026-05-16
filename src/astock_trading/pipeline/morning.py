@@ -101,7 +101,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     # 6. Obsidian
     ctx.obsidian.write_portfolio_status()
 
-    # 盘前信号快照
+    # 盘前巡检信号摘要
     ctx.obsidian.write_signal_snapshot(
         run_id=run_id,
         market_state_detail=market_state.detail,
@@ -144,7 +144,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
 
     ctx.obsidian.write_daily_log(run_id, "\n".join(log_lines))
 
-    # 刷新当日输出索引
+    # 刷新每日巡检报告
     ctx.obsidian.write_daily_output_index(run_id)
 
     # 7. Discord embed

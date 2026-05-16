@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1540" height="860" viewBox="0 0 1540 860" role="img" aria-labelledby="title desc">
+  <title id="title">Paper auto trade flow</title>
+  <desc id="desc">Paper auto trade flow through MX paper account, market signal, risk sell logic, buy candidates, dry run or real mock trade, events and reports.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10z" fill="#334155"/></marker>
+    <style>
+      .bg{fill:#fbfdff}.box{fill:#eff6ff;stroke:#60a5fa;stroke-width:2}.svc{fill:#fff7ed;stroke:#fb923c;stroke-width:2}.db{fill:#f5f3ff;stroke:#a78bfa;stroke-width:2}.ok{fill:#ecfdf5;stroke:#34d399;stroke-width:2}.warn{fill:#fef2f2;stroke:#f87171;stroke-width:2}.h{font:700 26px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#0f172a}.t{font:700 17px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#0f172a}.s{font:400 13px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;fill:#475569}.m{font:600 13px ui-monospace,SFMono-Regular,Menlo,monospace;fill:#334155}.line{fill:none;stroke:#334155;stroke-width:2.2;marker-end:url(#arrow)}.dash{fill:none;stroke:#64748b;stroke-width:2;stroke-dasharray:7 6;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect class="bg" width="1540" height="860"/>
+  <text class="h" x="52" y="56">核心流程 4：模拟盘自动交易</text>
+  <text class="s" x="54" y="84">`auto_trade` 以 MX 模拟盘为 source of truth，不污染实盘投影；dry_run 默认只记事件和报告。</text>
+
+  <rect class="box" x="60" y="136" rx="12" width="230" height="120"/>
+  <text class="t" x="92" y="172">触发</text>
+  <text class="m" x="94" y="204">run-pipeline auto_trade</text>
+  <text class="m" x="94" y="230">trade_auto_trade()</text>
+
+  <rect class="svc" x="350" y="136" rx="14" width="260" height="120"/>
+  <text class="t" x="382" y="172">读取配置</text>
+  <text class="s" x="384" y="204">auto_trade.enabled / dry_run</text>
+  <text class="s" x="384" y="230">buy_window / sell_window / max_daily_trades</text>
+
+  <rect class="svc" x="670" y="136" rx="14" width="280" height="120"/>
+  <text class="t" x="702" y="172">PaperAccount</text>
+  <text class="s" x="704" y="204">MX 模拟盘持仓、资金、仓位</text>
+  <text class="s" x="704" y="230">可用资金用于买入股数计算</text>
+
+  <rect class="svc" x="1010" y="136" rx="14" width="270" height="120"/>
+  <text class="t" x="1042" y="172">大盘信号</text>
+  <text class="s" x="1044" y="204">collect_market_state()</text>
+  <text class="s" x="1044" y="230">CLEAR 强制清仓；RED 禁止买入</text>
+
+  <rect class="warn" x="230" y="360" rx="14" width="320" height="170"/>
+  <text class="t" x="262" y="396">卖出分支</text>
+  <text class="s" x="264" y="428">sell_window 开启才执行</text>
+  <text class="s" x="264" y="454">批量获取 MA20/MA60</text>
+  <text class="s" x="264" y="480">check_exit_signals()</text>
+  <text class="s" x="264" y="506">只对 immediate 风险自动卖出</text>
+
+  <rect class="ok" x="650" y="360" rx="14" width="320" height="170"/>
+  <text class="t" x="682" y="396">买入分支</text>
+  <text class="s" x="684" y="428">buy_window 开启且交易数未超限</text>
+  <text class="s" x="684" y="454">今日 BUY decision 优先</text>
+  <text class="s" x="684" y="480">fallback：核心池高分股票</text>
+  <text class="s" x="684" y="506">实时价格 + 仓位上限 + 100 股整数倍</text>
+
+  <rect class="svc" x="1070" y="360" rx="14" width="300" height="170"/>
+  <text class="t" x="1102" y="396">执行或演练</text>
+  <text class="s" x="1104" y="428">dry_run：只标记 status=dry_run</text>
+  <text class="s" x="1104" y="454">非 dry_run：paper.buy/sell()</text>
+  <text class="s" x="1104" y="480">每笔写 auto_trade.executed</text>
+  <text class="m" x="1104" y="506">metadata.account=paper</text>
+
+  <rect class="db" x="400" y="650" rx="14" width="300" height="140"/>
+  <text class="t" x="432" y="686">事件</text>
+  <text class="m" x="434" y="718">paper:&lt;code&gt; auto_trade.executed</text>
+  <text class="m" x="434" y="744">paper:summary auto_trade.summary</text>
+  <text class="s" x="434" y="770">可用于 paper status 最近交易</text>
+
+  <rect class="ok" x="800" y="650" rx="14" width="300" height="140"/>
+  <text class="t" x="832" y="686">报告输出</text>
+  <text class="s" x="834" y="718">Discord 自动交易 embed</text>
+  <text class="s" x="834" y="744">Obsidian paper report</text>
+  <text class="s" x="834" y="770">模拟盘交易日志与每日巡检索引</text>
+
+  <rect class="box" x="1190" y="650" rx="14" width="230" height="140"/>
+  <text class="t" x="1222" y="686">返回 JSON</text>
+  <text class="s" x="1224" y="718">enabled / dry_run / signal</text>
+  <text class="s" x="1224" y="744">buys / sells / window_state</text>
+
+  <path class="line" d="M290 196 H350"/>
+  <path class="line" d="M610 196 H670"/>
+  <path class="line" d="M950 196 H1010"/>
+  <path class="line" d="M1145 256 C1110 318 454 318 390 360"/>
+  <path class="line" d="M1145 256 C1120 320 872 318 810 360"/>
+  <path class="line" d="M550 445 H650"/>
+  <path class="line" d="M970 445 H1070"/>
+  <path class="line" d="M1220 530 C1220 612 650 600 550 650"/>
+  <path class="line" d="M700 720 H800"/>
+  <path class="line" d="M1100 720 H1190"/>
+</svg>

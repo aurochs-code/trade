@@ -3,3 +3,10 @@
 
 # Obsidian config (local to each clone)
 .obsidian/
+
+# Generated runtime/report artifacts. Facts live in MySQL event_log/run_log.
+02-运行/
+02-巡检/*.md
+!02-巡检/README.md
+04-决策/候选池/最新筛选.md
+04-决策/候选池/市场扫描候选.md

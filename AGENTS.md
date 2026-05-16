@@ -16,6 +16,11 @@ Use JSON output for automation:
 - `bin/trade health --json`
 - `bin/trade events query --json`
 - `bin/trade runs list --json`
+- `bin/trade status --json`
+- `bin/trade screener candidates --json`
+- `bin/trade screener run --query "..." --json`
+- `bin/trade record-buy CODE SHARES PRICE --yes --json`
+- `bin/trade record-sell CODE SHARES PRICE --yes --json`
 - `bin/trade manual-trades list --json`
 - `bin/trade paper status --json`
 - `bin/trade db status --json`

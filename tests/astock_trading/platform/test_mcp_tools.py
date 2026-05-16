@@ -94,3 +94,112 @@ class TestMCPTools:
         """When V1 market_timer is unavailable, should return fallback."""
         result = json.loads(setup_mcp.trade_market_signal())
         assert "signal" in result
+
+    def test_trade_diagnose_health_returns_read_only_diagnostics(self, setup_mcp):
+        result = json.loads(setup_mcp.trade_diagnose_health())
+
+        assert result["diagnostic"] == "health"
+        assert result["status"] in {"ok", "warning", "failed"}
+        assert "findings" in result
+        assert "data_sources" in result["inputs"]
+
+    def test_trade_explain_run_reports_missing_run(self, setup_mcp):
+        result = json.loads(setup_mcp.trade_explain_run("missing-run-id"))
+
+        assert result == {
+            "status": "not_found",
+            "run_id": "missing-run-id",
+            "findings": ["run_id not found"],
+        }
+
+    def test_trade_propose_plan_never_executes(self, setup_mcp):
+        result = json.loads(setup_mcp.trade_propose_plan())
+
+        assert result["status"] == "proposed"
+        assert result["plan_type"] == "agent_trade_plan"
+        assert result["execution_allowed"] is False
+        assert "actions" in result
+
+    def test_trade_run_pipeline_blocks_failed_data_sources(self, setup_mcp, monkeypatch):
+        srv = setup_mcp
+        import astock_trading.market.health as market_health
+        import astock_trading.pipeline.morning as morning_pipeline
+
+        monkeypatch.setattr(srv, "is_trading_day", lambda: True)
+        monkeypatch.setattr(
+            market_health,
+            "evaluate_data_source_health",
+            lambda conn: {
+                "status": "failed",
+                "required_missing": ["baidu_fund_flow"],
+                "optional_missing": [],
+            },
+        )
+        monkeypatch.setattr(
+            morning_pipeline,
+            "run",
+            lambda ctx, run_id: {"signal": "GREEN", "positions": 0, "risk_alerts": []},
+        )
+
+        result = json.loads(srv.trade_run_pipeline("morning"))
+
+        assert result["status"] == "failed"
+        assert result["pipeline"] == "morning"
+        assert result["reason"] == "data_source_health_failed"
+        assert result["data_sources"]["required_missing"] == ["baidu_fund_flow"]
+        last_run = srv._run_journal.get_last_run("morning")
+        assert last_run["status"] == "failed"
+
+    def test_trade_run_pipeline_supports_auto_trade(self, setup_mcp, monkeypatch):
+        srv = setup_mcp
+        import astock_trading.market.health as market_health
+        import astock_trading.pipeline.auto_trade as auto_trade_pipeline
+
+        monkeypatch.setattr(srv, "is_trading_day", lambda: True)
+        monkeypatch.setattr(
+            market_health,
+            "evaluate_data_source_health",
+            lambda conn: {"status": "ok", "required_missing": [], "optional_missing": []},
+        )
+        monkeypatch.setattr(
+            auto_trade_pipeline,
+            "run",
+            lambda ctx, run_id: {"enabled": False, "dry_run": True, "buys": [], "sells": []},
+        )
+
+        result = json.loads(srv.trade_run_pipeline("auto_trade"))
+
+        assert result["status"] == "completed"
+        assert result["pipeline"] == "auto_trade"
+        assert result["enabled"] is False
+        last_run = srv._run_journal.get_last_run("auto_trade")
+        assert last_run["status"] == "completed"
+
+    def test_trade_run_pipeline_continues_with_data_source_warning(self, setup_mcp, monkeypatch):
+        srv = setup_mcp
+        import astock_trading.market.health as market_health
+        import astock_trading.pipeline.evening as evening_pipeline
+
+        monkeypatch.setattr(srv, "is_trading_day", lambda: True)
+        monkeypatch.setattr(
+            market_health,
+            "evaluate_data_source_health",
+            lambda conn: {
+                "status": "warning",
+                "required_missing": [],
+                "optional_missing": ["industry_comparison"],
+            },
+        )
+        monkeypatch.setattr(
+            evening_pipeline,
+            "run",
+            lambda ctx, run_id: {"signal": "YELLOW", "positions": 0, "risk_alerts": []},
+        )
+
+        result = json.loads(srv.trade_run_pipeline("evening"))
+
+        assert result["status"] == "completed"
+        assert result["pipeline"] == "evening"
+        assert result["data_source_warning"]["optional_missing"] == ["industry_comparison"]
+        last_run = srv._run_journal.get_last_run("evening")
+        assert last_run["status"] == "completed"

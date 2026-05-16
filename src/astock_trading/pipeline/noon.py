@@ -129,7 +129,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
 
     ctx.obsidian.write_daily_log(run_id, "\n".join(log_lines))
 
-    # 刷新当日输出索引
+    # 刷新每日巡检报告
     ctx.obsidian.write_daily_output_index(run_id)
 
     # 5. Discord

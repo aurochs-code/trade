@@ -8,23 +8,14 @@ A-Stock Trading 是一个 A 股量化交易辅助系统，采用"四维评分 + 
 
 ## 可用 MCP Tools
 
-| Tool | 用途 | 副作用 |
-|------|------|--------|
-| `trade_market_signal` | 大盘择时信号 | 无 |
-| `trade_score_stock` | 单股四维评分 | 无 |
-| `trade_score_batch` | 批量评分（默认核心池） | 无 |
-| `trade_portfolio` | 当前持仓 | 无 |
-| `trade_pool_status` | 核心池/观察池 | 无 |
-| `trade_check_risk` | 单票风控检查 | 无 |
-| `trade_check_portfolio_risk` | 组合风控 | 无 |
-| `trade_calc_position` | 仓位计算 | 无 |
-| `trade_screener` | 选股筛选 | 无 |
-| `trade_score_history` | 历史评分 | 无 |
-| `trade_trade_events` | 交易记录 | 无 |
-| `trade_run_pipeline` | 运行 pipeline | 有（幂等） |
-| `trade_backtest` | 策略回测 | 有 |
-| `trade_auto_trade` | 模拟盘自动交易（选股→评分→风控→买卖） | 有 |
-| `trade_paper_status` | 模拟盘状态（持仓+资金+交易记录） | 无 |
+稳定入口是 `bin/trade mcp`。实际 tool 清单以 MCP Server 暴露内容为准；审批和风险分类以 `config/mcp_server.yaml` 为准。
+
+| 分类 | 用途 | 审批要求 |
+|------|------|----------|
+| read_only | 查询本地投影、交易记录、状态 | 可自动批准 |
+| analysis | 评分、风控、仓位和市场分析 | 可自动批准，不能下单 |
+| state_change | pipeline、选股入池、watchlist、历史行情、回测等写入本地状态或报告产物 | 需要确认 |
+| high_risk | 自动交易、模拟盘买卖/撤单 | 必须人工确认 |
 
 ## 关键交易规则
 
@@ -35,7 +26,7 @@ A-Stock Trading 是一个 A 股量化交易辅助系统，采用"四维评分 + 
 - 舆情面 3 分：研报/新闻
 
 ### 买入条件（全部满足）
-- 评分 ≥ 6.5
+- 评分达到 `config/strategy.yaml` 的 `scoring.thresholds.buy`（当前 5.5）
 - 大盘信号 GREEN 或 YELLOW
 - 本周买入次数 < 2
 - 总仓位 < 60%
