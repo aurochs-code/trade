@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
-from dataclasses import asdict, is_dataclass
+import json
+from dataclasses import asdict, is_dataclass, replace
 from enum import Enum
 from typing import Any, Awaitable, Callable
 
@@ -21,6 +23,7 @@ from astock_trading.strategy.models import (
 from astock_trading.strategy.scorer import Scorer
 
 StockResolver = Callable[[str], Awaitable[list[dict]]]
+StockLookup = Callable[[str], dict | None]
 
 _CODE_RE = re.compile(r"^(?:(?:sh|sz)\.?)?(\d{6})$", re.IGNORECASE)
 
@@ -69,9 +72,143 @@ def _row_name(row: dict, fallback: str) -> str:
     return fallback
 
 
+def _decode_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    return value
+
+
+def _iter_stock_records(payload: Any) -> list[dict]:
+    records: list[dict] = []
+    if isinstance(payload, list):
+        for item in payload:
+            records.extend(_iter_stock_records(item))
+        return records
+    if not isinstance(payload, dict):
+        return records
+
+    code = _row_code(payload)
+    name = _row_name(payload, "")
+    if code and name:
+        records.append({"code": code, "name": name})
+
+    for value in payload.values():
+        if isinstance(value, (dict, list)):
+            records.extend(_iter_stock_records(value))
+    return records
+
+
+def lookup_stock_identifier_from_db(conn: Any, identifier: str) -> dict | None:
+    """Resolve a stock identifier from local projections and recent observations."""
+    query = str(identifier or "").strip()
+    if not query:
+        return None
+
+    code = normalize_stock_code(query)
+    if code:
+        row = conn.execute(
+            """SELECT code, name
+               FROM projection_candidate_pool
+               WHERE code = ? AND COALESCE(name, '') <> ''
+               ORDER BY CASE pool_tier WHEN 'core' THEN 0 WHEN 'watch' THEN 1 ELSE 2 END,
+                        last_scored_at DESC
+               LIMIT 1""",
+            (code,),
+        ).fetchone()
+        if row:
+            return {"code": row["code"], "name": row["name"], "source": "local_cache"}
+
+        rows = conn.execute(
+            """SELECT payload_json
+               FROM market_observations
+               WHERE symbol = ?
+               ORDER BY observed_at DESC
+               LIMIT 20""",
+            (code,),
+        ).fetchall()
+        for row in rows:
+            for record in _iter_stock_records(_decode_payload(row["payload_json"])):
+                if record["code"] == code:
+                    return {**record, "source": "local_cache"}
+        return None
+
+    row = conn.execute(
+        """SELECT code, name
+           FROM projection_candidate_pool
+           WHERE name = ?
+           ORDER BY CASE pool_tier WHEN 'core' THEN 0 WHEN 'watch' THEN 1 ELSE 2 END,
+                    last_scored_at DESC
+           LIMIT 1""",
+        (query,),
+    ).fetchone()
+    if row:
+        return {"code": row["code"], "name": row["name"], "source": "local_cache"}
+
+    rows = conn.execute(
+        """SELECT payload_json
+           FROM market_observations
+           ORDER BY observed_at DESC
+           LIMIT 1000"""
+    ).fetchall()
+    for row in rows:
+        for record in _iter_stock_records(_decode_payload(row["payload_json"])):
+            if record["name"] == query:
+                return {**record, "source": "local_cache"}
+    return None
+
+
+async def _lookup_stock_name_from_basic_info(code: str) -> str | None:
+    try:
+        from astock_trading.market.a_stock_adapters import AStockSignalAdapter
+
+        info = await AStockSignalAdapter().get_basic_info(code)
+    except Exception:
+        return None
+
+    for key in ("股票简称", "证券简称", "股票名称", "名称"):
+        value = info.get(key)
+        if value:
+            name = str(value).strip()
+            if name and name != code:
+                return name
+    return None
+
+
+async def _lookup_stock_from_spot(identifier: str) -> dict | None:
+    query = str(identifier or "").strip()
+    if not query:
+        return None
+
+    def _sync() -> dict | None:
+        try:
+            import akshare as ak
+
+            df = ak.stock_zh_a_spot_em()
+        except Exception:
+            return None
+        if df is None or df.empty:
+            return None
+
+        code = normalize_stock_code(query)
+        for _, row in df.iterrows():
+            row_code = _row_code(row)
+            row_name = _row_name(row, "")
+            if not row_code or not row_name:
+                continue
+            if (code and row_code == code) or (not code and row_name == query):
+                return {"code": row_code, "name": row_name, "source": "spot"}
+        return None
+
+    return await asyncio.to_thread(_sync)
+
+
 async def resolve_stock_identifier(
     identifier: str,
     resolver: StockResolver | None = None,
+    name_lookup: StockLookup | None = None,
 ) -> dict:
     """Resolve stock code or Chinese name to a code/name pair."""
     query = str(identifier or "").strip()
@@ -80,6 +217,18 @@ async def resolve_stock_identifier(
 
     code = normalize_stock_code(query)
     if code:
+        local = name_lookup(query) if name_lookup else None
+        if local:
+            return local
+        search = resolver or MXScreenerAdapter().search_stocks
+        rows = await search(query)
+        for row in rows:
+            if _row_code(row) == code:
+                return {"code": code, "name": _row_name(row, query), "source": "screener"}
+        if name := await _lookup_stock_name_from_basic_info(code):
+            return {"code": code, "name": name, "source": "basic_info"}
+        if spot := await _lookup_stock_from_spot(query):
+            return spot
         return {"code": code, "name": "", "source": "input_code"}
 
     search = resolver or MXScreenerAdapter().search_stocks
@@ -94,6 +243,11 @@ async def resolve_stock_identifier(
         if (code_value := _row_code(row))
     ]
     if not candidates:
+        local = name_lookup(query) if name_lookup else None
+        if local:
+            return local
+        if spot := await _lookup_stock_from_spot(query):
+            return spot
         raise StockAnalysisError(f"cannot resolve stock identifier: {identifier}")
 
     exact = next((item for item in candidates if item["name"] == query), None)
@@ -109,11 +263,17 @@ async def analyze_stock(
 ) -> dict:
     """Build a non-executing single-stock analysis report."""
     cfg = ctx.cfg
-    resolved = await resolve_stock_identifier(identifier, resolver=resolver)
+    resolved = await resolve_stock_identifier(
+        identifier,
+        resolver=resolver,
+        name_lookup=lambda value: lookup_stock_identifier_from_db(ctx.conn, value),
+    )
     code = resolved["code"]
     name = resolved.get("name") or ""
 
     snapshot, market_result = await _collect_inputs(ctx, code, name)
+    if name:
+        snapshot = _with_resolved_snapshot_name(snapshot, name)
     market_state = market_result[0]
 
     scorer = _build_scorer(cfg)
@@ -152,6 +312,15 @@ async def _collect_inputs(ctx: Any, code: str, name: str) -> tuple[StockSnapshot
     snapshot = await ctx.market_svc.collect_snapshot(code, name=name, run_id=None)
     market_result = await ctx.market_svc.collect_market_state(run_id=None)
     return snapshot, market_result
+
+
+def _with_resolved_snapshot_name(snapshot: StockSnapshot, name: str) -> StockSnapshot:
+    quote = snapshot.quote
+    if quote is not None and (not quote.name or quote.name == quote.code):
+        quote = replace(quote, name=name)
+    if snapshot.name != name or quote is not snapshot.quote:
+        return replace(snapshot, name=name, quote=quote)
+    return snapshot
 
 
 def _build_scorer(cfg: dict) -> Scorer:

@@ -31,6 +31,7 @@ from astock_trading.platform.events import EventStore
 from astock_trading.platform.paths import resolve_config_dir, resolve_path_from_config
 from astock_trading.platform.runs import RunJournal
 from astock_trading.reporting.obsidian import ObsidianProjector
+from astock_trading.reporting.manual_confirmation import notify_manual_confirmation_requested
 from astock_trading.reporting.projectors import ProjectionUpdater
 from astock_trading.reporting.reports import ReportGenerator
 from astock_trading.risk.service import RiskService
@@ -127,7 +128,12 @@ def build_strategy_service(event_store: EventStore, cfg: dict) -> StrategyServic
         entry_cfg=cfg.get("entry_signal", {}),
     )
     decider = build_decider_from_config(cfg)
-    return StrategyService(scorer, decider, event_store)
+    return StrategyService(
+        scorer,
+        decider,
+        event_store,
+        manual_trade_notifier=notify_manual_confirmation_requested,
+    )
 
 
 def build_trade_hooks(event_store: EventStore, conn: Any, vault_path: Optional[str] = None) -> list:

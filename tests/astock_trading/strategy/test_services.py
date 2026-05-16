@@ -121,6 +121,40 @@ class TestStrategyService:
         assert intent["payload"]["position_pct"] > 0
         assert intent["metadata"]["run_id"] == "run_manual_intent"
 
+    def test_evaluate_invokes_manual_trade_notifier_after_buy_decision(self, event_store):
+        notifications = []
+        scorer = Scorer(
+            weights=ScoringWeights(technical=3, fundamental=2, flow=2, sentiment=3),
+            veto_rules=[],
+        )
+        decider = Decider(buy_threshold=6.5, watch_threshold=5.0)
+        svc = StrategyService(
+            scorer,
+            decider,
+            event_store,
+            manual_trade_notifier=notifications.append,
+        )
+
+        svc.evaluate(
+            [_make_snapshot("002138", "双环传动")],
+            MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
+            run_id="run_manual_notify",
+            config_version="v_test",
+        )
+
+        intent_events = event_store.query(event_type="manual_trade.requested")
+        assert len(intent_events) == 1
+        assert len(notifications) == 1
+        notification = notifications[0]
+        assert notification["event_id"] == intent_events[0]["event_id"]
+        assert notification["event_type"] == "manual_trade.requested"
+        assert notification["manual_trade"]["code"] == "002138"
+        assert notification["manual_trade"]["suggested_price"] == 15.0
+        assert notification["metadata"]["execution"] == "manual"
+        assert notification["score_result"].code == "002138"
+        assert notification["decision"].action == Action.BUY
+        assert notification["snapshot"].quote.close == 15.0
+
     def test_score_single_writes_event(self, event_store):
         scorer = Scorer(
             weights=ScoringWeights(technical=3, fundamental=2, flow=2, sentiment=3),

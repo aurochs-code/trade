@@ -38,7 +38,9 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         return {"scored": 0, "stock_list": []}
 
     # 2. 批量抓取
-    snapshots = asyncio.run(ctx.market_svc.collect_batch(stock_list, run_id))
+    snapshots = asyncio.run(
+        ctx.market_svc.collect_batch(stock_list, run_id, include_sector_context=True)
+    )
 
     # 3. 大盘信号
     market_state, index_data = asyncio.run(ctx.market_svc.collect_market_state(run_id))

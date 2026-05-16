@@ -29,6 +29,7 @@ COLORS = {
     "profit_alert": 0x2E7D32,
     "sentiment": 0xFF6F00,
     "info": 0x37474F,
+    "manual_confirmation": 0x5D4037,
 }
 
 SIGNAL_EMOJI = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴", "CLEAR": "⚪"}
@@ -285,7 +286,12 @@ def format_scoring_embed(scores: list[dict], date_str: str = "") -> dict:
         else:
             detail = f"技{int(s.get('technical_score', 0))} 基{int(s.get('fundamental_score', 0))} " \
                      f"资{int(s.get('flow_score', 0))} 舆{int(s.get('sentiment_score', 0))}"
-        fields.append(_field(f"{emoji} {name}", f"**{score:.1f}** · {detail}"))
+        lines = [f"**{score:.1f}** · {detail}"]
+        if route_summary := _score_route_summary(s):
+            lines.append(route_summary)
+        if blocker_summary := _score_blocker_summary(s):
+            lines.append(blocker_summary)
+        fields.append(_field(f"{emoji} {name}", "\n".join(lines)))
 
     return _embed(
         title=f"🎯 核心池评分 — {date_str}",
@@ -294,6 +300,224 @@ def format_scoring_embed(scores: list[dict], date_str: str = "") -> dict:
         fields=fields,
         footer="A-Stock Trading · scoring",
     )
+
+
+def _score_route_summary(score: dict) -> str:
+    routes = score.get("strategy_routes", []) or []
+    if not routes:
+        return ""
+    parts = []
+    fallback_entry = bool(score.get("entry_signal"))
+    for route in routes[:2]:
+        name = route.get("display_name") or route.get("route", "")
+        if not name:
+            continue
+        confidence = _to_float(route.get("confidence"))
+        entry_signal = route.get("entry_signal", fallback_entry)
+        state = "入场" if entry_signal else "观察"
+        parts.append(f"{name} {confidence:.0%} {state}")
+    return "路线 " + " / ".join(parts) if parts else ""
+
+
+def _score_blocker_summary(score: dict) -> str:
+    blockers = set(score.get("promotion_blockers", []) or [])
+    note = str(score.get("note", ""))
+    if "requires_entry_strategy_route" in note:
+        blockers.add("requires_entry_strategy_route")
+
+    labels = {
+        "requires_entry_strategy_route": "缺少有效策略路线",
+    }
+    parts = [labels.get(item, item) for item in blockers]
+    return "阻断 " + " / ".join(parts) if parts else ""
+
+
+def format_manual_confirmation_embed(analysis: dict) -> dict:
+    """人工确认摘要 → Discord embed dict。"""
+    resolved = analysis.get("resolved", {}) or {}
+    code = resolved.get("code") or analysis.get("code", "")
+    name = resolved.get("name") or analysis.get("name") or code
+    label = f"{name}({code})" if code and code != name else str(name or code)
+    quote = analysis.get("quote", {}) or {}
+    technical = analysis.get("technical", {}) or {}
+    score = analysis.get("score", {}) or {}
+    decision = analysis.get("decision", {}) or {}
+
+    action = str(decision.get("action", "WATCH") or "WATCH")
+    confidence = _to_float(decision.get("confidence", decision.get("score")))
+    position_pct = _to_float(decision.get("position_pct"))
+    market_signal = decision.get("market_signal") or (analysis.get("market", {}) or {}).get("signal", "-")
+    total_score = _to_float(score.get("total_score", score.get("total")))
+    data_quality = score.get("data_quality", "-")
+
+    fields = [
+        _field(
+            "核心结论",
+            "\n".join([
+                f"动作 `{action}` · 市场 `{market_signal}`",
+                f"置信度 `{confidence:.1f}` · 不自动下单",
+                "需人工确认后才允许记录成交",
+            ]),
+            inline=False,
+        ),
+        _field(
+            "评分",
+            f"总分 **{total_score:.1f}** · data={data_quality}\n{_dimension_summary(score)}",
+            inline=False,
+        ),
+        _field(
+            "趋势/路线",
+            "\n".join(_trend_route_lines(score, technical, quote)),
+            inline=False,
+        ),
+        _field(
+            "买卖点",
+            "\n".join([
+                f"现价 {_price_text(quote.get('price'))}",
+                f"建议仓位 {_pct_text(position_pct)}",
+                "买点/卖点以人工盘口确认和风控规则为准",
+            ]),
+            inline=False,
+        ),
+        _field(
+            "风险警报",
+            "\n".join(_risk_lines(analysis, score, decision)) or "暂无显性风险；仍需人工复核",
+            inline=False,
+        ),
+        _field(
+            "催化因素",
+            "\n".join(_catalyst_lines(analysis)) or "暂无明确催化",
+            inline=False,
+        ),
+        _field(
+            "操作检查清单",
+            "\n".join([
+                "确认价格/流动性/仓位/止损",
+                "确认公告、舆情和盘面没有新增负面",
+                "确认后再用 record-buy / record-sell 记录人工成交",
+            ]),
+            inline=False,
+        ),
+    ]
+
+    return _embed(
+        title=f"人工确认 — {local_today_str()}",
+        description=f"{label} · {action} · 不自动下单",
+        color=COLORS["manual_confirmation"],
+        fields=fields,
+        footer="A-Stock Trading · manual_confirmation",
+    )
+
+
+def _to_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _price_text(value: object) -> str:
+    return f"{_to_float(value):.2f}"
+
+
+def _pct_text(value: object) -> str:
+    pct = _to_float(value)
+    if abs(pct) <= 1:
+        pct *= 100
+    return f"{pct:.0f}%"
+
+
+def _dimension_summary(score: dict) -> str:
+    labels = {
+        "technical": "技",
+        "fundamental": "基",
+        "flow": "资",
+        "sentiment": "舆",
+    }
+    if "dimensions" in score:
+        parts = []
+        for item in score.get("dimensions", []) or []:
+            name = item.get("name", "")
+            if name in labels:
+                parts.append(f"{labels[name]}{_to_float(item.get('score')):.1f}")
+        if parts:
+            return " ".join(parts)
+    return (
+        f"技{_to_float(score.get('technical_score')):.1f} "
+        f"基{_to_float(score.get('fundamental_score')):.1f} "
+        f"资{_to_float(score.get('flow_score')):.1f} "
+        f"舆{_to_float(score.get('sentiment_score')):.1f}"
+    )
+
+
+def _trend_route_lines(score: dict, technical: dict, quote: dict) -> list[str]:
+    routes = score.get("strategy_routes", []) or []
+    route_lines = []
+    for route in routes[:3]:
+        name = route.get("display_name") or route.get("route", "")
+        confidence = _to_float(route.get("confidence"))
+        entry = "入场" if route.get("entry_signal") else "观察"
+        route_lines.append(f"{name} `{confidence:.0%}` · {entry}")
+    if not route_lines:
+        route_lines.append("无有效策略路线")
+
+    trend = [
+        f"现价 {_price_text(quote.get('price'))} / 涨跌 {_to_float(quote.get('change_pct')):+.2f}%",
+        "MA5/20/60 {ma5:.2f}/{ma20:.2f}/{ma60:.2f}".format(
+            ma5=_to_float(technical.get("ma5")),
+            ma20=_to_float(technical.get("ma20")),
+            ma60=_to_float(technical.get("ma60")),
+        ),
+        "RSI {rsi:.1f} · 量比 {volume_ratio:.1f} · 5日动量 {momentum:+.1f}%".format(
+            rsi=_to_float(technical.get("rsi")),
+            volume_ratio=_to_float(technical.get("volume_ratio")),
+            momentum=_to_float(technical.get("momentum_5d")),
+        ),
+    ]
+    flags = []
+    if technical.get("above_ma20"):
+        flags.append("站上MA20")
+    if technical.get("golden_cross"):
+        flags.append("均线金叉")
+    if score.get("entry_signal"):
+        flags.append("入场信号")
+    if flags:
+        trend.append(" / ".join(flags))
+    return route_lines + trend
+
+
+def _risk_lines(analysis: dict, score: dict, decision: dict) -> list[str]:
+    lines: list[str] = []
+    for item in score.get("hard_veto", []) or []:
+        lines.append(f"硬否决: {item}")
+    for item in decision.get("veto_reasons", []) or []:
+        lines.append(f"门控: {item}")
+    for item in score.get("warning_signals", []) or []:
+        lines.append(f"预警: {item}")
+    for item in analysis.get("findings", []) or []:
+        if "warning" in str(item).lower() or "risk" in str(item).lower() or "veto" in str(item).lower():
+            lines.append(str(item))
+    for item in decision.get("notes", []) or []:
+        lines.append(str(item))
+    return lines[:6]
+
+
+def _catalyst_lines(analysis: dict) -> list[str]:
+    sentiment = analysis.get("sentiment", {}) or {}
+    candidates = []
+    for key in ("catalysts", "news", "announcements", "events"):
+        value = analysis.get(key) or sentiment.get(key)
+        if isinstance(value, list):
+            candidates.extend(value)
+    lines = []
+    for item in candidates:
+        if isinstance(item, dict):
+            text = item.get("title") or item.get("summary") or item.get("brief") or item.get("name")
+        else:
+            text = str(item)
+        if text:
+            lines.append(str(text))
+    return lines[:5]
 
 
 def format_stop_alert_embed(signal: dict) -> dict:
@@ -643,6 +867,22 @@ def format_daily_inspection_embed(summary: dict) -> dict:
             inline=False,
         ))
 
+    manual_items = summary.get("pending_manual_trade_items", []) or []
+    if manual_items:
+        fields.append(_field(
+            "人工确认明细",
+            "\n".join(_manual_trade_lines(manual_items[:5])),
+            inline=False,
+        ))
+
+    route_blockers = summary.get("route_blocked_watch_candidates", []) or []
+    if route_blockers:
+        fields.append(_field(
+            "观察池阻断",
+            "\n".join(_route_blocker_lines(route_blockers[:5])),
+            inline=False,
+        ))
+
     if plan_actions:
         action_lines = [
             f"- [{item.get('priority', '-')}] {item.get('type', '-')}"
@@ -669,6 +909,35 @@ def _short_report_path(path: str) -> str:
     if marker in path:
         return path[path.index(marker):]
     return path
+
+
+def _manual_trade_lines(items: list[dict]) -> list[str]:
+    lines = []
+    for item in items:
+        code = item.get("code", "")
+        name = item.get("name") or code
+        side = item.get("side", "-")
+        score = _to_float(item.get("score", item.get("confidence")))
+        position = _pct_text(item.get("position_pct", 0))
+        lines.append(f"{name}({code}) {side} · 评分 {score:.1f} · 仓位 {position}")
+    return lines
+
+
+def _route_blocker_lines(items: list[dict]) -> list[str]:
+    lines = []
+    for item in items:
+        code = item.get("code", "")
+        name = item.get("name") or code
+        score = _to_float(item.get("score"))
+        reason = _candidate_note_label(str(item.get("note", "")))
+        lines.append(f"{name}({code}) {score:.1f} · {reason}")
+    return lines
+
+
+def _candidate_note_label(note: str) -> str:
+    if "requires_entry_strategy_route" in note:
+        return "缺少有效策略路线"
+    return note or "待复核"
 
 
 def format_sector_heatmap_embed(sectors: list[dict], title: str = "") -> dict:

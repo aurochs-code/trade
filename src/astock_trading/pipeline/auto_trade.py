@@ -327,15 +327,19 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     # ------------------------------------------------------------------
     _record_summary_event(ctx, run_id, buys, sells, dry_run)
 
-    embed = _format_auto_trade_embed(buys, sells, balance, market_state, dry_run)
-    try:
-        from astock_trading.reporting.discord_sender import send_embed
-        prefix = "🧪 " if dry_run else ""
-        ok, err = send_embed(embed, content=f"{prefix}模拟盘自动交易")
-        if not ok:
-            _logger.warning(f"[auto_trade] Discord 推送失败: {err}")
-    except Exception as e:
-        _logger.warning(f"[auto_trade] Discord 推送异常: {e}")
+    embed = None
+    if buys or sells:
+        embed = _format_auto_trade_embed(buys, sells, balance, market_state, dry_run)
+        try:
+            from astock_trading.reporting.discord_sender import send_embed
+            prefix = "🧪 " if dry_run else ""
+            ok, err = send_embed(embed, content=f"{prefix}模拟盘自动交易")
+            if not ok:
+                _logger.warning(f"[auto_trade] Discord 推送失败: {err}")
+        except Exception as e:
+            _logger.warning(f"[auto_trade] Discord 推送异常: {e}")
+    else:
+        _logger.info("[auto_trade] 无交易动作，跳过 Discord 单独推送")
 
     # Obsidian 日志 + 模拟盘日报
     _write_obsidian_log(ctx, run_id, buys, sells, dry_run)

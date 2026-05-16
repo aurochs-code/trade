@@ -15,6 +15,7 @@ from astock_trading.strategy.models import (
     DimensionScore,
     ScoreResult,
     ScoringWeights,
+    StrategyRouteEvidence,
     Style,
 )
 
@@ -62,6 +63,7 @@ class Scorer:
         style, style_conf = self._classify_style(snapshot)
         entry_signal = self._check_entry(snapshot, tech)
         data_quality, missing = self._assess_quality(snapshot, fund)
+        strategy_routes = self._detect_strategy_routes(snapshot)
 
         return ScoreResult(
             code=snapshot.code,
@@ -77,6 +79,8 @@ class Scorer:
             style_confidence=style_conf,
             data_quality=data_quality,
             data_missing_fields=missing,
+            strategy_routes=strategy_routes,
+            primary_strategy_route=strategy_routes[0].route if strategy_routes else None,
         )
 
     def score_batch(self, snapshots: list[StockSnapshot]) -> list[ScoreResult]:
@@ -262,6 +266,129 @@ class Scorer:
         return t.golden_cross and t.volume_ratio >= vol_min and t.rsi < rsi_max
 
     # ------------------------------------------------------------------
+    # 策略路线证据
+    # ------------------------------------------------------------------
+
+    def _detect_strategy_routes(self, s: StockSnapshot) -> list[StrategyRouteEvidence]:
+        """Map deterministic indicator patterns to reusable strategy routes."""
+        t = s.technical
+        if not t:
+            return []
+
+        routes: list[StrategyRouteEvidence] = []
+        rsi_max = float(self.entry_cfg.get("rsi_max", 70))
+        close_near_high = _close_near_high(s)
+        liquidity_amount = float(s.quote.amount if s.quote else 0.0)
+
+        if (
+            t.above_ma20
+            and t.volume_ratio >= 2.0
+            and t.momentum_5d >= 3.0
+            and 0 <= t.deviation_rate <= 7.0
+            and t.rsi < max(rsi_max, 72)
+            and close_near_high
+        ):
+            routes.append(StrategyRouteEvidence(
+                route="volume_breakout",
+                display_name="放量突破",
+                family="short_continuation",
+                confidence=0.92,
+                entry_signal=t.golden_cross and t.rsi < rsi_max,
+                evidence={
+                    "volume_ratio": round(t.volume_ratio, 2),
+                    "momentum_5d": round(t.momentum_5d, 2),
+                    "deviation_rate": round(t.deviation_rate, 2),
+                    "close_near_high": close_near_high,
+                    "above_ma20": t.above_ma20,
+                },
+                notes=["borrowed_from_daily_stock_analysis:volume_breakout"],
+            ))
+
+        if (
+            t.above_ma20
+            and t.ma5 >= t.ma10 >= t.ma20 > 0
+            and t.ma20 > t.ma60 > 0
+            and t.volume_ratio <= 1.2
+            and 40 <= t.rsi <= 65
+            and -1.5 <= t.deviation_rate <= 3.0
+            and t.ma20_slope >= 0.003
+        ):
+            routes.append(StrategyRouteEvidence(
+                route="shrink_pullback",
+                display_name="缩量回踩",
+                family="trend_swing",
+                confidence=0.84,
+                entry_signal=t.rsi < rsi_max,
+                evidence={
+                    "volume_ratio": round(t.volume_ratio, 2),
+                    "rsi": round(t.rsi, 2),
+                    "deviation_rate": round(t.deviation_rate, 2),
+                    "ma20_slope": round(t.ma20_slope, 4),
+                    "ma_order": "ma5>=ma10>=ma20>ma60",
+                },
+                notes=["borrowed_from_daily_stock_analysis:shrink_pullback"],
+            ))
+
+        if (
+            t.golden_cross
+            and t.above_ma20
+            and t.volume_ratio >= 1.2
+            and 30 <= t.rsi < rsi_max
+            and t.ma20_slope >= 0
+        ):
+            routes.append(StrategyRouteEvidence(
+                route="ma_golden_cross",
+                display_name="均线金叉",
+                family="trend_swing",
+                confidence=0.78,
+                entry_signal=t.volume_ratio >= float(self.entry_cfg.get("volume_ratio_min", 1.5)),
+                evidence={
+                    "golden_cross": t.golden_cross,
+                    "volume_ratio": round(t.volume_ratio, 2),
+                    "rsi": round(t.rsi, 2),
+                    "ma20_slope": round(t.ma20_slope, 4),
+                },
+                notes=["borrowed_from_daily_stock_analysis:ma_golden_cross"],
+            ))
+
+        if (
+            t.above_ma20
+            and liquidity_amount >= 5e8
+            and t.volume_ratio >= 1.5
+            and t.momentum_5d >= 5.0
+            and t.change_pct >= 3.0
+            and t.deviation_rate <= 10.0
+        ):
+            sector = s.sector
+            sector_confirmed = bool(sector and sector.confirmed)
+            notes = ["borrowed_from_daily_stock_analysis:dragon_head"]
+            if not sector_confirmed:
+                notes.append("requires_sector_strength_confirmation")
+            routes.append(StrategyRouteEvidence(
+                route="dragon_head",
+                display_name="龙头策略",
+                family="sector_momentum",
+                confidence=0.9 if sector_confirmed else 0.7,
+                entry_signal=sector_confirmed,
+                evidence={
+                    "amount": round(liquidity_amount, 2),
+                    "volume_ratio": round(t.volume_ratio, 2),
+                    "momentum_5d": round(t.momentum_5d, 2),
+                    "change_pct": round(t.change_pct, 2),
+                    "sector_confirmation": "confirmed" if sector_confirmed else "unavailable",
+                    "industry_name": sector.industry_name if sector else "",
+                    "industry_rank": sector.industry_rank if sector else None,
+                    "industry_change_pct": sector.industry_change_pct if sector else 0.0,
+                    "leader": sector.leader if sector else "",
+                    "relative_strength_pct": sector.relative_strength_pct if sector else 0.0,
+                },
+                notes=notes,
+            ))
+
+        routes.sort(key=lambda route: route.confidence, reverse=True)
+        return routes
+
+    # ------------------------------------------------------------------
     # 风格判定
     # ------------------------------------------------------------------
 
@@ -321,3 +448,10 @@ def split_veto_signals(signals: list[str]) -> tuple[list[str], list[str]]:
     hard = [s for s in signals if s not in WARNING_ONLY_SIGNALS]
     warn = [s for s in signals if s in WARNING_ONLY_SIGNALS]
     return hard, warn
+
+
+def _close_near_high(s: StockSnapshot) -> bool:
+    q = s.quote
+    if not q or q.high <= 0:
+        return False
+    return q.close >= q.high * 0.98

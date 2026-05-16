@@ -11,6 +11,7 @@ from astock_trading.reporting.discord import (
     format_evening_embed, format_morning_embed,
     format_scoring_embed, format_stop_alert_embed,
     format_propose_plan_embed, format_daily_inspection_embed,
+    format_manual_confirmation_embed,
 )
 from astock_trading.reporting.obsidian import ObsidianProjector
 from astock_trading.reporting.projectors import ProjectionUpdater
@@ -127,6 +128,45 @@ def test_format_daily_inspection_embed_summarizes_health_and_report_path():
     assert "core_pool" in values
     assert "待确认 2" in values
     assert "trade-vault/02-巡检/2026-05-16.md" in values
+
+
+def test_format_daily_inspection_embed_expands_manual_trades_and_route_blockers():
+    embed = format_daily_inspection_embed({
+        "date": "2026-05-16",
+        "doctor_status": "ok",
+        "health_status": "ok",
+        "diagnose_health_status": "ok",
+        "candidate_pool": {"total": 2, "core_count": 0, "watch_count": 2},
+        "pending_manual_trades": 1,
+        "pending_manual_trade_items": [
+            {
+                "code": "600703",
+                "name": "三安光电",
+                "side": "BUY",
+                "score": 6.3,
+                "position_pct": 0.16,
+            }
+        ],
+        "route_blocked_watch_candidates": [
+            {
+                "code": "300558",
+                "name": "贝达药业",
+                "score": 6.2,
+                "note": "screener_refresh:requires_entry_strategy_route",
+            }
+        ],
+    })
+
+    field_names = {field["name"] for field in embed["fields"]}
+    assert "人工确认明细" in field_names
+    assert "观察池阻断" in field_names
+    values = "\n".join(field["value"] for field in embed["fields"])
+    assert "三安光电(600703)" in values
+    assert "BUY" in values
+    assert "6.3" in values
+    assert "仓位 16%" in values
+    assert "贝达药业(300558)" in values
+    assert "缺少有效策略路线" in values
 
 
 class TestProjectionUpdater:
@@ -262,6 +302,107 @@ class TestDiscordFormat:
         ])
         assert len(embed["fields"]) == 1
 
+    def test_scoring_embed_shows_strategy_route_and_entry_blocker(self):
+        embed = format_scoring_embed([
+            {
+                "name": "Breakout",
+                "code": "001",
+                "total_score": 6.2,
+                "technical_score": 2,
+                "fundamental_score": 1,
+                "flow_score": 1,
+                "sentiment_score": 2,
+                "entry_signal": False,
+                "strategy_routes": [
+                    {"display_name": "放量突破", "confidence": 0.92, "entry_signal": False}
+                ],
+                "promotion_blockers": ["requires_entry_strategy_route"],
+            },
+        ])
+
+        value = embed["fields"][0]["value"]
+        assert "放量突破" in value
+        assert "观察" in value
+        assert "缺少有效策略路线" in value
+
+    def test_manual_confirmation_embed_summarizes_required_review_blocks(self):
+        embed = format_manual_confirmation_embed({
+            "resolved": {"code": "600703", "name": "三安光电"},
+            "execution_allowed": False,
+            "quote": {"price": 12.3, "change_pct": 1.2},
+            "technical": {
+                "ma5": 12.0,
+                "ma20": 11.5,
+                "ma60": 10.8,
+                "above_ma20": True,
+                "golden_cross": True,
+                "rsi": 58,
+                "volume_ratio": 1.8,
+                "momentum_5d": 3.0,
+            },
+            "score": {
+                "total_score": 6.3,
+                "data_quality": "ok",
+                "entry_signal": True,
+                "strategy_routes": [
+                    {
+                        "route": "volume_breakout",
+                        "display_name": "放量突破",
+                        "confidence": 0.92,
+                        "entry_signal": True,
+                    }
+                ],
+                "dimensions": [
+                    {"name": "technical", "score": 2.4},
+                    {"name": "fundamental", "score": 1.4},
+                    {"name": "flow", "score": 1.0},
+                    {"name": "sentiment", "score": 1.5},
+                ],
+                "warning_signals": ["turnover_spike"],
+            },
+            "decision": {
+                "action": "BUY",
+                "confidence": 6.3,
+                "position_pct": 0.16,
+                "market_signal": "GREEN",
+                "notes": ["market gate ok"],
+            },
+            "sentiment": {
+                "news": [
+                    {"title": "MiniLED 订单改善", "level": "event"},
+                    {"summary": "机构调研关注产能利用率"},
+                ]
+            },
+            "findings": ["warning signals: turnover_spike"],
+            "recommendations": [
+                "manual confirmation required before any order; this report never executes trades",
+                "treat BUY as a candidate intent, then verify price, liquidity, and portfolio risk",
+            ],
+        })
+
+        assert "人工确认" in embed["title"]
+        assert "三安光电(600703)" in embed["description"]
+        names = {field["name"] for field in embed["fields"]}
+        assert {
+            "核心结论",
+            "评分",
+            "趋势/路线",
+            "买卖点",
+            "风险警报",
+            "催化因素",
+            "操作检查清单",
+        } <= names
+        values = "\n".join(field["value"] for field in embed["fields"])
+        assert "不自动下单" in values
+        assert "BUY" in values
+        assert "6.3" in values
+        assert "放量突破" in values
+        assert "现价 12.30" in values
+        assert "建议仓位 16%" in values
+        assert "turnover_spike" in values
+        assert "MiniLED 订单改善" in values
+        assert "确认价格/流动性/仓位/止损" in values
+
     def test_stop_alert_embed(self):
         assert "止损" in format_stop_alert_embed({
             "code": "002138", "signal_type": "stop_loss", "description": "跌破止损线", "urgency": "immediate",
@@ -278,6 +419,42 @@ class TestObsidianProjector:
 
     def test_pool_status(self, event_store, db):
         assert "观察池" in ObsidianProjector(event_store, db).write_pool_status()
+
+    def test_watch_pool_explains_route_blocker_note(self, event_store, db):
+        ProjectionUpdater(event_store, db).sync_candidate_pool([
+            {
+                "code": "001",
+                "name": "A",
+                "pool_tier": "watch",
+                "score": 6.2,
+                "note": "screener_refresh:requires_entry_strategy_route",
+            }
+        ])
+
+        content = ObsidianProjector(event_store, db).write_watch_pool()
+
+        assert "缺少有效策略路线，暂留观察" in content
+        assert "requires_entry_strategy_route" not in content
+
+    def test_signal_snapshot_lists_route_blocked_watch_candidates(self, event_store, db):
+        ProjectionUpdater(event_store, db).sync_candidate_pool([
+            {
+                "code": "001",
+                "name": "A",
+                "pool_tier": "watch",
+                "score": 6.2,
+                "note": "screener_refresh:requires_entry_strategy_route",
+            }
+        ])
+
+        content = ObsidianProjector(event_store, db).write_signal_snapshot(
+            run_id="run_1",
+            market_state_detail={"indices": {}},
+            market_signal="YELLOW",
+        )
+
+        assert "观察池阻断" in content
+        assert "| A | 001 | 6.2 | 缺少有效策略路线，暂留观察 |" in content
 
     def test_write_to_vault(self, event_store, db, tmp_path):
         vault = tmp_path / "vault"
@@ -347,3 +524,29 @@ class TestScreeningResultRendering:
         assert "| Buy | 001 | 6.0 |  | 可买入 |" in candidate_content
         assert "| Watch | 002 | 5.0 |  | 观察 |" in candidate_content
         assert "Veto" not in candidate_content
+
+    def test_render_screening_result_shows_strategy_routes(self):
+        content, candidate_content = render_screening_result(
+            today="2026-05-16",
+            now="2026-05-16 09:30:00",
+            run_id="run_1",
+            query="test query",
+            scores=[
+                {
+                    "name": "Breakout",
+                    "code": "001",
+                    "total_score": 6.0,
+                    "strategy_routes": [
+                        {"route": "volume_breakout", "display_name": "放量突破"},
+                    ],
+                    "primary_strategy_route": "volume_breakout",
+                },
+            ],
+            buy_threshold=5.5,
+            watch_threshold=5.0,
+        )
+
+        assert "路线" in content
+        assert "放量突破" in content
+        assert candidate_content is not None
+        assert "| Breakout | 001 | 6.0 | 放量突破 |" in candidate_content

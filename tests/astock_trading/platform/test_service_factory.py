@@ -44,6 +44,78 @@ def test_pipeline_context_uses_shared_market_service_builder(tmp_path, monkeypat
         ctx.conn.close()
 
 
+def test_build_strategy_service_wires_manual_confirmation_notifier(tmp_path, monkeypatch):
+    from astock_trading.market.models import (
+        FinancialReport,
+        FundFlow,
+        SentimentData,
+        StockQuote,
+        StockSnapshot,
+        TechnicalIndicators,
+    )
+    from astock_trading.platform import service_factory
+    from astock_trading.platform.events import EventStore
+    from astock_trading.strategy.models import MarketSignal, MarketState
+
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    calls = []
+    monkeypatch.setattr(
+        service_factory,
+        "notify_manual_confirmation_requested",
+        calls.append,
+    )
+    try:
+        service = service_factory.build_strategy_service(EventStore(conn), {
+            "scoring": {"thresholds": {"buy": 6.5, "watch": 5.0}},
+        })
+        service.evaluate(
+            [
+                StockSnapshot(
+                    code="002138",
+                    name="双环传动",
+                    quote=StockQuote(
+                        code="002138",
+                        name="双环传动",
+                        price=15.0,
+                        open=14.8,
+                        high=15.2,
+                        low=14.7,
+                        close=15.0,
+                        volume=5000000,
+                        amount=7.5e8,
+                        change_pct=1.5,
+                    ),
+                    technical=TechnicalIndicators(
+                        ma5=15.0,
+                        ma10=14.5,
+                        ma20=14.0,
+                        ma60=13.0,
+                        above_ma20=True,
+                        volume_ratio=1.8,
+                        rsi=55.0,
+                        golden_cross=True,
+                        ma20_slope=0.01,
+                        momentum_5d=3.0,
+                        daily_volatility=0.025,
+                    ),
+                    financial=FinancialReport(roe=12.0, revenue_growth=15.0, operating_cash_flow=1e8),
+                    flow=FundFlow(net_inflow_1d=6e8, northbound_net_positive=True),
+                    sentiment=SentimentData(score=2.0, detail="研报3篇"),
+                )
+            ],
+            MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
+            run_id="run_notify_factory",
+            config_version="v_test",
+        )
+    finally:
+        conn.close()
+
+    assert len(calls) == 1
+    assert calls[0]["manual_trade"]["code"] == "002138"
+
+
 def test_mcp_init_uses_shared_runtime_factory(monkeypatch):
     from types import SimpleNamespace
 

@@ -221,3 +221,49 @@ def test_run_skips_buy_and_returns_diagnostic_when_scoring_inputs_are_stale(
     assert result["diagnostics"][0]["reason"] == "scoring_inputs_stale"
     assert result["diagnostics"][0]["details"]["age_hours"] > 24
     assert paper.buy_calls == []
+
+
+def test_run_does_not_push_discord_when_no_trade_actions(auto_trade_ctx, monkeypatch):
+    paper = FakePaperAccount()
+    calls = []
+    monkeypatch.setattr("astock_trading.pipeline.auto_trade.PaperAccount", lambda: paper)
+    monkeypatch.setattr(
+        "astock_trading.reporting.discord_sender.send_embed",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or (True, ""),
+    )
+
+    result = run(auto_trade_ctx, "run-no-actions")
+
+    assert result["buys"] == []
+    assert result["sells"] == []
+    assert result["discord_embed"] is None
+    assert calls == []
+
+
+def test_run_pushes_discord_when_auto_trade_has_actions(auto_trade_ctx, monkeypatch):
+    paper = FakePaperAccount()
+    calls = []
+    sell_action = {
+        "side": "sell",
+        "code": "002138",
+        "name": "双环传动",
+        "shares": 100,
+        "price": 10.0,
+        "reason": "stop_loss",
+        "status": "dry_run",
+    }
+    monkeypatch.setattr("astock_trading.pipeline.auto_trade.PaperAccount", lambda: paper)
+    monkeypatch.setattr(
+        "astock_trading.pipeline.auto_trade._check_and_sell",
+        lambda *args, **kwargs: [sell_action],
+    )
+    monkeypatch.setattr(
+        "astock_trading.reporting.discord_sender.send_embed",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or (True, ""),
+    )
+
+    result = run(auto_trade_ctx, "run-with-actions")
+
+    assert result["sells"] == [sell_action]
+    assert result["discord_embed"] is not None
+    assert len(calls) == 1

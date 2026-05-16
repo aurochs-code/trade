@@ -14,6 +14,16 @@ from astock_trading.platform.events import EventStore
 from astock_trading.reporting.projectors import ProjectionUpdater
 
 
+def _entry_route(route: str = "ma_golden_cross") -> dict:
+    return {
+        "route": route,
+        "display_name": "均线金叉",
+        "family": "trend_swing",
+        "confidence": 0.82,
+        "entry_signal": True,
+    }
+
+
 def test_watch_threshold_defaults_to_strategy_config():
     ctx = SimpleNamespace(
         cfg={
@@ -115,7 +125,13 @@ def test_refresh_replays_existing_candidates_into_governed_pool(tmp_path):
         changes = _apply_candidate_pool_refresh(
             ctx,
             [
-                {"code": "001", "name": "A", "total_score": 6.0, "veto_triggered": False},
+                {
+                    "code": "001",
+                    "name": "A",
+                    "total_score": 6.0,
+                    "veto_triggered": False,
+                    "strategy_routes": [_entry_route()],
+                },
                 {"code": "002", "name": "B", "total_score": 4.7, "veto_triggered": False},
                 {"code": "003", "name": "C", "total_score": 3.5, "veto_triggered": False},
             ],
@@ -189,8 +205,20 @@ def test_refresh_requires_promote_streak_before_core_promotion(tmp_path):
         changes = _apply_candidate_pool_refresh(
             ctx,
             [
-                {"code": "001", "name": "A", "total_score": 5.8, "veto_triggered": False},
-                {"code": "002", "name": "B", "total_score": 5.9, "veto_triggered": False},
+                {
+                    "code": "001",
+                    "name": "A",
+                    "total_score": 5.8,
+                    "veto_triggered": False,
+                    "strategy_routes": [_entry_route()],
+                },
+                {
+                    "code": "002",
+                    "name": "B",
+                    "total_score": 5.9,
+                    "veto_triggered": False,
+                    "strategy_routes": [_entry_route("volume_breakout")],
+                },
             ],
             run_id="screener_refresh_test",
         )
@@ -209,6 +237,91 @@ def test_refresh_requires_promote_streak_before_core_promotion(tmp_path):
         ]
         assert changes["watched"] == [
             {"code": "001", "name": "A", "score": 5.8, "from": "watch", "to": "watch"}
+        ]
+    finally:
+        conn.close()
+
+
+def test_refresh_requires_entry_strategy_route_before_core_promotion(tmp_path):
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        store = EventStore(conn)
+        projector = ProjectionUpdater(store, conn)
+        ctx = SimpleNamespace(
+            cfg={
+                "scoring": {"thresholds": {"buy": 5.5, "watch": 5.0, "reject": 4.0}},
+                "pool_management": {
+                    "promote_min_score": 5.5,
+                    "promote_streak_days": 1,
+                    "watch_min_score": 5.0,
+                    "remove_max_score": 4.0,
+                },
+            },
+            conn=conn,
+            event_store=store,
+            projector=projector,
+        )
+
+        changes = _apply_candidate_pool_refresh(
+            ctx,
+            [
+                {
+                    "code": "001",
+                    "name": "A",
+                    "total_score": 6.2,
+                    "veto_triggered": False,
+                    "strategy_routes": [],
+                },
+                {
+                    "code": "002",
+                    "name": "B",
+                    "total_score": 6.1,
+                    "veto_triggered": False,
+                    "strategy_routes": [
+                        {
+                            **_entry_route("dragon_head"),
+                            "display_name": "龙头策略",
+                            "family": "sector_momentum",
+                            "entry_signal": False,
+                        }
+                    ],
+                },
+            ],
+            run_id="screener_refresh_test",
+        )
+
+        rows = conn.execute(
+            """SELECT code, pool_tier, score, note
+               FROM projection_candidate_pool
+               ORDER BY code"""
+        ).fetchall()
+        assert [(row["code"], row["pool_tier"], row["score"]) for row in rows] == [
+            ("001", "watch", 6.2),
+            ("002", "watch", 6.1),
+        ]
+        assert {row["note"] for row in rows} == {
+            "screener_refresh:requires_entry_strategy_route"
+        }
+        assert changes["promoted"] == []
+        assert changes["watched"] == [
+            {
+                "code": "001",
+                "name": "A",
+                "score": 6.2,
+                "from": None,
+                "to": "watch",
+                "reason": "requires_entry_strategy_route",
+            },
+            {
+                "code": "002",
+                "name": "B",
+                "score": 6.1,
+                "from": None,
+                "to": "watch",
+                "reason": "requires_entry_strategy_route",
+            },
         ]
     finally:
         conn.close()

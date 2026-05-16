@@ -62,6 +62,30 @@ class DimensionScore:
 
 
 @dataclass(frozen=True)
+class StrategyRouteEvidence:
+    """Deterministic evidence that a stock matches a known strategy route."""
+
+    route: str
+    display_name: str
+    family: str
+    confidence: float
+    evidence: dict = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
+    entry_signal: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "route": self.route,
+            "display_name": self.display_name,
+            "family": self.family,
+            "confidence": self.confidence,
+            "evidence": self.evidence,
+            "notes": self.notes,
+            "entry_signal": self.entry_signal,
+        }
+
+
+@dataclass(frozen=True)
 class ScoreResult:
     code: str
     name: str
@@ -76,6 +100,8 @@ class ScoreResult:
     style_confidence: float = 0.0
     data_quality: DataQuality = DataQuality.OK
     data_missing_fields: list[str] = field(default_factory=list)
+    strategy_routes: list[StrategyRouteEvidence] = field(default_factory=list)
+    primary_strategy_route: Optional[str] = None
     scored_at: datetime = field(default_factory=datetime.now)
 
     def to_dict(self) -> dict:
@@ -100,6 +126,8 @@ class ScoreResult:
             "style_confidence": self.style_confidence,
             "data_quality": self.data_quality.value,
             "data_missing_fields": self.data_missing_fields,
+            "strategy_routes": [route.to_dict() for route in self.strategy_routes],
+            "primary_strategy_route": self.primary_strategy_route,
         }
 
     def _dim_score(self, name: str) -> float:

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sqlite3
 
+import astock_trading.platform.stock_analysis as stock_analysis
 from astock_trading.market.models import StockQuote, StockSnapshot, TechnicalIndicators
 from astock_trading.platform.stock_analysis import (
     build_stock_analysis_payload,
+    lookup_stock_identifier_from_db,
     resolve_stock_identifier,
+    _with_resolved_snapshot_name,
 )
 from astock_trading.strategy.models import (
     Action,
@@ -27,6 +32,139 @@ def test_resolve_stock_identifier_supports_chinese_name():
     result = asyncio.run(resolve_stock_identifier("三安光电", resolver=resolver))
 
     assert result == {"code": "600703", "name": "三安光电", "source": "screener"}
+
+
+def test_resolve_stock_identifier_backfills_name_for_input_code():
+    result = asyncio.run(
+        resolve_stock_identifier(
+            "600703",
+            name_lookup=lambda value: {"code": value, "name": "三安光电", "source": "local_cache"},
+        )
+    )
+
+    assert result == {"code": "600703", "name": "三安光电", "source": "local_cache"}
+
+
+def test_resolve_stock_identifier_uses_screener_for_input_code_when_local_cache_misses():
+    async def resolver(query: str) -> list[dict]:
+        assert query == "600703"
+        return [{"代码": "600703", "名称": "三安光电"}]
+
+    result = asyncio.run(
+        resolve_stock_identifier("600703", resolver=resolver, name_lookup=lambda value: None)
+    )
+
+    assert result == {"code": "600703", "name": "三安光电", "source": "screener"}
+
+
+def test_resolve_stock_identifier_uses_basic_info_for_input_code_when_screener_misses(monkeypatch):
+    async def resolver(query: str) -> list[dict]:
+        assert query == "600519"
+        return []
+
+    async def basic_info_lookup(code: str) -> str | None:
+        assert code == "600519"
+        return "贵州茅台"
+
+    monkeypatch.setattr(stock_analysis, "_lookup_stock_name_from_basic_info", basic_info_lookup)
+
+    result = asyncio.run(
+        resolve_stock_identifier("600519", resolver=resolver, name_lookup=lambda value: None)
+    )
+
+    assert result == {"code": "600519", "name": "贵州茅台", "source": "basic_info"}
+
+
+def test_resolve_stock_identifier_uses_spot_snapshot_for_name_when_screener_misses(monkeypatch):
+    async def resolver(query: str) -> list[dict]:
+        assert query == "三安光电"
+        return []
+
+    async def spot_lookup(identifier: str) -> dict | None:
+        assert identifier == "三安光电"
+        return {"code": "600703", "name": "三安光电", "source": "spot"}
+
+    monkeypatch.setattr(stock_analysis, "_lookup_stock_from_spot", spot_lookup)
+
+    result = asyncio.run(
+        resolve_stock_identifier("三安光电", resolver=resolver, name_lookup=lambda value: None)
+    )
+
+    assert result == {"code": "600703", "name": "三安光电", "source": "spot"}
+
+
+def test_lookup_stock_identifier_from_db_resolves_recent_observation_name():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """CREATE TABLE projection_candidate_pool (
+            code TEXT,
+            pool_tier TEXT,
+            name TEXT,
+            score REAL,
+            added_at TEXT,
+            last_scored_at TEXT
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE market_observations (
+            observation_id TEXT,
+            source TEXT,
+            kind TEXT,
+            symbol TEXT,
+            observed_at TEXT,
+            run_id TEXT,
+            payload_json TEXT
+        )"""
+    )
+    conn.execute(
+        """INSERT INTO market_observations
+           (observation_id, source, kind, symbol, observed_at, payload_json)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (
+            "obs-1",
+            "test",
+            "stock_news",
+            "600703",
+            "2026-05-16T00:00:00+00:00",
+            json.dumps({"quote": {"代码": "600703", "名称": "三安光电"}}, ensure_ascii=False),
+        ),
+    )
+
+    assert lookup_stock_identifier_from_db(conn, "三安光电") == {
+        "code": "600703",
+        "name": "三安光电",
+        "source": "local_cache",
+    }
+    assert lookup_stock_identifier_from_db(conn, "600703") == {
+        "code": "600703",
+        "name": "三安光电",
+        "source": "local_cache",
+    }
+
+
+def test_with_resolved_snapshot_name_updates_quote_name_when_provider_returns_code():
+    snapshot = StockSnapshot(
+        code="600703",
+        name="600703",
+        quote=StockQuote(
+            code="600703",
+            name="600703",
+            price=12.3,
+            open=12.0,
+            high=12.5,
+            low=11.9,
+            close=12.3,
+            volume=1000000,
+            amount=12300000,
+            change_pct=1.2,
+        ),
+    )
+
+    result = _with_resolved_snapshot_name(snapshot, "三安光电")
+
+    assert result.name == "三安光电"
+    assert result.quote.name == "三安光电"
 
 
 def test_build_stock_analysis_payload_marks_report_non_executable():

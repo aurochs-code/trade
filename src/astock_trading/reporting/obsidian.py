@@ -31,6 +31,19 @@ from astock_trading.reporting.screening_result import render_screening_result
 _logger = logging.getLogger(__name__)
 
 
+_CANDIDATE_NOTE_LABELS = {
+    "requires_entry_strategy_route": "缺少有效策略路线，暂留观察",
+}
+
+
+def _candidate_note_display(note: str | None) -> str:
+    raw = note or ""
+    for marker, label in _CANDIDATE_NOTE_LABELS.items():
+        if marker in raw:
+            return label
+    return raw
+
+
 class ObsidianProjector:
     """从投影表生成 Obsidian markdown 文件。"""
 
@@ -235,7 +248,8 @@ class ObsidianProjector:
             lines.append(
                 f"| {i} | {r['name'] or ''} | {r['code']} "
                 f"| {emoji} **{score:.1f}** "
-                f"| {(r['added_at'] or '')[:10]} | {r['streak_days'] or 0} | {r['note'] or ''} |"
+                f"| {(r['added_at'] or '')[:10]} | {r['streak_days'] or 0} "
+                f"| {_candidate_note_display(r['note'])} |"
             )
         if not rows:
             lines.append("| — | — | — | — | — | — | 暂无 |")
@@ -271,7 +285,8 @@ class ObsidianProjector:
             score = r["score"] or 0
             lines.append(
                 f"| {i} | {r['name'] or ''} | {r['code']} "
-                f"| **{score:.1f}** | {(r['added_at'] or '')[:10]} | {r['note'] or ''} |"
+                f"| **{score:.1f}** | {(r['added_at'] or '')[:10]} "
+                f"| {_candidate_note_display(r['note'])} |"
             )
         if not rows:
             lines.append("| — | — | — | — | — | 暂无 |")
@@ -487,7 +502,7 @@ class ObsidianProjector:
                     lines.append(
                         f"| {i} | {r['name'] or ''} | {r['code']} "
                         f"| {emoji} **{score:.1f}** "
-                        f"| {(r['added_at'] or '')[:10]} | {r['note'] or ''} |"
+                        f"| {(r['added_at'] or '')[:10]} | {_candidate_note_display(r['note'])} |"
                     )
             else:
                 lines.append("暂无")
@@ -503,7 +518,7 @@ class ObsidianProjector:
                 score = r["score"] or 0
                 lines.append(
                     f"| {i} | {r['name'] or ''} | {r['code']} "
-                    f"| {score:.1f} | {r['note'] or ''} |"
+                    f"| {score:.1f} | {_candidate_note_display(r['note'])} |"
                 )
             lines.append("")
 
@@ -595,6 +610,21 @@ class ObsidianProjector:
                 lines.append(f"| {r['name'] or ''} | {r['code']} | {r['score'] or 0:.1f} |")
         else:
             lines.append("_暂无候选股数据_")
+
+        blocked = self._conn.execute(
+            "SELECT code, name, score, note FROM projection_candidate_pool "
+            "WHERE pool_tier = 'watch' AND note LIKE '%requires_entry_strategy_route%' "
+            "ORDER BY score DESC LIMIT 5"
+        ).fetchall()
+        if blocked:
+            lines.extend(["", "## 观察池阻断", ""])
+            lines.append("| 股票 | 代码 | 评分 | 原因 |")
+            lines.append("|------|------|------|------|")
+            for r in blocked:
+                lines.append(
+                    f"| {r['name'] or ''} | {r['code']} | {r['score'] or 0:.1f} "
+                    f"| {_candidate_note_display(r['note'])} |"
+                )
 
         lines.extend([
             "", "---", "",
@@ -700,7 +730,8 @@ class ObsidianProjector:
             note = r["note"] or ""
             tier = r["pool_tier"]
             entry = {"code": r["code"], "name": r["name"] or "", "score": score,
-                     "tier": tier, "streak": r["streak_days"] or 0, "note": note}
+                     "tier": tier, "streak": r["streak_days"] or 0,
+                     "note": _candidate_note_display(note)}
 
             if "veto" in note.lower():
                 vetoed.append(entry)

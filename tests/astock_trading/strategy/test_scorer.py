@@ -5,6 +5,7 @@ import pytest
 from astock_trading.market.models import (
     FinancialReport,
     FundFlow,
+    SectorContext,
     SentimentData,
     StockQuote,
     StockSnapshot,
@@ -60,6 +61,88 @@ def test_basic_score(scorer):
     assert len(result.dimensions) == 4
     assert not result.veto_triggered
     assert result.entry_signal is True  # golden_cross + vol_ratio + rsi ok
+
+
+def test_detects_volume_breakout_strategy_route(scorer):
+    s = _make_snapshot(
+        quote=StockQuote(
+            code="002138", name="双环传动", price=15.0,
+            open=14.3, high=15.1, low=14.2, close=15.0,
+            volume=8000000, amount=1.1e9, change_pct=4.8,
+        ),
+        technical=TechnicalIndicators(
+            ma5=15.0, ma10=14.4, ma20=13.8, ma60=12.9,
+            above_ma20=True, volume_ratio=2.4, rsi=62.0,
+            golden_cross=True, ma20_slope=0.018,
+            momentum_5d=6.2, daily_volatility=0.03,
+            deviation_rate=4.8, change_pct=4.8,
+        ),
+    )
+
+    result = scorer.score(s)
+
+    assert result.primary_strategy_route == "volume_breakout"
+    assert result.strategy_routes[0].route == "volume_breakout"
+    assert result.strategy_routes[0].family == "short_continuation"
+    payload = result.to_dict()
+    assert payload["primary_strategy_route"] == "volume_breakout"
+    assert payload["strategy_routes"][0]["display_name"] == "放量突破"
+    assert payload["strategy_routes"][0]["evidence"]["volume_ratio"] == 2.4
+
+
+def test_detects_shrink_pullback_strategy_route(scorer):
+    s = _make_snapshot(
+        technical=TechnicalIndicators(
+            ma5=14.2, ma10=14.0, ma20=13.8, ma60=13.0,
+            above_ma20=True, volume_ratio=0.85, rsi=52.0,
+            golden_cross=False, ma20_slope=0.009,
+            momentum_5d=1.2, daily_volatility=0.014,
+            deviation_rate=1.1, change_pct=-0.4,
+        ),
+    )
+
+    result = scorer.score(s)
+
+    routes = {route.route: route for route in result.strategy_routes}
+    assert "shrink_pullback" in routes
+    assert routes["shrink_pullback"].family == "trend_swing"
+    assert routes["shrink_pullback"].evidence["volume_ratio"] == 0.85
+
+
+def test_dragon_head_route_uses_confirmed_sector_strength(scorer):
+    s = _make_snapshot(
+        name="强势龙头",
+        quote=StockQuote(
+            code="300001", name="强势龙头", price=20.0,
+            open=18.8, high=20.1, low=18.7, close=20.0,
+            volume=12000000, amount=1.8e9, change_pct=7.5,
+        ),
+        technical=TechnicalIndicators(
+            ma5=20.0, ma10=18.8, ma20=17.5, ma60=15.0,
+            above_ma20=True, volume_ratio=2.2, rsi=68.0,
+            golden_cross=True, ma20_slope=0.025,
+            momentum_5d=9.0, daily_volatility=0.04,
+            deviation_rate=8.0, change_pct=7.5,
+        ),
+        sector=SectorContext(
+            industry_name="机器人",
+            industry_rank=2,
+            industry_change_pct=3.0,
+            leader="强势龙头",
+            relative_strength_pct=4.5,
+            confirmed=True,
+        ),
+    )
+
+    result = scorer.score(s)
+    dragon = next(route for route in result.strategy_routes if route.route == "dragon_head")
+
+    assert dragon.confidence == 0.9
+    assert dragon.entry_signal is True
+    assert "requires_sector_strength_confirmation" not in dragon.notes
+    assert dragon.evidence["sector_confirmation"] == "confirmed"
+    assert dragon.evidence["industry_name"] == "机器人"
+    assert dragon.evidence["relative_strength_pct"] == 4.5
 
 
 def test_veto_below_ma20(scorer):

@@ -8,13 +8,14 @@ market/service.py — 市场数据服务
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict, fields
+from dataclasses import asdict, fields, replace
 import logging
 from typing import Optional
 
 from astock_trading.market.models import (
     FinancialReport,
     FundFlow,
+    SectorContext,
     SentimentData,
     StockQuote,
     StockSnapshot,
@@ -107,6 +108,82 @@ def _merge_financial_reports(base: Optional[FinancialReport], update: FinancialR
     return FinancialReport(**values)
 
 
+def _to_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int_or_none(value) -> Optional[int]:
+    try:
+        if value is None or value == "":
+            return None
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _industry_rows(industry_comparison: dict) -> list[dict]:
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for key in ("top", "bottom"):
+        for row in industry_comparison.get(key, []) or []:
+            name = str(row.get("name", "") or "")
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            rows.append(row)
+    return rows
+
+
+def _first_industry(blocks: dict) -> dict:
+    industries = blocks.get("industry", []) if isinstance(blocks, dict) else []
+    if isinstance(industries, list) and industries:
+        first = industries[0]
+        if isinstance(first, dict):
+            return first
+    return {}
+
+
+def _build_sector_context(
+    snapshot: StockSnapshot,
+    blocks: dict,
+    industry_comparison: dict,
+) -> Optional[SectorContext]:
+    industry = _first_industry(blocks)
+    industry_name = str(industry.get("name", "") or "")
+    if not industry_name:
+        return None
+
+    comparison = next(
+        (row for row in _industry_rows(industry_comparison) if str(row.get("name", "") or "") == industry_name),
+        {},
+    )
+    quote_change = float(snapshot.quote.change_pct if snapshot.quote else 0.0)
+    industry_change = _to_float(comparison.get("change_pct"), _to_float(industry.get("change_pct")))
+    relative_strength = round(quote_change - industry_change, 2)
+    rank = _to_int_or_none(comparison.get("rank"))
+    leader = str(comparison.get("leader", "") or "")
+    confirmed = (
+        industry_change > 0
+        and relative_strength >= 2.0
+        and (rank is None or rank <= 5)
+    )
+
+    return SectorContext(
+        industry_name=industry_name,
+        industry_rank=rank,
+        industry_change_pct=round(industry_change, 2),
+        turnover_yi=_to_float(comparison.get("turnover_yi")) if comparison else None,
+        leader=leader,
+        relative_strength_pct=relative_strength,
+        confirmed=confirmed,
+    )
+
+
 class MarketService:
     """编排数据抓取，自动 fallback + 缓存 + 限流。"""
 
@@ -197,12 +274,14 @@ class MarketService:
         self,
         codes: list[dict],
         run_id: Optional[str] = None,
+        include_sector_context: bool = False,
     ) -> list[StockSnapshot]:
         """
         批量抓取（受 semaphore 限流）。
 
         Args:
             codes: [{"code": "002138", "name": "双环传动"}, ...]
+            include_sector_context: 是否补充行业排名和相对强度上下文。
         """
         tasks = [
             self.collect_snapshot(item["code"], item.get("name", ""), run_id)
@@ -221,7 +300,42 @@ class MarketService:
             else:
                 snapshots.append(r)
 
+        if include_sector_context:
+            snapshots = await self._attach_sector_context(snapshots, run_id)
+
         return snapshots
+
+    async def _attach_sector_context(
+        self,
+        snapshots: list[StockSnapshot],
+        run_id: Optional[str] = None,
+    ) -> list[StockSnapshot]:
+        if not snapshots:
+            return []
+
+        async def _collect_blocks(snapshot: StockSnapshot):
+            async with self._sem:
+                return await self.collect_concept_blocks(snapshot.code, run_id=run_id)
+
+        industry_task = self.collect_industry_comparison(top_n=80, run_id=run_id)
+        block_tasks = [_collect_blocks(snapshot) for snapshot in snapshots]
+        industry_result, *block_results = await asyncio.gather(
+            industry_task,
+            *block_tasks,
+            return_exceptions=True,
+        )
+        industry_comparison = (
+            industry_result
+            if isinstance(industry_result, dict)
+            else {"top": [], "bottom": [], "total": 0}
+        )
+
+        enriched: list[StockSnapshot] = []
+        for snapshot, blocks in zip(snapshots, block_results):
+            block_payload = blocks if isinstance(blocks, dict) else {}
+            sector = _build_sector_context(snapshot, block_payload, industry_comparison)
+            enriched.append(replace(snapshot, sector=sector) if sector else snapshot)
+        return enriched
 
     async def collect_intraday_batch(
         self,

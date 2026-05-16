@@ -16,6 +16,7 @@ import logging
 
 from astock_trading.pipeline.context import PipelineContext
 from astock_trading.pipeline.helpers import check_position_risks
+from astock_trading.pipeline.notification_policy import should_push_sector_heatmap
 from astock_trading.platform.time import local_today_str
 from astock_trading.reporting.discord import format_evening_embed, format_combined_stop_alert_embed
 from astock_trading.reporting.market_formatters import (
@@ -165,6 +166,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     _logger.info(f"[evening] 完成: {len(positions)} 持仓, {len(risk_alerts)} 风控触发")
 
     # 7. Discord 推送
+    sector_heatmap_pushed = False
     try:
         from astock_trading.reporting.discord import format_sector_heatmap_embed
         from astock_trading.reporting.discord_sender import send_embed
@@ -176,10 +178,12 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
             combined_alert = format_combined_stop_alert_embed(stop_signals)
             send_embed(combined_alert, content="⚠️ 风控告警")
         # 行业热力图
-        heatmap_embed = format_sector_heatmap_embed(heatmap_sectors, title="收盘")
-        ok2, err2 = send_embed(heatmap_embed)
-        if not ok2:
-            _logger.warning(f"[evening] 热力图 Discord 推送失败: {err2}")
+        if should_push_sector_heatmap(heatmap_sectors, phase="close"):
+            heatmap_embed = format_sector_heatmap_embed(heatmap_sectors, title="收盘")
+            ok2, err2 = send_embed(heatmap_embed)
+            sector_heatmap_pushed = bool(ok2)
+            if not ok2:
+                _logger.warning(f"[evening] 热力图 Discord 推送失败: {err2}")
     except Exception as e:
         _logger.warning(f"[evening] Discord 推送异常: {e}")
 
@@ -193,4 +197,5 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         "global_risk_news": len(global_risk_news),
         "market_announcements": len(market_announcements),
         "dragon_tiger": dragon_tiger.get("total_records", 0) if isinstance(dragon_tiger, dict) else 0,
+        "sector_heatmap_pushed": sector_heatmap_pushed,
     }

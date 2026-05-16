@@ -45,7 +45,9 @@ def _candidate_rows(conn, tier: str = "all", limit: int = 100) -> list[dict]:
 
 
 def _score_stock_list(ctx, stock_list: list[dict], run_id: str) -> list[dict]:
-    snapshots = asyncio.run(ctx.market_svc.collect_batch(stock_list, run_id))
+    snapshots = asyncio.run(
+        ctx.market_svc.collect_batch(stock_list, run_id, include_sector_context=True)
+    )
     market_state, index_data = asyncio.run(ctx.market_svc.collect_market_state(run_id))
     if index_data:
         ctx.projector.sync_market_state(index_data)
@@ -139,6 +141,37 @@ def _score_name(score: dict, existing: dict | None = None) -> str:
     return score.get("name") or (existing or {}).get("name", "") or score.get("code", "")
 
 
+CORE_ROUTE_BLOCKER = "requires_entry_strategy_route"
+
+
+def _route_has_entry_signal(route: object) -> bool:
+    if isinstance(route, dict):
+        return bool(route.get("entry_signal"))
+    return bool(getattr(route, "entry_signal", False))
+
+
+def _core_promotion_blockers(score: dict) -> list[str]:
+    routes = score.get("strategy_routes") or []
+    if any(_route_has_entry_signal(route) for route in routes):
+        return []
+    return [CORE_ROUTE_BLOCKER]
+
+
+def _pool_change(
+    code: str,
+    name: str,
+    score: float,
+    old_tier: str | None,
+    tier: str,
+    *,
+    reason: str | None = None,
+) -> dict:
+    item = {"code": code, "name": name, "score": score, "from": old_tier, "to": tier}
+    if reason:
+        item["reason"] = reason
+    return item
+
+
 def _apply_candidate_pool_refresh(ctx, scores: list[dict], run_id: str) -> dict:
     thresholds = _pool_thresholds(ctx)
     existing = _pool_rows_by_code(ctx)
@@ -156,6 +189,7 @@ def _apply_candidate_pool_refresh(ctx, scores: list[dict], run_id: str) -> dict:
         total = float(score.get("total_score", score.get("total", 0)) or 0)
         veto = bool(score.get("veto_triggered"))
         name = _score_name(score, current)
+        old_tier = (current or {}).get("pool_tier")
 
         if veto or total < thresholds["watch"]:
             reason = "veto" if veto else f"score<{thresholds['watch']:.1f}"
@@ -177,18 +211,26 @@ def _apply_candidate_pool_refresh(ctx, scores: list[dict], run_id: str) -> dict:
             continue
 
         old_streak = int((current or {}).get("streak_days", 0) or 0)
+        promotion_blockers = (
+            _core_promotion_blockers(score)
+            if total >= thresholds["promote"] and old_tier != "core"
+            else []
+        )
+        promotion_blocker = promotion_blockers[0] if promotion_blockers else None
         if total >= thresholds["promote"]:
             new_streak = old_streak + 1 if old_streak >= 0 else 1
             tier = (
                 "core"
-                if (current or {}).get("pool_tier") == "core"
-                or new_streak >= thresholds["promote_streak_days"]
+                if old_tier == "core"
+                or (new_streak >= thresholds["promote_streak_days"] and not promotion_blockers)
                 else "watch"
             )
         else:
             new_streak = 0
             tier = "watch"
         note = "screener_refresh"
+        if tier == "watch" and total >= thresholds["promote"] and promotion_blocker:
+            note = f"{note}:{promotion_blocker}"
         entry = {
             "code": code,
             "name": name,
@@ -199,16 +241,22 @@ def _apply_candidate_pool_refresh(ctx, scores: list[dict], run_id: str) -> dict:
             "note": note,
         }
 
-        old_tier = (current or {}).get("pool_tier")
         if tier == "core" and old_tier != "core":
             event_type = "candidate.promoted"
-            promoted.append({"code": code, "name": name, "score": total, "from": old_tier, "to": tier})
+            promoted.append(_pool_change(code, name, total, old_tier, tier))
         elif tier == "watch" and old_tier == "core":
             event_type = "pool.demoted"
-            watched.append({"code": code, "name": name, "score": total, "from": old_tier, "to": tier})
+            watched.append(_pool_change(code, name, total, old_tier, tier))
         elif tier == "watch" and total >= thresholds["promote"]:
             event_type = "candidate.updated" if current else "candidate.added"
-            watched.append({"code": code, "name": name, "score": total, "from": old_tier, "to": tier})
+            watched.append(_pool_change(
+                code,
+                name,
+                total,
+                old_tier,
+                tier,
+                reason=promotion_blocker,
+            ))
         elif current:
             event_type = "candidate.updated"
             updated.append({"code": code, "name": name, "score": total, "pool_tier": tier})
@@ -225,6 +273,8 @@ def _apply_candidate_pool_refresh(ctx, scores: list[dict], run_id: str) -> dict:
             "from": old_tier,
             "to": tier,
         }
+        if promotion_blockers:
+            payload["promotion_blockers"] = promotion_blockers
         ctx.event_store.append(
             stream=f"candidate:{code}" if event_type != "pool.demoted" else f"strategy:{code}",
             stream_type="candidate" if event_type != "pool.demoted" else "strategy",

@@ -3,6 +3,7 @@
 
 from astock_trading.pipeline.sentiment import (
     _classify_item,
+    _classify_watch_item,
     _classify_opencli_watch_item,
     _extract_brief,
     _item_hash,
@@ -113,6 +114,48 @@ class TestClassifyItem:
         }
         result = _classify_item(item)
         assert result is None
+
+
+class TestClassifyWatchItem:
+    def test_keeps_positive_report_when_entity_matches_watch_stock(self):
+        item = {
+            "informationType": "REPORT",
+            "rating": "买入",
+            "title": "双环传动深度报告",
+            "content": "预计2026年净利润增长30%",
+            "insName": "中信证券",
+            "entityFullName": "双环传动",
+        }
+
+        result = _classify_watch_item(item, "002138", "双环传动")
+
+        assert result is not None
+        assert result["level"] == "positive"
+
+    def test_drops_positive_report_when_entity_does_not_match_watch_stock(self):
+        item = {
+            "informationType": "REPORT",
+            "rating": "买入",
+            "title": "机器人行业深度报告",
+            "content": "行业景气度回升。",
+            "insName": "中信证券",
+            "entityFullName": "机器人行业",
+        }
+
+        assert _classify_watch_item(item, "002138", "双环传动") is None
+
+    def test_keeps_event_even_when_entity_does_not_match_watch_stock(self):
+        item = {
+            "informationType": "ANNOUNCEMENT",
+            "title": "关于重大合同的公告",
+            "content": "公司签署重大合同，金额10亿元",
+            "entityFullName": "机器人行业",
+        }
+
+        result = _classify_watch_item(item, "002138", "双环传动")
+
+        assert result is not None
+        assert result["level"] == "event"
 
 
 class TestOpenCliWatchClassification:

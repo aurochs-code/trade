@@ -18,6 +18,7 @@ import logging
 
 from astock_trading.pipeline.context import PipelineContext
 from astock_trading.pipeline.helpers import check_position_risks
+from astock_trading.pipeline.notification_policy import should_push_sector_heatmap
 from astock_trading.platform.time import local_today_str
 from astock_trading.reporting.discord import format_morning_embed
 from astock_trading.reporting.market_formatters import (
@@ -195,16 +196,21 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     _logger.info(f"[morning] 完成: {len(positions)} 持仓, {len(core_pool)} 核心池, {len(risk_alerts)} 风控预警")
 
     # 8. Discord 推送
+    sector_heatmap_pushed = False
     try:
         from astock_trading.reporting.discord import format_sector_heatmap_embed
         from astock_trading.reporting.discord_sender import send_embed
         ok, err = send_embed(embed)
         if not ok:
             _logger.warning(f"[morning] Discord 推送失败: {err}")
-        heatmap_embed = format_sector_heatmap_embed(heatmap_sectors, title="盘前")
-        ok2, err2 = send_embed(heatmap_embed)
-        if not ok2:
-            _logger.warning(f"[morning] 热力图 Discord 推送失败: {err2}")
+        if should_push_sector_heatmap(heatmap_sectors, phase="morning"):
+            heatmap_embed = format_sector_heatmap_embed(heatmap_sectors, title="盘前")
+            ok2, err2 = send_embed(heatmap_embed)
+            sector_heatmap_pushed = bool(ok2)
+            if not ok2:
+                _logger.warning(f"[morning] 热力图 Discord 推送失败: {err2}")
+        else:
+            _logger.info("[morning] 行业热力图无明显异动，跳过 Discord 单独推送")
     except Exception as e:
         _logger.warning(f"[morning] Discord 推送异常: {e}")
 
@@ -218,4 +224,5 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         "finance_flash": len(finance_flash),
         "global_risk_news": len(global_risk_news),
         "market_announcements": len(market_announcements),
+        "sector_heatmap_pushed": sector_heatmap_pushed,
     }

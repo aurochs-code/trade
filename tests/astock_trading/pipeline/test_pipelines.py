@@ -174,6 +174,44 @@ class TestMorningPipeline:
         assert (Path(ctx.vault_path) / "04-决策" / "今日决策.md").exists()
         assert (Path(ctx.vault_path) / "01-状态" / "持仓" / "持仓概览.md").exists()
 
+    def test_skips_standalone_heatmap_when_sector_moves_are_small(self, ctx, monkeypatch):
+        calls = []
+
+        async def fake_collect_sector_heatmap():
+            return [{"name": "银行", "change_pct": 1.2, "amount": 2_000_000_000}]
+
+        monkeypatch.setattr(ctx.market_svc, "collect_sector_heatmap", fake_collect_sector_heatmap)
+        monkeypatch.setattr(
+            "astock_trading.reporting.discord_sender.send_embed",
+            lambda embed, *args, **kwargs: calls.append(embed) or (True, None),
+        )
+
+        from astock_trading.pipeline.morning import run
+
+        result = run(ctx, "run_morning_heatmap_quiet")
+
+        assert result["sector_heatmap_pushed"] is False
+        assert len(calls) == 1
+
+    def test_pushes_standalone_heatmap_when_sector_move_is_notable(self, ctx, monkeypatch):
+        calls = []
+
+        async def fake_collect_sector_heatmap():
+            return [{"name": "机器人", "change_pct": 3.6, "amount": 5_000_000_000}]
+
+        monkeypatch.setattr(ctx.market_svc, "collect_sector_heatmap", fake_collect_sector_heatmap)
+        monkeypatch.setattr(
+            "astock_trading.reporting.discord_sender.send_embed",
+            lambda embed, *args, **kwargs: calls.append(embed) or (True, None),
+        )
+
+        from astock_trading.pipeline.morning import run
+
+        result = run(ctx, "run_morning_heatmap_notable")
+
+        assert result["sector_heatmap_pushed"] is True
+        assert len(calls) == 2
+
 
 class TestNoonPipeline:
     def test_includes_opencli_finance_context(self, ctx, monkeypatch):
@@ -201,6 +239,25 @@ class TestNoonPipeline:
         assert result["cross_platform_hot_stocks"] == 1
         assert result["finance_flash"] == 1
         assert any(field["name"] == "午间信息" for field in result["discord_embed"]["fields"])
+
+    def test_skips_standalone_heatmap_when_sector_moves_are_small(self, ctx, monkeypatch):
+        calls = []
+
+        async def fake_collect_sector_heatmap():
+            return [{"name": "煤炭", "change_pct": -1.1, "amount": 1_500_000_000}]
+
+        monkeypatch.setattr(ctx.market_svc, "collect_sector_heatmap", fake_collect_sector_heatmap)
+        monkeypatch.setattr(
+            "astock_trading.reporting.discord_sender.send_embed",
+            lambda embed, *args, **kwargs: calls.append(embed) or (True, None),
+        )
+
+        from astock_trading.pipeline.noon import run
+
+        result = run(ctx, "run_noon_heatmap_quiet")
+
+        assert result["sector_heatmap_pushed"] is False
+        assert len(calls) == 1
 
 
 class TestScoringPipeline:
@@ -261,6 +318,25 @@ class TestEveningPipeline:
         assert result["global_risk_news"] == 1
         assert result["market_announcements"] == 1
         assert {"跨平台热度", "财经快讯", "海外风险", "公告提示"} <= field_names
+
+    def test_close_still_pushes_heatmap_summary(self, ctx, monkeypatch):
+        calls = []
+
+        async def fake_collect_sector_heatmap():
+            return [{"name": "家电", "change_pct": 0.8, "amount": 1_000_000_000}]
+
+        monkeypatch.setattr(ctx.market_svc, "collect_sector_heatmap", fake_collect_sector_heatmap)
+        monkeypatch.setattr(
+            "astock_trading.reporting.discord_sender.send_embed",
+            lambda embed, *args, **kwargs: calls.append(embed) or (True, None),
+        )
+
+        from astock_trading.pipeline.evening import run
+
+        result = run(ctx, "run_evening_heatmap_close")
+
+        assert result["sector_heatmap_pushed"] is True
+        assert len(calls) == 2
 
     def test_writes_obsidian(self, ctx):
         from astock_trading.pipeline.evening import run

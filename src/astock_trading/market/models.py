@@ -76,6 +76,19 @@ class SentimentData:
 
 
 @dataclass(frozen=True)
+class SectorContext:
+    """Sector strength context used by route-specific scoring."""
+
+    industry_name: str = ""
+    industry_rank: Optional[int] = None
+    industry_change_pct: float = 0.0
+    turnover_yi: Optional[float] = None
+    leader: str = ""
+    relative_strength_pct: float = 0.0
+    confirmed: bool = False
+
+
+@dataclass(frozen=True)
 class StockSnapshot:
     """评分所需的全部数据。由 MarketService 组装，Scorer 消费。"""
     code: str
@@ -85,6 +98,7 @@ class StockSnapshot:
     financial: Optional[FinancialReport] = None
     flow: Optional[FundFlow] = None
     sentiment: Optional[SentimentData] = None
+    sector: Optional[SectorContext] = None
     kline: Optional[pd.DataFrame] = None
 
 

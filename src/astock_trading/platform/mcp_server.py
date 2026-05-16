@@ -176,7 +176,9 @@ def trade_score_batch(codes: str = "") -> str:
             return json.dumps({"error": "核心池为空，请指定 codes"}, ensure_ascii=False)
         stock_list = [{"code": r["code"], "name": r["name"] or ""} for r in rows]
 
-    snapshots = asyncio.run(_market_svc.collect_batch(stock_list, run_id))
+    snapshots = asyncio.run(
+        _market_svc.collect_batch(stock_list, run_id, include_sector_context=True)
+    )
     market_state, index_data = asyncio.run(_market_svc.collect_market_state(run_id))
     _strategy_svc.evaluate(snapshots, market_state, run_id, config_version)
 
@@ -393,7 +395,9 @@ def trade_screener(query: str = "") -> str:
 
     config_version = _config_snapshot.version if _config_snapshot else "unknown"
     run_id = f"screener_{local_now_str('%H%M%S')}"
-    snapshots = asyncio.run(_market_svc.collect_batch(stock_list, run_id))
+    snapshots = asyncio.run(
+        _market_svc.collect_batch(stock_list, run_id, include_sector_context=True)
+    )
     market_state, index_data = asyncio.run(_market_svc.collect_market_state(run_id))
     _strategy_svc.evaluate(snapshots, market_state, run_id, config_version)
 

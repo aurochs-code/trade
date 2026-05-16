@@ -340,6 +340,91 @@ def test_agent_context_json_via_bin_trade():
     assert "src/astock_trading/**/*.py" in payload["forbidden_entrypoints"]
 
 
+def test_notify_manual_confirmation_dry_run_json(tmp_path):
+    from astock_trading.platform.cli import app
+
+    payload_path = tmp_path / "analysis.json"
+    payload_path.write_text(json.dumps({
+        "analysis": "stock",
+        "status": "ok",
+        "execution_allowed": False,
+        "resolved": {"code": "600703", "name": "三安光电"},
+        "quote": {"price": 12.3, "change_pct": 1.2},
+        "score": {
+            "total_score": 6.3,
+            "data_quality": "ok",
+            "entry_signal": True,
+            "strategy_routes": [
+                {"display_name": "放量突破", "confidence": 0.92, "entry_signal": True}
+            ],
+        },
+        "decision": {
+            "action": "BUY",
+            "confidence": 6.3,
+            "position_pct": 0.16,
+            "market_signal": "GREEN",
+        },
+        "recommendations": [
+            "manual confirmation required before any order; this report never executes trades"
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "notify",
+            "manual-confirmation",
+            "--payload",
+            str(payload_path),
+            "--dry-run",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "dry_run"
+    assert payload["notification"]["target"] == "discord"
+    assert "人工确认" in payload["embed"]["title"]
+    assert payload["analysis"]["resolved"]["code"] == "600703"
+
+
+def test_daily_inspection_summary_keeps_pending_manual_trade_items():
+    from astock_trading.platform.cli.notifications import _build_daily_inspection_summary
+
+    summary = _build_daily_inspection_summary({
+        "date": "2026-05-16",
+        "results": [
+            {
+                "name": "manual_trades",
+                "returncode": 0,
+                "json": [
+                    {
+                        "status": "pending",
+                        "side": "BUY",
+                        "code": "600703",
+                        "name": "三安光电",
+                        "score": 6.3,
+                        "position_pct": 0.16,
+                    }
+                ],
+            }
+        ],
+        "route_blocked_watch_candidates": [
+            {
+                "code": "300558",
+                "name": "贝达药业",
+                "score": 6.2,
+                "note": "screener_refresh:requires_entry_strategy_route",
+            }
+        ],
+    })
+
+    assert summary["pending_manual_trades"] == 1
+    assert summary["pending_manual_trade_items"][0]["code"] == "600703"
+    assert summary["route_blocked_watch_candidates"][0]["code"] == "300558"
+
+
 def test_machine_readable_runtime_commands_via_bin_trade(tmp_path):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"

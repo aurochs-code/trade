@@ -130,6 +130,32 @@ def _classify_item(item: dict) -> dict | None:
     return None
 
 
+def _classify_watch_item(item: dict, code: str, name: str) -> dict | None:
+    """Classify an item for one watched stock, dropping unrelated positive reports."""
+    classified = _classify_item(item)
+    if classified is None:
+        return None
+    if classified.get("level") != "positive":
+        return classified
+    if _item_matches_watch_stock(item, code, name):
+        return classified
+    return None
+
+
+def _item_matches_watch_stock(item: dict, code: str, name: str) -> bool:
+    fields = [
+        item.get("entityFullName", ""),
+        item.get("entityName", ""),
+        item.get("stockName", ""),
+        item.get("symbol", ""),
+        item.get("code", ""),
+        item.get("title", ""),
+        item.get("content", ""),
+    ]
+    combined = " ".join(str(value) for value in fields if value)
+    return bool((code and code in combined) or (name and name in combined))
+
+
 def _classify_opencli_watch_item(item: dict, code: str, name: str, source_kind: str) -> dict | None:
     """Classify opencli watch-stock items for low-noise sentiment alerts."""
     title = str(item.get("title") or "").strip()
@@ -371,7 +397,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
             if h in pushed_hashes:
                 continue
 
-            classified = _classify_item(item)
+            classified = _classify_watch_item(item, code, name)
             if classified is None:
                 continue
 
