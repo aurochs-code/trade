@@ -3,7 +3,7 @@
 当前仓库采用“同仓分目录”结构：
 
 - `src/` 放代码；全局安装后配置默认在 `~/.config/a-stock-trading/`
-- `config/`、`data/` 是源码 checkout 的开发默认配置和运行数据
+- `config/` 是源码 checkout 的开发默认配置；运行事实源为 MySQL
 - `trade-vault/` 放 Obsidian 内容区
 - `atrade` 是安装后的全局 CLI；`bin/trade` 是源码 checkout 内的开发入口
 
@@ -12,6 +12,7 @@
 - 默认 vault 路径由 `config/paths.yaml` 指向 `trade-vault/`
 - 如需临时覆盖，可设置环境变量 `AStockVault`
 - 运行自检可用：`atrade doctor --json`
+- 本地 `data/` 只作为临时 scratch/cache 使用，不保存生产事实；旧 SQLite 已迁移到 MySQL
 - 业务日期、日报归档、run 幂等判断统一按 `Asia/Shanghai` 处理；审计时间戳仍保存为 UTC ISO
 
 安装和初始化：

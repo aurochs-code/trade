@@ -39,10 +39,11 @@ Runtime database access requires `ASTOCK_DATABASE_URL`. Production should point 
 export ASTOCK_DATABASE_URL='mysql+pymysql://user:password@host:3306/a_stock_trading'
 ```
 
-SQLite is only for tests and one-time migration from `data/astock_trading.db`.
-The only operational command that reads SQLite is:
+SQLite is only for tests and archived one-time migration sources. The historical
+`data/astock_trading.db` source has been migrated to MySQL and is no longer kept
+in the checkout. The only operational command that reads SQLite is:
 
-- `atrade db migrate-sqlite-to-mysql --sqlite-path data/astock_trading.db`
+- `atrade db migrate-sqlite-to-mysql --sqlite-path PATH_TO_ARCHIVED_SQLITE_DB`
 
 Do not use `--db-path`; runtime commands must use `ASTOCK_DATABASE_URL`.
 

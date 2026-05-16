@@ -571,12 +571,21 @@ def test_record_sell_json_via_bin_trade(tmp_path):
     assert payload["position_after"] is None
 
 
-def test_sqlite_to_mysql_migration_dry_run_json_via_bin_trade():
+def test_sqlite_to_mysql_migration_dry_run_json_via_bin_trade(tmp_path):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
+    sqlite_path = tmp_path / "archived_astock_trading.db"
 
     result = subprocess.run(
-        [str(cli), "db", "migrate-sqlite-to-mysql", "--dry-run", "--json"],
+        [
+            str(cli),
+            "db",
+            "migrate-sqlite-to-mysql",
+            "--sqlite-path",
+            str(sqlite_path),
+            "--dry-run",
+            "--json",
+        ],
         cwd=root,
         check=True,
         capture_output=True,

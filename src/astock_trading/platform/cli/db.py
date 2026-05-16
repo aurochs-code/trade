@@ -266,7 +266,7 @@ def db_optimize(
 
 @db_app.command("migrate-sqlite-to-mysql")
 def db_migrate_sqlite_to_mysql(
-    sqlite_path: Path = typer.Option(Path("data/astock_trading.db"), "--sqlite-path", help="源 SQLite DB"),
+    sqlite_path: Path = typer.Option(..., "--sqlite-path", help="外部归档的源 SQLite DB"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只检查源库并输出计划，不写入目标库"),
     as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
 ):

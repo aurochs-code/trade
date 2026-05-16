@@ -20,7 +20,7 @@ def register_agent_context(app: typer.Typer) -> None:
             "database": {
                 "runtime_env": "ASTOCK_DATABASE_URL",
                 "runtime_required": True,
-                "migration_source": "data/astock_trading.db",
+                "migration_source": "archived SQLite path only; not kept in checkout",
             },
             "recommended_commands": {
                 "health": "atrade health --json",
@@ -41,7 +41,7 @@ def register_agent_context(app: typer.Typer) -> None:
                 "db_tables": "atrade db tables --json",
                 "db_check": "atrade db check --json",
                 "db_backup": (
-                    "atrade db backup --output data/backups/astock.sql "
+                    "atrade db backup --output ~/.local/state/a-stock-trading/backups/astock.sql "
                     "--docker-container astock-mysql --yes --json"
                 ),
             },

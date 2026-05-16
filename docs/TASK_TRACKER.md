@@ -65,7 +65,7 @@
 - [x] walk-forward 多 fold 报表强化
 备注：已补 fold comparison / aggregate comparison，输出 selected parameters 以及 train vs eval 的 pnl / win_rate / sample_count 对照。
 - [x] 真正的逐日策略回放引擎
-备注：`scripts/backtest/strategy_replay.py` 实现信号驱动逐日模拟，每日评估大盘信号→候选评分→veto过滤→资金分配→持仓管理（止损/止盈/时间止损/大盘清仓），CLI 通过 `backtest strategy-replay` 接入。
+备注：历史 `scripts/backtest/strategy_replay.py` 已随 legacy scripts 清理移除；当前回测能力以 `src/astock_trading/backtest/` 和 `atrade backtest/continuation-*` 为准。
 - [x] 回测参数扩展到 veto / 评分更多维度
 备注：`_parameter_grid` 已扩展 `watch_threshold / reject_threshold / time_stop_days / veto_presets`，`_apply_parameter_set` 支持 veto 规则过滤和 reject_threshold 过滤，三个入口（run/sweep/walk-forward）均已接入。
 - [x] 组合层连续亏损冷却纳入回测
@@ -107,13 +107,8 @@
 
 ### MX 能力层
 
-- [x] `scripts.mx.cli_tools` 能力注册表 / dispatcher 落地
-- [x] `bin/trade mx list / groups / run / health` 接入
-- [x] `stock_screener` 改走 MX capability layer
-- [x] `shadow_trade` 改走 MX capability layer
-- [x] `status today` 暴露 `mx_health`
-- [x] `morning` 资讯搜索完全切到 MX capability layer
-备注：盘前资讯已统一经 `dispatch_mx_command("news", ...)` 走 capability layer，并补了可用/降级测试。
+历史 `scripts.mx.*` 能力层已随 legacy scripts 清理移除；当前数据源能力以
+`src/astock_trading/market/`、`atrade data-sources ...` 和各 pipeline 内的正式适配器为准。
 
 ### 自动化闭环
 

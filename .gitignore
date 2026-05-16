@@ -7,6 +7,9 @@ __pycache__/
 .env
 .mcp.json
 .mcp.*.json
+dist/
+.claude/
+.sc/
 .venv/
 .venv312/
 .venv314/
@@ -18,8 +21,6 @@ cookies/
 sessions/
 session/
 runtime/
-data/sources/pywencai/cookie.txt
-data/sources/pywencai/headers.py
 data/runtime/
 data/cache/
 data/mx_output/
