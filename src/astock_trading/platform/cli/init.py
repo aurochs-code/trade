@@ -63,6 +63,9 @@ def _init_result(config_dir: Path, force: bool) -> dict[str, Any]:
         "notification.yaml",
         "paths.yaml",
         "mcp_server.yaml",
+        "profiles/trend_swing.yaml",
+        "profiles/short_continuation.yaml",
+        "profiles/defensive_watch.yaml",
     ):
         copied[name] = _copy_template(name, config_dir / name, force)
     copied[".env"] = _write_env_from_example(config_dir, force)

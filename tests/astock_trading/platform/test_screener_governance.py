@@ -74,6 +74,7 @@ def test_refresh_replays_existing_candidates_into_governed_pool(tmp_path):
                 "scoring": {"thresholds": {"buy": 5.5, "watch": 5.0, "reject": 4.0}},
                 "pool_management": {
                     "promote_min_score": 5.5,
+                    "promote_streak_days": 1,
                     "watch_min_score": 5.0,
                     "remove_max_score": 4.0,
                 },
@@ -141,5 +142,73 @@ def test_refresh_replays_existing_candidates_into_governed_pool(tmp_path):
         event_types = [event["event_type"] for event in store.query(limit=10)]
         assert "candidate.promoted" in event_types
         assert "candidate.rejected" in event_types
+    finally:
+        conn.close()
+
+
+def test_refresh_requires_promote_streak_before_core_promotion(tmp_path):
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        store = EventStore(conn)
+        projector = ProjectionUpdater(store, conn)
+        ctx = SimpleNamespace(
+            cfg={
+                "scoring": {"thresholds": {"buy": 5.5, "watch": 5.0, "reject": 4.0}},
+                "pool_management": {
+                    "promote_min_score": 5.5,
+                    "promote_streak_days": 2,
+                    "watch_min_score": 5.0,
+                    "remove_max_score": 4.0,
+                },
+            },
+            conn=conn,
+            event_store=store,
+            projector=projector,
+        )
+        projector.sync_candidate_pool(
+            [
+                {
+                    "code": "001",
+                    "name": "A",
+                    "pool_tier": "watch",
+                    "score": 5.2,
+                    "streak_days": 0,
+                },
+                {
+                    "code": "002",
+                    "name": "B",
+                    "pool_tier": "watch",
+                    "score": 5.6,
+                    "streak_days": 1,
+                },
+            ]
+        )
+
+        changes = _apply_candidate_pool_refresh(
+            ctx,
+            [
+                {"code": "001", "name": "A", "total_score": 5.8, "veto_triggered": False},
+                {"code": "002", "name": "B", "total_score": 5.9, "veto_triggered": False},
+            ],
+            run_id="screener_refresh_test",
+        )
+
+        rows = conn.execute(
+            """SELECT code, pool_tier, score, streak_days
+               FROM projection_candidate_pool
+               ORDER BY code"""
+        ).fetchall()
+        assert [(row["code"], row["pool_tier"], row["streak_days"]) for row in rows] == [
+            ("001", "watch", 1),
+            ("002", "core", 2),
+        ]
+        assert changes["promoted"] == [
+            {"code": "002", "name": "B", "score": 5.9, "from": "watch", "to": "core"}
+        ]
+        assert changes["watched"] == [
+            {"code": "001", "name": "A", "score": 5.8, "from": "watch", "to": "watch"}
+        ]
     finally:
         conn.close()

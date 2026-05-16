@@ -44,7 +44,8 @@
 | `trade_screener` | 选股筛选（自然语言条件） |
 | `trade_score_history` | 历史评分趋势 |
 | `trade_trade_events` | 交易记录 |
-| `trade_run_pipeline` | 运行 pipeline（morning/evening/scoring/weekly） |
+| `trade_diagnose_strategy` | 只读评估选股、评分、决策门控和参数 profile |
+| `trade_run_pipeline` | 运行 pipeline（morning/noon/intraday_monitor/evening/scoring/weekly/monthly/sentiment/auto_trade） |
 | `trade_backtest` | 策略回测 |
 | `trade_auto_trade` | 模拟盘自动交易（选股→评分→风控→买卖） |
 | `trade_paper_status` | 模拟盘状态（持仓+资金+交易记录） |
@@ -52,7 +53,8 @@
 ## 交易规则（必须遵守）
 
 ### 买入条件（全部满足才能买）
-- 评分达到 `config/strategy.yaml` 的 `scoring.thresholds.buy`（当前 5.5）
+- 评分达到 `config/strategy.yaml` 的 `scoring.thresholds.buy`
+- 满足 `scoring.decision_gates`：入场信号、数据质量、缺失字段和最小有效仓位
 - 大盘 GREEN 或 YELLOW
 - 本周买入 < 2 次
 - 总仓位 < 60%，单票 < 20%

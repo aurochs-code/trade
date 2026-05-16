@@ -65,13 +65,14 @@ from astock_trading.reporting.obsidian import ObsidianProjector
 from astock_trading.risk.sizing import calc_position_size
 from astock_trading.platform.mcp_tools.agent import (
     diagnose_health_payload,
+    diagnose_strategy_payload,
     explain_run_payload,
     propose_plan_payload,
 )
 from astock_trading.platform.mcp_tools.pipeline import build_pipeline_context, run_pipeline_payload
 from astock_trading.strategy.models import ScoringWeights
 from astock_trading.strategy.scorer import Scorer
-from astock_trading.strategy.decider import Decider
+from astock_trading.strategy.decider import build_decider_from_config
 from astock_trading.strategy.service import StrategyService
 from astock_trading.platform.time import is_trading_day, local_now_str, local_today
 
@@ -166,16 +167,7 @@ def _init():
         veto_rules=cfg.get("scoring", {}).get("veto", []),
         entry_cfg=cfg.get("entry_signal", {}),
     )
-    thresholds = cfg.get("scoring", {}).get("thresholds", {})
-    pos_cfg = cfg.get("risk", {}).get("position", {})
-    decider = Decider(
-        buy_threshold=thresholds.get("buy", 5.5),
-        watch_threshold=thresholds.get("watch", 5.0),
-        reject_threshold=thresholds.get("reject", 4.0),
-        single_max_pct=pos_cfg.get("single_max", 0.20),
-        total_max_pct=pos_cfg.get("total_max", 0.60),
-        weekly_max=pos_cfg.get("weekly_max", 2),
-    )
+    decider = build_decider_from_config(cfg)
     _strategy_svc = StrategyService(scorer, decider, _event_store)
 
 
@@ -390,6 +382,13 @@ def trade_trade_events(days: int = 7) -> str:
 def trade_diagnose_health() -> str:
     """只读诊断运行健康、数据源和候选池状态。"""
     return json.dumps(diagnose_health_payload(_conn), ensure_ascii=False, default=str)
+
+
+@mcp.tool()
+@_safe
+def trade_diagnose_strategy() -> str:
+    """只读诊断选股、评分、决策门控和参数 profile。"""
+    return json.dumps(diagnose_strategy_payload(_conn), ensure_ascii=False, default=str)
 
 
 @mcp.tool()

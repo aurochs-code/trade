@@ -24,6 +24,8 @@ atrade init
 `atrade init` 会创建 `~/.config/a-stock-trading/`、`~/.local/share/a-stock-trading/`、
 `~/.local/state/a-stock-trading/logs/` 和 `~/.cache/a-stock-trading/`，并写入配置模板。
 编辑 `~/.config/a-stock-trading/.env` 后即可在任意目录执行 `atrade ...`。
+可通过 `ASTOCK_CONFIG_PROFILE=trend_swing|short_continuation|defensive_watch`
+加载 `config/profiles/*.yaml` 的参数覆盖。
 
 常用命令：
 
@@ -32,6 +34,7 @@ atrade init
 - `atrade db status`：查看数据库状态
 - `atrade run-pipeline morning --json`：执行盘前 pipeline
 - `atrade run-pipeline scoring --json`：执行评分 pipeline
+- `atrade diagnose strategy --json`：评估选股、评分、决策门控和参数 profile
 - `atrade screener refresh --json`：刷新候选池、评分并更新 projection
 - `atrade screener candidates --json`：查看候选池
 - `atrade status --json`：查看持仓

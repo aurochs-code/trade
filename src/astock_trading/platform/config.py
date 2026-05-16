@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -98,9 +99,9 @@ class ConfigRepository:
 class ConfigRegistry:
     """Load, validate, freeze, and version configuration."""
 
-    def __init__(self, config_dir: Optional[Path] = None, profile: str = "default"):
+    def __init__(self, config_dir: Optional[Path] = None, profile: Optional[str] = None):
         self._config_dir = config_dir or _config_dir()
-        self._profile = profile
+        self._profile = profile or os.getenv("ASTOCK_CONFIG_PROFILE", "default")
 
     def freeze(self, conn: Any) -> ConfigSnapshot:
         """
@@ -167,6 +168,21 @@ class ConfigRegistry:
             reject = thresholds.get("reject", 0)
             if not (buy > watch > reject):
                 errors.append(f"thresholds must be buy({buy}) > watch({watch}) > reject({reject})")
+
+        gates = strategy.get("scoring", {}).get("decision_gates", {})
+        if gates:
+            quality = gates.get("min_data_quality_for_buy", "degraded")
+            if quality not in {"ok", "degraded", "error"}:
+                errors.append(
+                    "scoring.decision_gates.min_data_quality_for_buy "
+                    "must be one of ok/degraded/error"
+                )
+            max_missing = gates.get("max_missing_fields_for_buy")
+            if max_missing is not None and max_missing < 0:
+                errors.append("scoring.decision_gates.max_missing_fields_for_buy must be >= 0")
+            min_position = gates.get("min_position_pct_for_buy")
+            if min_position is not None and min_position < 0:
+                errors.append("scoring.decision_gates.min_position_pct_for_buy must be >= 0")
 
         # Risk: stop_loss must be positive
         risk = strategy.get("risk", {})

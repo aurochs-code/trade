@@ -6,6 +6,7 @@ import typer
 
 from astock_trading.platform.agent_diagnostics import (
     diagnose_health,
+    diagnose_strategy,
     explain_run,
     propose_agent_trade_plan,
 )
@@ -25,6 +26,19 @@ def diagnose_health_cmd(
     conn = connect()
     try:
         json_or_text(diagnose_health(conn), as_json)
+    finally:
+        conn.close()
+
+
+@diagnose_app.command("strategy")
+def diagnose_strategy_cmd(
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """诊断选股、评分、决策门控和参数 profile，不执行交易。"""
+    init_db()
+    conn = connect()
+    try:
+        json_or_text(diagnose_strategy(conn), as_json)
     finally:
         conn.close()
 

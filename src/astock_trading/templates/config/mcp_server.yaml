@@ -28,6 +28,7 @@ tool_policy:
         - trade_score_history
         - trade_trade_events
         - trade_diagnose_health
+        - trade_diagnose_strategy
         - trade_explain_run
         - trade_propose_plan
         - trade_paper_status

@@ -1,0 +1,18 @@
+strategy:
+  scoring:
+    thresholds:
+      buy: 6.5
+      watch: 5.0
+      reject: 4.0
+    decision_gates:
+      require_entry_signal_for_buy: true
+      min_data_quality_for_buy: ok
+      max_missing_fields_for_buy: 0
+      critical_missing_fields_for_buy: []
+      min_position_pct_for_buy: 0.01
+  pool_management:
+    promote_min_score: 6.5
+    promote_streak_days: 2
+  auto_trade:
+    enabled: true
+    dry_run: true

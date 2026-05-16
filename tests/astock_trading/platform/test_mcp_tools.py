@@ -103,6 +103,14 @@ class TestMCPTools:
         assert "findings" in result
         assert "data_sources" in result["inputs"]
 
+    def test_trade_diagnose_strategy_returns_read_only_diagnostics(self, setup_mcp):
+        result = json.loads(setup_mcp.trade_diagnose_strategy())
+
+        assert result["diagnostic"] == "strategy"
+        assert result["status"] in {"ok", "warning"}
+        assert "decision_gates" in result["inputs"]
+        assert result["parameter_profiles"]["need_multiple_profiles"] is True
+
     def test_trade_explain_run_reports_missing_run(self, setup_mcp):
         result = json.loads(setup_mcp.trade_explain_run("missing-run-id"))
 

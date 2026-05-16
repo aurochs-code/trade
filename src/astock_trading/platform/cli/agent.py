@@ -15,7 +15,7 @@ def register_agent_context(app: typer.Typer) -> None:
         """输出给 Agent 使用的安全入口和约束。"""
         payload = {
             "project": "a-stock-trading",
-            "safe_entrypoints": ["bin/trade", "bin/trade mcp"],
+            "safe_entrypoints": ["atrade", "atrade mcp", "bin/trade", "bin/trade mcp"],
             "forbidden_entrypoints": ["src/astock_trading/**/*.py"],
             "database": {
                 "runtime_env": "ASTOCK_DATABASE_URL",
@@ -23,21 +23,24 @@ def register_agent_context(app: typer.Typer) -> None:
                 "migration_source": "data/astock_trading.db",
             },
             "recommended_commands": {
-                "health": "bin/trade health --json",
-                "events": "bin/trade events query --json",
-                "runs": "bin/trade runs list --json",
-                "portfolio": "bin/trade status --json",
-                "screener": "bin/trade screener candidates --json",
-                "screener_run": "bin/trade screener run --query '...' --json",
-                "record_buy": "bin/trade record-buy CODE SHARES PRICE --yes --json",
-                "record_sell": "bin/trade record-sell CODE SHARES PRICE --yes --json",
-                "manual_trades": "bin/trade manual-trades list --json",
-                "paper": "bin/trade paper status --json",
-                "db_status": "bin/trade db status --json",
-                "db_tables": "bin/trade db tables --json",
-                "db_check": "bin/trade db check --json",
+                "health": "atrade health --json",
+                "diagnose_health": "atrade diagnose health --json",
+                "diagnose_strategy": "atrade diagnose strategy --json",
+                "events": "atrade events query --json",
+                "runs": "atrade runs list --json",
+                "portfolio": "atrade status --json",
+                "screener": "atrade screener candidates --json",
+                "screener_refresh": "atrade screener refresh --json",
+                "screener_run": "atrade screener run --query '...' --json",
+                "record_buy": "atrade record-buy CODE SHARES PRICE --yes --json",
+                "record_sell": "atrade record-sell CODE SHARES PRICE --yes --json",
+                "manual_trades": "atrade manual-trades list --json",
+                "paper": "atrade paper status --json",
+                "db_status": "atrade db status --json",
+                "db_tables": "atrade db tables --json",
+                "db_check": "atrade db check --json",
                 "db_backup": (
-                    "bin/trade db backup --output data/backups/astock.sql "
+                    "atrade db backup --output data/backups/astock.sql "
                     "--docker-container astock-mysql --yes --json"
                 ),
             },

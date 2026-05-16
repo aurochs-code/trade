@@ -1,0 +1,30 @@
+strategy:
+  scoring:
+    thresholds:
+      buy: 6.0
+      watch: 5.2
+      reject: 4.0
+    decision_gates:
+      require_entry_signal_for_buy: true
+      min_data_quality_for_buy: degraded
+      max_missing_fields_for_buy: 1
+      critical_missing_fields_for_buy: []
+      min_position_pct_for_buy: 0.01
+  continuation:
+    filters:
+      amount_min: 200000000
+      change_pct_min: 2.0
+      close_near_high_min: 0.75
+      max_intraday_retrace: 0.04
+      volume_ratio_min: 1.2
+      volume_ratio_max: 3.5
+    scoring:
+      top_n: 3
+      hold_days: [1, 2, 3]
+      overheat_change_pct: 8.0
+      overheat_volume_ratio: 4.0
+      overheat_deviation_rate: 8.0
+      overheat_rsi: 78.0
+  pool_management:
+    promote_min_score: 6.0
+    promote_streak_days: 1

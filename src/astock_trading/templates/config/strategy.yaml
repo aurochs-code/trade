@@ -168,6 +168,13 @@ scoring:
     watch: 5
     reject: 4
 
+  decision_gates:
+    require_entry_signal_for_buy: true
+    min_data_quality_for_buy: degraded
+    max_missing_fields_for_buy: 1
+    critical_missing_fields_for_buy: []
+    min_position_pct_for_buy: 0.01
+
   veto:
     - below_ma20
     - limit_up_today

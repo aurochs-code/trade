@@ -22,11 +22,15 @@ atrade init
 
 ```bash
 atrade health --json
+atrade diagnose strategy --json
 atrade data-sources status --json
 atrade check-data-sources 000858 --trade-date 2026-05-15 --json
 atrade runs failed --days 3
 atrade runs cleanup-stale --older-than-hours 6 --json
 ```
+
+策略参数可以通过 `ASTOCK_CONFIG_PROFILE` 切换，内置建议 profile：
+`trend_swing`、`short_continuation`、`defensive_watch`。不设置时使用默认配置。
 
 `check-data-sources` 返回 `status`、`checks`、`required_missing`、`optional_missing`。核心源缺失时为 `failed`；只缺行业对比、公告、研报、新闻、基本面等辅助源时为 `warning`。
 

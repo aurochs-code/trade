@@ -107,3 +107,30 @@ def test_propose_plan_json_is_non_executing_via_bin_trade(tmp_path):
     assert payload["plan_type"] == "agent_trade_plan"
     assert "diagnostics" in payload
     assert "actions" in payload
+
+
+def test_diagnose_strategy_json_reports_parameter_profile_need(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "diagnose", "strategy", "--json"],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["diagnostic"] == "strategy"
+    assert payload["status"] in {"ok", "warning"}
+    assert "findings" in payload
+    assert "recommendations" in payload
+    assert "decision_gates" in payload["inputs"]
+    assert payload["parameter_profiles"]["need_multiple_profiles"] is True
+    assert {item["name"] for item in payload["parameter_profiles"]["suggested"]} >= {
+        "trend_swing",
+        "short_continuation",
+        "defensive_watch",
+    }

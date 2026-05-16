@@ -16,6 +16,8 @@ Use JSON output for automation:
 - `atrade agent-context --json`
 - `atrade doctor --json`
 - `atrade health --json`
+- `atrade diagnose health --json`
+- `atrade diagnose strategy --json`
 - `atrade events query --json`
 - `atrade runs list --json`
 - `atrade status --json`
@@ -46,3 +48,7 @@ Do not use `--db-path`; runtime commands must use `ASTOCK_DATABASE_URL`.
 For source checkout development, `bin/trade ...` remains valid. For installed or
 Hermes/OpenClaw usage, prefer global `atrade ...`, which loads `.env` from the
 runtime config locations and does not require `cd` into the repository.
+
+Strategy parameters can be switched with `ASTOCK_CONFIG_PROFILE`:
+`trend_swing`, `short_continuation`, or `defensive_watch`. Do not switch
+profiles for execution tasks without explicit user approval.

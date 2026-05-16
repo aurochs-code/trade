@@ -74,3 +74,41 @@ def test_list_versions(conn):
     assert len(versions) >= 1
     assert "config_version" in versions[0]
     assert "config_hash" in versions[0]
+
+
+def test_env_config_profile_overlay(tmp_path, monkeypatch):
+    (tmp_path / "profiles").mkdir()
+    (tmp_path / "strategy.yaml").write_text(
+        """
+scoring:
+  weights:
+    technical: 3
+    fundamental: 2
+    flow: 2
+    sentiment: 3
+  thresholds:
+    buy: 5.5
+    watch: 5.0
+    reject: 4.0
+risk:
+  position:
+    single_max: 0.2
+    total_max: 0.6
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "profiles" / "defensive_watch.yaml").write_text(
+        """
+strategy:
+  scoring:
+    thresholds:
+      buy: 6.5
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ASTOCK_CONFIG_PROFILE", "defensive_watch")
+
+    data, errors = ConfigRegistry(config_dir=tmp_path).load_and_validate()
+
+    assert errors == []
+    assert data["strategy"]["scoring"]["thresholds"]["buy"] == 6.5

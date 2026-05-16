@@ -109,6 +109,9 @@ def test_init_command_creates_xdg_config_templates(tmp_path):
     assert (config_dir / ".env.example").exists()
     assert (config_dir / "strategy.yaml").exists()
     assert (config_dir / "mcp_server.yaml").exists()
+    assert (config_dir / "profiles" / "trend_swing.yaml").exists()
+    assert (config_dir / "profiles" / "short_continuation.yaml").exists()
+    assert (config_dir / "profiles" / "defensive_watch.yaml").exists()
     strategy = yaml.safe_load((config_dir / "strategy.yaml").read_text(encoding="utf-8"))
     assert strategy["auto_trade"]["enabled"] is False
     assert strategy["auto_trade"]["dry_run"] is True

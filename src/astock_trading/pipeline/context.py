@@ -26,7 +26,7 @@ from astock_trading.market.service import MarketService
 from astock_trading.market.store import MarketStore
 from astock_trading.strategy.models import ScoringWeights
 from astock_trading.strategy.scorer import Scorer
-from astock_trading.strategy.decider import Decider
+from astock_trading.strategy.decider import build_decider_from_config
 from astock_trading.strategy.service import StrategyService
 from astock_trading.risk.service import RiskService
 from astock_trading.execution.service import ExecutionService
@@ -124,15 +124,7 @@ def build_context(db_path: Optional[Path] = None) -> PipelineContext:
         veto_rules=cfg.get("scoring", {}).get("veto", []),
         entry_cfg=cfg.get("entry_signal", {}),
     )
-    thresholds = cfg.get("scoring", {}).get("thresholds", {})
-    pos_cfg = cfg.get("risk", {}).get("position", {})
-    decider = Decider(
-        buy_threshold=thresholds.get("buy", 5.5),
-        watch_threshold=thresholds.get("watch", 5.0),
-        single_max_pct=pos_cfg.get("single_max", 0.20),
-        total_max_pct=pos_cfg.get("total_max", 0.60),
-        weekly_max=pos_cfg.get("weekly_max", 2),
-    )
+    decider = build_decider_from_config(cfg)
     strategy_svc = StrategyService(scorer, decider, event_store)
 
     # Risk / Execution

@@ -79,6 +79,7 @@ def _pool_thresholds(ctx) -> dict[str, float]:
         "promote": float(pool_cfg.get("promote_min_score") or thresholds.get("buy") or 5.5),
         "watch": float(pool_cfg.get("watch_min_score") or thresholds.get("watch") or 5.0),
         "reject": float(pool_cfg.get("remove_max_score") or thresholds.get("reject") or 4.0),
+        "promote_streak_days": int(pool_cfg.get("promote_streak_days") or 1),
     }
 
 
@@ -169,7 +170,18 @@ def _apply_candidate_pool_refresh(ctx, scores: list[dict], run_id: str) -> dict:
             rejected.append({"code": code, "name": name, "score": total, "reason": reason})
             continue
 
-        tier = "core" if total >= thresholds["promote"] else "watch"
+        old_streak = int((current or {}).get("streak_days", 0) or 0)
+        if total >= thresholds["promote"]:
+            new_streak = old_streak + 1 if old_streak >= 0 else 1
+            tier = (
+                "core"
+                if (current or {}).get("pool_tier") == "core"
+                or new_streak >= thresholds["promote_streak_days"]
+                else "watch"
+            )
+        else:
+            new_streak = 0
+            tier = "watch"
         note = "screener_refresh"
         entry = {
             "code": code,
@@ -177,7 +189,7 @@ def _apply_candidate_pool_refresh(ctx, scores: list[dict], run_id: str) -> dict:
             "pool_tier": tier,
             "score": total,
             "added_at": (current or {}).get("added_at") or local_now_str("%Y-%m-%d"),
-            "streak_days": (current or {}).get("streak_days", 0),
+            "streak_days": new_streak,
             "note": note,
         }
 
@@ -187,6 +199,9 @@ def _apply_candidate_pool_refresh(ctx, scores: list[dict], run_id: str) -> dict:
             promoted.append({"code": code, "name": name, "score": total, "from": old_tier, "to": tier})
         elif tier == "watch" and old_tier == "core":
             event_type = "pool.demoted"
+            watched.append({"code": code, "name": name, "score": total, "from": old_tier, "to": tier})
+        elif tier == "watch" and total >= thresholds["promote"]:
+            event_type = "candidate.updated" if current else "candidate.added"
             watched.append({"code": code, "name": name, "score": total, "from": old_tier, "to": tier})
         elif current:
             event_type = "candidate.updated"

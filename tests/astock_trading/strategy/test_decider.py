@@ -5,6 +5,7 @@ import pytest
 from astock_trading.strategy.decider import Decider
 from astock_trading.strategy.models import (
     Action,
+    DataQuality,
     MarketSignal,
     MarketState,
     ScoreResult,
@@ -20,6 +21,9 @@ def _make_score(total: float = 7.0, veto: bool = False, **kw) -> ScoreResult:
         veto_triggered=veto,
         hard_veto=["below_ma20"] if veto else [],
         style=Style.MOMENTUM,
+        entry_signal=kw.get("entry_signal", False),
+        data_quality=kw.get("data_quality", DataQuality.OK),
+        data_missing_fields=kw.get("data_missing_fields", []),
     )
 
 
@@ -113,13 +117,14 @@ def test_exposure_limit_caps_position(decider):
 
 
 def test_full_exposure_blocks_buy(decider):
-    """When at total_max, position_pct should be 0 → still BUY but 0% position."""
+    """When at total_max, Decider should not emit a zero-size BUY."""
     score = _make_score(8.0)
     market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
     d = decider.decide(score, market, current_exposure_pct=0.60)
 
-    assert d.action == Action.BUY
+    assert d.action == Action.WATCH
     assert d.position_pct == 0.0
+    assert "仓位空间不足" in " ".join(d.notes)
 
 
 def test_weekly_limit_exact_boundary(decider):
@@ -138,3 +143,56 @@ def test_weekly_limit_under(decider):
     d = decider.decide(score, market, weekly_buy_count=1)
 
     assert d.action == Action.BUY
+
+
+def test_entry_signal_gate_blocks_high_score_buy():
+    """A high score without a configured entry signal remains WATCH."""
+    decider = Decider(
+        buy_threshold=5.5,
+        watch_threshold=5.0,
+        require_entry_signal_for_buy=True,
+    )
+    score = _make_score(6.8, entry_signal=False)
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+
+    d = decider.decide(score, market)
+
+    assert d.action == Action.WATCH
+    assert "入场信号未触发" in " ".join(d.notes)
+
+
+def test_data_quality_gate_blocks_buy_when_too_many_fields_missing():
+    """High-score candidates with incomplete critical inputs should not be bought."""
+    decider = Decider(
+        buy_threshold=5.5,
+        watch_threshold=5.0,
+        max_missing_fields_for_buy=1,
+    )
+    score = _make_score(
+        6.8,
+        entry_signal=True,
+        data_quality=DataQuality.DEGRADED,
+        data_missing_fields=["ROE", "营收", "现金流"],
+    )
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+
+    d = decider.decide(score, market)
+
+    assert d.action == Action.WATCH
+    assert "关键数据缺失过多" in " ".join(d.notes)
+
+
+def test_min_data_quality_gate_blocks_buy():
+    """A strict OK-only profile can block degraded data from buying."""
+    decider = Decider(
+        buy_threshold=5.5,
+        watch_threshold=5.0,
+        min_data_quality_for_buy="ok",
+    )
+    score = _make_score(6.8, entry_signal=True, data_quality=DataQuality.DEGRADED)
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+
+    d = decider.decide(score, market)
+
+    assert d.action == Action.WATCH
+    assert "数据质量" in " ".join(d.notes)

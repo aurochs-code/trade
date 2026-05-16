@@ -26,7 +26,8 @@ A-Stock Trading 是一个 A 股量化交易辅助系统，采用"四维评分 + 
 - 舆情面 3 分：研报/新闻
 
 ### 买入条件（全部满足）
-- 评分达到 `config/strategy.yaml` 的 `scoring.thresholds.buy`（当前 5.5）
+- 评分达到 `config/strategy.yaml` 的 `scoring.thresholds.buy`
+- 满足 `scoring.decision_gates`：入场信号、数据质量、缺失字段和最小有效仓位
 - 大盘信号 GREEN 或 YELLOW
 - 本周买入次数 < 2
 - 总仓位 < 60%

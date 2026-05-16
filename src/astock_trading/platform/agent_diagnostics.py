@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from astock_trading.market.health import evaluate_data_source_health
+from astock_trading.platform.config import ConfigRegistry
 from astock_trading.platform.time import utc_now
 
 
@@ -154,6 +156,130 @@ def diagnose_health(conn: Any) -> dict:
     }
 
 
+def diagnose_strategy(conn: Any) -> dict:
+    """Assess strategy parameters and whether the system should use multiple profiles."""
+    data, config_errors = ConfigRegistry().load_and_validate()
+    strategy = data.get("strategy", {})
+    scoring = strategy.get("scoring", {})
+    weights = scoring.get("weights", {})
+    thresholds = scoring.get("thresholds", {})
+    gates = scoring.get("decision_gates", {})
+    screening = strategy.get("screening", {})
+    pool = strategy.get("pool_management", {})
+    continuation = strategy.get("continuation", {})
+    backtest_presets = strategy.get("backtest_presets", {})
+    auto_trade = strategy.get("auto_trade", {})
+    candidate_pool = candidate_pool_summary(conn)
+
+    findings: list[str] = []
+    recommendations: list[str] = []
+
+    if config_errors:
+        findings.extend(config_errors)
+        recommendations.append("fix config validation warnings before changing thresholds")
+
+    if weights:
+        total_weight = sum(float(v or 0) for v in weights.values())
+        if total_weight != 10:
+            findings.append(f"scoring weights sum to {total_weight}, expected 10")
+        if float(weights.get("sentiment", 0) or 0) >= float(weights.get("technical", 0) or 0):
+            findings.append("sentiment weight is as high as technical weight")
+            recommendations.append("keep sentiment as a confidence modifier unless its forward value is validated")
+
+    buy_threshold = float(thresholds.get("buy", 0) or 0)
+    watch_threshold = float(thresholds.get("watch", 0) or 0)
+    if buy_threshold and buy_threshold <= 5.5:
+        findings.append(f"buy threshold is permissive: {buy_threshold:.1f}")
+        recommendations.append("require entry/data-quality gates when buy threshold is <= 5.5")
+    if buy_threshold and watch_threshold and buy_threshold - watch_threshold < 0.7:
+        findings.append("buy/watch thresholds are close; core promotion may be noisy")
+        recommendations.append("use streak-based promotion or widen the buy/watch gap")
+
+    if not gates.get("require_entry_signal_for_buy", False):
+        findings.append("BUY decisions do not require entry_signal")
+        recommendations.append("enable scoring.decision_gates.require_entry_signal_for_buy")
+    if gates.get("max_missing_fields_for_buy") is None:
+        findings.append("BUY decisions do not cap missing data fields")
+        recommendations.append("set max_missing_fields_for_buy to 0 or 1")
+
+    scan_limit = int(screening.get("market_scan_limit", 0) or 0)
+    if scan_limit and scan_limit < 100:
+        findings.append(f"candidate scan limit is narrow: {scan_limit}")
+        recommendations.append("use multiple candidate sources or raise scan coverage before ranking")
+
+    promote_streak = int(pool.get("promote_streak_days", 0) or 0)
+    if promote_streak >= 2:
+        recommendations.append("enforce promote_streak_days in candidate refresh before core promotion")
+
+    if auto_trade.get("enabled") and not auto_trade.get("dry_run", True):
+        findings.append("auto_trade is enabled with dry_run=false")
+        recommendations.append("keep execution boundary explicit: paper account only unless manually confirmed")
+
+    need_multiple_profiles = bool(continuation and backtest_presets)
+    if need_multiple_profiles:
+        findings.append("strategy config mixes swing, continuation, and backtest presets")
+        recommendations.append("split operating parameters into explicit profiles")
+
+    status = "warning" if findings else "ok"
+    return {
+        "diagnostic": "strategy",
+        "status": status,
+        "findings": findings,
+        "recommendations": _dedupe(recommendations),
+        "inputs": {
+            "weights": weights,
+            "thresholds": thresholds,
+            "decision_gates": gates,
+            "screening": screening,
+            "pool_management": pool,
+            "auto_trade": auto_trade,
+            "candidate_pool": candidate_pool,
+            "config_errors": config_errors,
+        },
+        "parameter_profiles": {
+            "current_profile": os.getenv("ASTOCK_CONFIG_PROFILE", "default"),
+            "need_multiple_profiles": need_multiple_profiles,
+            "reason": (
+                "current config contains both medium-term scoring/backtest presets "
+                "and short-continuation research parameters"
+            ),
+            "suggested": [
+                {
+                    "name": "trend_swing",
+                    "purpose": "5-20 trading-day trend swing candidates",
+                    "use_when": "market signal is GREEN/YELLOW and candidate has confirmed entry signal",
+                    "key_parameters": {
+                        "buy_threshold": 5.8,
+                        "require_entry_signal_for_buy": True,
+                        "max_missing_fields_for_buy": 1,
+                        "promote_streak_days": 2,
+                    },
+                },
+                {
+                    "name": "short_continuation",
+                    "purpose": "T+1 to T+3 momentum continuation research and paper validation",
+                    "use_when": "strong tape, high amount, close near high, no overheat lock",
+                    "key_parameters": {
+                        "amount_min": continuation.get("filters", {}).get("amount_min", 2e8),
+                        "top_n": continuation.get("scoring", {}).get("top_n", 3),
+                        "hold_days": continuation.get("scoring", {}).get("hold_days", [1, 2, 3]),
+                    },
+                },
+                {
+                    "name": "defensive_watch",
+                    "purpose": "weak market observation-only mode",
+                    "use_when": "market signal is RED/CLEAR or core pool is empty",
+                    "key_parameters": {
+                        "execution_allowed": False,
+                        "buy_threshold": 6.5,
+                        "watch_threshold": 5.0,
+                    },
+                },
+            ],
+        },
+    }
+
+
 def explain_run(conn: Any, run_id: str) -> dict:
     """Explain one run using run_log plus events tied by metadata.run_id."""
     row = conn.execute("SELECT * FROM run_log WHERE run_id = ?", (run_id,)).fetchone()
@@ -240,3 +366,14 @@ def propose_agent_trade_plan(conn: Any) -> dict:
             "require confirmation for state-changing MCP tools",
         ],
     }
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result

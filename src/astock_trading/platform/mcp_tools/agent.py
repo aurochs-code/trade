@@ -6,6 +6,7 @@ from typing import Any
 
 from astock_trading.platform.agent_diagnostics import (
     diagnose_health,
+    diagnose_strategy,
     explain_run,
     propose_agent_trade_plan,
 )
@@ -14,6 +15,11 @@ from astock_trading.platform.agent_diagnostics import (
 def diagnose_health_payload(conn: Any) -> dict:
     """Return the payload for trade_diagnose_health."""
     return diagnose_health(conn)
+
+
+def diagnose_strategy_payload(conn: Any) -> dict:
+    """Return the payload for trade_diagnose_strategy."""
+    return diagnose_strategy(conn)
 
 
 def explain_run_payload(conn: Any, run_id: str) -> dict:
