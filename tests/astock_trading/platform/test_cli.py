@@ -42,6 +42,7 @@ def test_doctor_json_fails_without_database_url():
     cli = root / "bin" / "trade"
     env = os.environ.copy()
     env.pop("ASTOCK_DATABASE_URL", None)
+    env["ASTOCK_NO_ENV_FILE"] = "1"
 
     result = subprocess.run(
         [str(cli), "doctor", "--json"],
@@ -155,7 +156,7 @@ def test_data_sources_status_help_via_bin_trade():
     assert "--json" in result.stdout
 
 
-def test_mcp_help_uses_stable_entrypoint_via_bin_trade():
+def test_mcp_help_uses_stable_entrypoint():
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -167,7 +168,7 @@ def test_mcp_help_uses_stable_entrypoint_via_bin_trade():
         text=True,
     )
 
-    assert "bin/trade mcp" in result.stdout
+    assert "atrade mcp" in result.stdout
     assert "python -m astock_trading" not in result.stdout
 
 

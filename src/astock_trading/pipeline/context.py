@@ -15,6 +15,7 @@ from typing import Any, Optional
 from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.events import EventStore
 from astock_trading.platform.config import ConfigRegistry, ConfigSnapshot
+from astock_trading.platform.paths import resolve_config_dir, resolve_path_from_config
 from astock_trading.platform.runs import RunJournal
 from astock_trading.market.adapters import (
     AkShareMarketAdapter, AkShareFinancialAdapter, AkShareFlowAdapter,
@@ -40,16 +41,14 @@ _logger = logging.getLogger(__name__)
 def _resolve_vault_path() -> Optional[str]:
     try:
         import yaml
-        p = Path(__file__).parent.parent.parent.parent / "config" / "paths.yaml"
+        config_dir = resolve_config_dir()
+        p = config_dir / "paths.yaml"
         if p.exists():
-            with open(p) as f:
+            with open(p, encoding="utf-8") as f:
                 paths = yaml.safe_load(f) or {}
             vp = paths.get("vault_path", "")
             if vp:
-                resolved = Path(vp)
-                if not resolved.is_absolute():
-                    resolved = Path(__file__).parent.parent.parent.parent / vp
-                return str(resolved)
+                return str(resolve_path_from_config(vp, config_dir))
     except Exception:
         pass
     return None

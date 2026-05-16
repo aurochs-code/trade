@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 import yaml
 
+from astock_trading.platform.paths import resolve_config_dir
 from astock_trading.platform.time import local_now_str, utc_now_iso
 
 
@@ -25,7 +26,7 @@ def _now_iso() -> str:
 
 
 def _config_dir() -> Path:
-    return Path(__file__).resolve().parent.parent.parent.parent / "config"
+    return resolve_config_dir()
 
 
 @dataclass(frozen=True)

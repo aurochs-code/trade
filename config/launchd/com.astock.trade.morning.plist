@@ -5,18 +5,12 @@
 <dict>
   <key>Label</key>
   <string>com.astock_trading.trade.morning</string>
-  <key>WorkingDirectory</key>
-  <string>/path/to/a-stock-trading</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>ASTOCK_DATABASE_URL</key>
-    <string>mysql+pymysql://user:password@host:3306/a_stock_trading?charset=utf8mb4</string>
-  </dict>
-  <key>ProgramArguments</key>
+      <key>ProgramArguments</key>
   <array>
-    <string>/path/to/a-stock-trading/bin/trade</string>
+    <string>/Users/USER/.local/bin/atrade</string>
     <string>run-pipeline</string>
     <string>morning</string>
+    <string>--json</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict>
@@ -25,8 +19,8 @@
     <key>Weekday</key><integer>1</integer>
   </dict>
   <key>StandardOutPath</key>
-  <string>/path/to/a-stock-trading/logs/launchd/morning.log</string>
+  <string>/Users/USER/.local/state/a-stock-trading/logs/launchd/morning.log</string>
   <key>StandardErrorPath</key>
-  <string>/path/to/a-stock-trading/logs/launchd/morning.err.log</string>
+  <string>/Users/USER/.local/state/a-stock-trading/logs/launchd/morning.err.log</string>
 </dict>
 </plist>

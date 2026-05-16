@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import sys
 
 import typer
@@ -14,6 +15,7 @@ from astock_trading.platform.cli.db import db_app
 from astock_trading.platform.cli.diagnostics import register_diagnostics_commands
 from astock_trading.platform.cli.events import events_app
 from astock_trading.platform.cli.health import register_health_commands
+from astock_trading.platform.cli.init import register_init_command
 from astock_trading.platform.cli.manual_trades import manual_trades_app
 from astock_trading.platform.cli.market_data import register_market_data_commands
 from astock_trading.platform.cli.paper import paper_app
@@ -23,6 +25,7 @@ from astock_trading.platform.cli.runs import runs_app
 from astock_trading.platform.cli.screener import screener_app
 from astock_trading.platform.cli.trading import register_trading_commands
 from astock_trading.platform.database import MissingDatabaseUrl
+from astock_trading.platform.runtime_env import load_runtime_env
 
 
 app = typer.Typer(name="trade", help="A-Stock Trading 交易系统 CLI")
@@ -36,6 +39,7 @@ app.add_typer(manual_trades_app)
 app.add_typer(paper_app)
 app.add_typer(screener_app)
 register_agent_context(app)
+register_init_command(app)
 register_diagnostics_commands(app)
 register_health_commands(app)
 register_market_data_commands(app)
@@ -47,15 +51,16 @@ register_trading_commands(app)
 
 @app.command("mcp")
 def run_mcp():
-    """启动 MCP Server（stdio transport）"""
+    """启动 MCP Server（stdio transport）：atrade mcp"""
     from astock_trading.platform.mcp_server import main as mcp_main
 
     mcp_main()
 
 
 def main():
+    load_runtime_env()
     try:
-        app(prog_name="bin/trade")
+        app(prog_name=Path(sys.argv[0]).name)
     except MissingDatabaseUrl as exc:
         if "--json" in sys.argv:
             typer.echo(json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False, indent=2))

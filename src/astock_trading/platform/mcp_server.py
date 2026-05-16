@@ -7,7 +7,7 @@ platform/mcp_server.py — MCP Server
 所有 tool 直接调用 application services，不依赖旧脚本入口。
 
 启动方式：
-  bin/trade mcp
+  atrade mcp
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ except ModuleNotFoundError:
 from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.events import EventStore
 from astock_trading.platform.config import ConfigRegistry
+from astock_trading.platform.paths import resolve_config_dir, resolve_path_from_config
 from astock_trading.platform.runs import RunJournal
 from astock_trading.execution.service import ExecutionService
 from astock_trading.market.service import MarketService
@@ -108,17 +109,14 @@ def _resolve_vault() -> Optional[str]:
     """Resolve vault path from config."""
     try:
         import yaml
-        from pathlib import Path
-        paths_file = Path(__file__).parent.parent.parent.parent / "config" / "paths.yaml"
+        config_dir = resolve_config_dir()
+        paths_file = config_dir / "paths.yaml"
         if paths_file.exists():
-            with open(paths_file) as f:
+            with open(paths_file, encoding="utf-8") as f:
                 paths = yaml.safe_load(f) or {}
             vp = paths.get("vault_path")
             if vp:
-                p = Path(vp)
-                if not p.is_absolute():
-                    p = Path(__file__).parent.parent.parent.parent / vp
-                return str(p)
+                return str(resolve_path_from_config(vp, config_dir))
     except Exception:
         pass
     return None

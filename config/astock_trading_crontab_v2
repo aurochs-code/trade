@@ -1,34 +1,32 @@
 # A-Stock Trading V2 crontab
 #
-# 安装：crontab -e，粘贴以下内容（调整 REPO_ROOT / ASTOCK_DATABASE_URL，并先创建 logs/cron）
+# 安装：先运行 `atrade init` 并填写 ~/.config/a-stock-trading/.env，再用 crontab -e 粘贴以下内容
 # 说明：以下时间按机器本地时区执行，建议服务器/本机统一设置为 Asia/Shanghai
 
-REPO_ROOT="/path/to/a-stock-trading"
-TRADE="$REPO_ROOT/bin/trade"
-LOG_DIR="$REPO_ROOT/logs/cron"
-ASTOCK_DATABASE_URL="mysql+pymysql://user:password@host:3306/a_stock_trading?charset=utf8mb4"
+TRADE="atrade"
+LOG_DIR="$HOME/.local/state/a-stock-trading/logs/cron"
 
 # 盘前摘要 08:25
-25 8 * * 1-5 $TRADE run-pipeline morning >> $LOG_DIR/cron_morning.log 2>&1
+25 8 * * 1-5 $TRADE run-pipeline morning --json >> $LOG_DIR/cron_morning.log 2>&1
 
 # 午休检查 11:55
-55 11 * * 1-5 $TRADE run-pipeline noon >> $LOG_DIR/cron_noon.log 2>&1
+55 11 * * 1-5 $TRADE run-pipeline noon --json >> $LOG_DIR/cron_noon.log 2>&1
 
 # 盘中持仓风控轮巡：09:35-11:30、13:00-14:55，每 5 分钟
-35-55/5 9 * * 1-5 $TRADE run-pipeline intraday_monitor >> $LOG_DIR/cron_intraday_monitor.log 2>&1
-*/5 10 * * 1-5 $TRADE run-pipeline intraday_monitor >> $LOG_DIR/cron_intraday_monitor.log 2>&1
-0-30/5 11 * * 1-5 $TRADE run-pipeline intraday_monitor >> $LOG_DIR/cron_intraday_monitor.log 2>&1
-*/5 13-14 * * 1-5 $TRADE run-pipeline intraday_monitor >> $LOG_DIR/cron_intraday_monitor.log 2>&1
-55 14 * * 1-5 $TRADE run-pipeline intraday_monitor >> $LOG_DIR/cron_intraday_monitor.log 2>&1
+35-55/5 9 * * 1-5 $TRADE run-pipeline intraday_monitor --json >> $LOG_DIR/cron_intraday_monitor.log 2>&1
+*/5 10 * * 1-5 $TRADE run-pipeline intraday_monitor --json >> $LOG_DIR/cron_intraday_monitor.log 2>&1
+0-30/5 11 * * 1-5 $TRADE run-pipeline intraday_monitor --json >> $LOG_DIR/cron_intraday_monitor.log 2>&1
+*/5 13-14 * * 1-5 $TRADE run-pipeline intraday_monitor --json >> $LOG_DIR/cron_intraday_monitor.log 2>&1
+55 14 * * 1-5 $TRADE run-pipeline intraday_monitor --json >> $LOG_DIR/cron_intraday_monitor.log 2>&1
 
 # 收盘报告 15:35
-35 15 * * 1-5 $TRADE run-pipeline evening >> $LOG_DIR/cron_evening.log 2>&1
+35 15 * * 1-5 $TRADE run-pipeline evening --json >> $LOG_DIR/cron_evening.log 2>&1
 
 # 核心池评分 15:40
-40 15 * * 1-5 $TRADE run-pipeline scoring >> $LOG_DIR/cron_scoring.log 2>&1
+40 15 * * 1-5 $TRADE run-pipeline scoring --json >> $LOG_DIR/cron_scoring.log 2>&1
 
-# 模拟盘自动交易 14:00（盘中，评分后执行）
-0 14 * * 1-5 $TRADE run-pipeline auto_trade >> $LOG_DIR/cron_auto_trade.log 2>&1
+# 模拟盘自动交易 14:00（盘中风控/卖出检查；买入侧仍受新鲜评分 gate 约束）
+0 14 * * 1-5 $TRADE run-pipeline auto_trade --json >> $LOG_DIR/cron_auto_trade.log 2>&1
 
 # 周报 周日 20:00
-0 20 * * 0 $TRADE run-pipeline weekly >> $LOG_DIR/cron_weekly.log 2>&1
+0 20 * * 0 $TRADE run-pipeline weekly --json >> $LOG_DIR/cron_weekly.log 2>&1

@@ -1,0 +1,292 @@
+# ═══════════════════════════════════════════════════════════════
+# 量化策略 V1.0 — 趋势过滤 + 风格双轨
+# ═══════════════════════════════════════════════════════════════
+
+# ---------------------------------------------------------------------------
+# 第一步：粗筛与排雷（每日盘后）
+# ---------------------------------------------------------------------------
+screening:
+  mx_query: "站上20日均线，ROE大于8%，成交额超5000万，股价5-200元，市盈率TTM低于100，剔除ST"
+  mx_select_type: "A股"
+  market_scan_limit: 30
+  candidate_cache_ttl_hours: 24
+  fallback_filters:
+    min_price: 5
+    max_price: 200
+    min_amount: 50000000       # 5000万（原1亿，放宽）
+    max_pe_ttm: 100            # PE(TTM) > 100 或负数剔除
+    exclude_st: true
+    ma20_trend_up: true        # 新增：MA20 趋势向下的直接剔除
+
+# ---------------------------------------------------------------------------
+# 第二步：入场触发信号
+# ---------------------------------------------------------------------------
+entry_signal:
+  # 入场模式：hybrid（MA金叉+趋势+回踩任一），strict（仅金叉），score_only（仅评分）
+  entry_mode: hybrid
+  # 基础触发（三条件同时满足）
+  ma_cross:
+    fast: 10                   # MA10
+    slow: 20                   # MA20
+    type: golden_cross         # 金叉
+  volume_ratio_min: 1.5        # 量比 > 1.5
+  rsi_max: 70                  # RSI < 70（防接盘）
+  rsi_period: 14               # RSI 周期
+  # C版新增过滤条件
+  deviation_max: 10.0          # 乖离率 < 10%（C版）
+  require_bullish_candle: true # 金叉当日必须收阳线（C版）
+
+  # 慢牛补充信号：回踩 MA20 不破 + 次日放量阳线
+  pullback:
+    enabled: true
+    ma_support: 20             # 回踩 MA20
+    volume_confirm: true       # 次日放量确认
+    require_bullish_candle: true  # 次日阳线
+
+# ---------------------------------------------------------------------------
+# 短续接力策略
+# ---------------------------------------------------------------------------
+continuation:
+  filters:
+    amount_min: 200000000
+    change_pct_min: 2.0
+    close_near_high_min: 0.75
+    max_intraday_retrace: 0.04
+    volume_ratio_min: 1.2
+    volume_ratio_max: 3.5
+    require_above_ma5: true
+    exclude_long_upper_shadow: true
+    exclude_limit_up_locked: true
+  scoring:
+    strength_weight: 1.0
+    continuity_weight: 1.0
+    quality_weight: 1.0
+    flow_weight: 0.5
+    stability_weight: 0.7
+    top_n: 3
+    hold_days: [1, 2, 3]
+    strength_change_floor: 2.0
+    strength_change_full: 7.0
+    strength_close_near_high_floor: 0.75
+    strength_close_near_high_full: 0.95
+    continuity_momentum_floor: 2.0
+    continuity_momentum_full: 8.0
+    quality_retrace_good: 0.015
+    quality_retrace_bad: 0.06
+    quality_body_ratio_floor: 0.3
+    quality_body_ratio_full: 0.7
+    flow_inflow_full: 500000000
+    stability_rsi_ceiling: 72.0
+    stability_rsi_fail: 82.0
+    overheat_change_pct: 8.0
+    overheat_volume_ratio: 4.0
+    overheat_deviation_rate: 8.0
+    overheat_rsi: 78.0
+  validation:
+    bucket_count: 5
+    execution_modes: ["open", "vwap_30m", "open_not_chase"]
+
+# ---------------------------------------------------------------------------
+# 第三步：股票风格判定
+# ---------------------------------------------------------------------------
+style_classifier:
+  # 慢牛成长股特征
+  slow_bull:
+    daily_volatility_max: 0.02       # 日常波动 < 2%
+    rsi_range: [50, 65]              # RSI 常年 50-65
+    ma20_slope_min: 0.005            # MA20 斜率连续 10日 > 0.5%
+    ma20_slope_lookback_days: 10     # 斜率观察窗口
+  # 题材趋势股特征
+  momentum:
+    daily_volatility_min: 0.03       # 日常波动 > 3%
+    rsi_high_threshold: 75           # RSI 容易冲高至 75+
+    ma20_slope_min: 0.02             # MA20 斜率陡峭 > 2%
+
+# ---------------------------------------------------------------------------
+# 第四步：风控参数（双轨）
+# ---------------------------------------------------------------------------
+risk:
+  # 慢牛成长股
+  slow_bull:
+    stop_loss: 0.08                  # -8% 止损
+    absolute_stop_ma: 60             # 或跌破 MA60
+    take_profit: none                # 不主动止盈（让利润奔跑）
+    exit_ma: 20                      # 收盘价跌破 MA20 离场
+    time_stop_days: 30               # 30 个交易日不涨才审视
+
+  # 题材趋势股
+  momentum:
+    stop_loss: 0.08                  # -8% 止损（C版）
+    stop_loss_anchor: entry_day_low  # 或跌破买入日最低价
+    trailing_stop: 0.10              # 移动止盈：最高点回撤 -10%（C版）
+    trailing_ma_cross:               # 或 MA5 死叉 MA10
+      fast: 5
+      slow: 10
+    exit_ma: 20                      # 收盘价跌破 MA20 离场
+    time_stop_days: 15               # 15 个交易日不创新高即警惕（C版）
+
+  # 通用风控（不分风格）
+  portfolio:
+    daily_loss_limit_pct: 0.03
+    consecutive_loss_days_limit: 2
+    cooldown_days: 2
+    max_single_position_warn_pct: 0.25
+    max_sector_exposure_warn_pct: 0.40
+    max_correlation_group_exposure_warn_pct: 0.50
+  intraday_monitor:
+    daily_loss_alert_pct: 0.05      # 盘中单票当日跌幅 >= 5% 立即告警
+  position:
+    total_max: 0.60
+    single_max: 0.20
+    weekly_max: 2
+    holding_max: 4
+
+# ---------------------------------------------------------------------------
+# 第五步：动态风格切换（防回撤保险丝）
+# ---------------------------------------------------------------------------
+style_switch:
+  # 慢牛 → 题材模式的强制切换条件（任一触发）
+  triggers:
+    single_day_surge_pct: 0.07       # 单日涨幅 > 7%
+    rsi_overheat_threshold: 75       # RSI > 75
+    rsi_overheat_consecutive_days: 3 # 连续 3 日
+  # 切换后执行题材股的止盈规则
+  action: switch_to_momentum
+
+# ---------------------------------------------------------------------------
+# 评分权重（满分10，保留四维评分体系）
+# ---------------------------------------------------------------------------
+scoring:
+  weights:
+    technical: 3      # 技术信号权重提升（金叉/量比/RSI 更重要了）
+    fundamental: 2    # 基本面权重下调（粗筛已过滤）
+    flow: 2           # 资金
+    sentiment: 3      # 舆情
+
+  thresholds:
+    buy: 5.5    # 下调：让更多候选进入核心池
+    watch: 5
+    reject: 4
+
+  veto:
+    - below_ma20
+    - limit_up_today
+    - consecutive_outflow
+    - red_market
+    - earnings_bomb
+    - ma20_trend_down          # 新增：MA20 趋势向下一票否决
+
+# ---------------------------------------------------------------------------
+# 大盘择时
+# ---------------------------------------------------------------------------
+market_timer:
+  green_days: 3
+  red_days: 5
+  clear_days_ma60: 15
+
+# ---------------------------------------------------------------------------
+# 池子管理
+# ---------------------------------------------------------------------------
+pool_management:
+  watch_min_score: 5
+  promote_min_score: 5.5   # 与 thresholds.buy: 5.5 保持一致
+  promote_streak_days: 2
+  demote_max_score: 5
+  demote_streak_days: 2
+  remove_max_score: 4
+  remove_streak_days: 2
+  veto_immediate_demote: true
+  add_to_watch_streak_days: 1
+
+# ---------------------------------------------------------------------------
+# 资金
+# ---------------------------------------------------------------------------
+capital: 500022
+
+# ---------------------------------------------------------------------------
+# 历史回测 preset（用于 historical_pipeline / strategy_replay）
+# ---------------------------------------------------------------------------
+backtest_presets:
+  aggressive_high_return:
+    description: "高收益优先，接受更高交易频次与阶段性回撤"
+    entry_mode: hybrid
+    require_entry_signal: true
+    buy_threshold: 6.0
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.10
+    momentum_time_stop_days: 10
+    entry_trend_rsi_max: 75
+    entry_pullback_rsi_max: 75
+    entry_pullback_volume_ratio_min: 1.0
+  aggressive_high_return_trail12:
+    description: "高收益优先，放宽移动止盈到 12%"
+    entry_mode: hybrid
+    require_entry_signal: true
+    buy_threshold: 6.0
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.12
+    momentum_time_stop_days: 10
+    entry_trend_rsi_max: 75
+    entry_pullback_rsi_max: 75
+    entry_pullback_volume_ratio_min: 1.0
+  aggressive_score_capture:
+    description: "分数优先，放宽入场过滤以提高覆盖率"
+    entry_mode: score_only
+    buy_threshold: 6.0
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.10
+    momentum_time_stop_days: 10
+
+  # ── 新增策略 preset ──────────────────────────────────────────────
+  大盘择时增强版:
+    description: "金叉收阳 + 乖离率<12% + 两市成交>6000亿，高胜率但交易频次低"
+    entry_mode: hybrid
+    require_entry_signal: true
+    buy_threshold: 6.0
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.18
+    momentum_time_stop_days: 40
+    entry_trend_rsi_max: 85
+    entry_pullback_rsi_max: 85
+    entry_pullback_volume_ratio_min: 1.0
+    entry_deviation_max: 12.0
+    entry_require_bullish_candle: true
+
+  保守验证C:
+    description: "乖离率<10% + 收阳线 + trailing10% + time_stop15天，稳健首选"
+    entry_mode: hybrid
+    require_entry_signal: true
+    buy_threshold: 6.5
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.10
+    momentum_time_stop_days: 15
+    entry_trend_rsi_max: 70
+    entry_pullback_rsi_max: 70
+    entry_pullback_volume_ratio_min: 1.5
+    entry_deviation_max: 10.0
+    entry_require_bullish_candle: true
+
+# ---------------------------------------------------------------------------
+# 模拟盘自动交易
+# ---------------------------------------------------------------------------
+auto_trade:
+  enabled: false               # 开源默认关闭，需人工确认后启用
+  dry_run: true                # 开源默认只做试运行
+  max_daily_trades: 4          # 单日最大交易次数（买+卖）
+  sell_urgency: immediate      # 自动卖出的风控级别（immediate / end_of_day / advisory）
+  # 买入时间窗口（避免尾盘波动）
+  buy_window:
+    start: "09:45"
+    end: "14:30"
+  # 卖出时间窗口
+  sell_window:
+    start: "09:35"
+    end: "14:50"
+
+# ---------------------------------------------------------------------------
+# 舆情监控
+# ---------------------------------------------------------------------------
+sentiment:
+  scan_interval_minutes: 30
+  dedup_hours: 24
+  enabled: true

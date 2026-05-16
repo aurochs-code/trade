@@ -1,0 +1,48 @@
+# Discord 推送规则
+discord:
+  webhook_url: ""  # 旧版 webhook（已弃用，建议使用 bot_token + channel_id）
+  bot_token: ""   # Discord Bot Token（优先）或 webhook_url
+  channel_id: ""  # Bot Token 模式的目标频道 ID
+
+  # 盘前摘要
+  morning:
+    enabled: true
+    time: "8:25"
+    days: ["mon", "tue", "wed", "thu", "fri"]
+    channels:
+      - "盘前摘要"
+
+  # 午休检查
+  noon:
+    enabled: true
+    time: "11:55"
+    days: ["mon", "tue", "wed", "thu", "fri"]
+    channels:
+      - "午休检查"
+
+  # 收盘报告
+  evening:
+    enabled: true
+    time: "15:35"
+    days: ["mon", "tue", "wed", "thu", "fri"]
+    channels:
+      - "收盘报告"
+
+  # 舆情监控（每30分钟）
+  sentiment:
+    enabled: true
+    interval_minutes: 30
+    keywords:
+      - "赛力斯"
+      - "港股"
+      - "A股"
+    channels:
+      - "舆情提醒"
+
+  # 周报（周日20:00）
+  weekly:
+    enabled: true
+    time: "20:00"
+    days: ["sun"]
+    channels:
+      - "周报"

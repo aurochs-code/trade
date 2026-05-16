@@ -11,16 +11,18 @@ from typing import Optional
 import typer
 from sqlalchemy.engine import make_url
 
-from astock_trading.platform.cli.common import json_or_text, project_root
+from astock_trading.platform.cli.common import json_or_text
 from astock_trading.platform.config import ConfigRegistry
 from astock_trading.platform.database import MissingDatabaseUrl
 from astock_trading.platform.db import connect, get_schema_version, init_db
+from astock_trading.platform.paths import resolve_config_dir, resolve_path_from_config
 from astock_trading.platform.runs import RunJournal
 from astock_trading.platform.time import MARKET_TZ, utc_now
 
 
 def _resolve_vault_path() -> Optional[Path]:
-    paths_file = project_root() / "config" / "paths.yaml"
+    config_dir = resolve_config_dir()
+    paths_file = config_dir / "paths.yaml"
     if not paths_file.exists():
         return None
 
@@ -36,10 +38,7 @@ def _resolve_vault_path() -> Optional[Path]:
     if not raw_path:
         return None
 
-    path = Path(raw_path)
-    if not path.is_absolute():
-        path = paths_file.parent.parent / path
-    return path
+    return resolve_path_from_config(raw_path, config_dir)
 
 
 def _diagnostic_database_url(value: object) -> str:

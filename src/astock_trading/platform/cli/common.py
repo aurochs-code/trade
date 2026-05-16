@@ -8,9 +8,11 @@ from typing import Any
 
 import typer
 
+from astock_trading.platform.paths import project_root as _project_root
+
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parents[4]
+    return _project_root()
 
 
 def json_or_text(payload: Any, as_json: bool) -> None:

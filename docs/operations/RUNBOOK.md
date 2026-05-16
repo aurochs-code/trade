@@ -1,13 +1,31 @@
 # A-Stock Trading 运维手册
 
+## 安装与初始化
+
+面向本机和开源用户的正式入口是 `atrade`：
+
+```bash
+uv tool install /path/to/a-stock-trading
+atrade init
+```
+
+`atrade init` 会创建 XDG 运行目录和配置模板：
+
+- `~/.config/a-stock-trading/`
+- `~/.local/share/a-stock-trading/`
+- `~/.local/state/a-stock-trading/logs/`
+- `~/.cache/a-stock-trading/`
+
+编辑 `~/.config/a-stock-trading/.env`，至少设置 `ASTOCK_DATABASE_URL`。如需临时覆盖配置目录，可设置 `ASTOCK_CONFIG_DIR`；如需指定单个 env 文件，可设置 `ASTOCK_ENV_FILE`。
+
 ## 每日健康检查
 
 ```bash
-bin/trade health --json
-bin/trade data-sources status --json
-bin/trade check-data-sources 000858 --trade-date 2026-05-15 --json
-bin/trade runs failed --days 3
-bin/trade runs cleanup-stale --older-than-hours 6 --json
+atrade health --json
+atrade data-sources status --json
+atrade check-data-sources 000858 --trade-date 2026-05-15 --json
+atrade runs failed --days 3
+atrade runs cleanup-stale --older-than-hours 6 --json
 ```
 
 `check-data-sources` 返回 `status`、`checks`、`required_missing`、`optional_missing`。核心源缺失时为 `failed`；只缺行业对比、公告、研报、新闻、基本面等辅助源时为 `warning`。
@@ -25,16 +43,16 @@ bin/trade runs cleanup-stale --older-than-hours 6 --json
 Runtime 数据库是 MySQL，通过 `ASTOCK_DATABASE_URL` 配置。日常运维只使用 MySQL 命令：
 
 ```bash
-bin/trade db status --json
-bin/trade db tables --json
-bin/trade db check --json
-bin/trade db backup --output data/backups/astock_trading.sql --yes --json
+atrade db status --json
+atrade db tables --json
+atrade db check --json
+atrade db backup --output data/backups/astock_trading.sql --yes --json
 ```
 
 可选低频维护：
 
 ```bash
-bin/trade db optimize --yes --json
+atrade db optimize --yes --json
 ```
 
 `db backup` 调用本机 `mysqldump`，密码通过 `MYSQL_PWD` 环境变量传给子进程，不放在命令行参数里。生产环境如有 RDS/云数据库快照，优先使用托管备份。
@@ -42,7 +60,7 @@ bin/trade db optimize --yes --json
 历史 SQLite 只允许作为一次性迁移源读取：
 
 ```bash
-bin/trade db migrate-sqlite-to-mysql --sqlite-path data/astock_trading.db --json
+atrade db migrate-sqlite-to-mysql --sqlite-path data/astock_trading.db --json
 ```
 
 `runs cleanup-stale` 默认 dry-run。确认历史 running run 可以清理时再加 `--yes`。
@@ -67,14 +85,14 @@ launchctl load ~/Library/LaunchAgents/com.astock_trading.trade.health.plist
 - 常驻实时行情推送
 - 数据库达到百万级以上事件且查询明显变慢
 
-不需要 FastAPI 时，Agent 和人工操作统一走 `bin/trade` / `bin/trade mcp`。
+不需要 FastAPI 时，Agent 和人工操作统一走 `atrade` / `atrade mcp`。源码 checkout 内开发验证可以继续用 `bin/trade`。
 
 ## MCP 本地配置与秘密管理
 
 MCP Server 的稳定入口是：
 
 ```bash
-bin/trade mcp
+atrade mcp
 ```
 
 本机 Agent 配置可参考 `config/mcp.example.json`，复制为工作区外部或本地未跟踪的 `.mcp.json` 后再填入真实环境变量。不要提交 `.mcp.json`、cookie、session、token、runtime cache、日志或数据库 dump。

@@ -5,8 +5,8 @@
 ## 系统概述
 
 - 架构：MySQL 事件内核 + 6 个业务 Context + 可重建投影
-- CLI：`bin/trade`（本地 Mac 运行）
-- MCP：`bin/trade mcp`（稳定 stdio 入口）
+- CLI：`atrade`（全局安装入口）；源码 checkout 内也可用 `bin/trade`
+- MCP：`atrade mcp`（稳定 stdio 入口）
 - 数据源：东财妙想 API + AkShare
 - 推送：Discord Bot DM
 - 持仓：Obsidian vault 自动投影
@@ -20,7 +20,7 @@
 
 ## 可用 MCP Tools
 
-实际 tool 清单以 `bin/trade mcp` 暴露内容为准；治理分类以 `config/mcp_server.yaml` 为准。
+实际 tool 清单以 `atrade mcp` 暴露内容为准；治理分类以 `config/mcp_server.yaml` 为准。
 
 | Tool 类别 | 示例 | 用途 |
 |-----------|------|------|

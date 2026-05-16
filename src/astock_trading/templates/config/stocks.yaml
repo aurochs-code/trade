@@ -1,0 +1,9 @@
+core_pool: []
+watch_pool:
+- code: '600268'
+  name: 国电南自
+  added: '2026-04-13'
+  score: 6.0
+blacklist:
+  permanent: []
+  temporary: []
