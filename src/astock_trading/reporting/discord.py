@@ -9,7 +9,13 @@ from __future__ import annotations
 
 
 from astock_trading.platform.time import local_now_iso, local_now_str, local_today_str
-from astock_trading.reporting.market_formatters import top_sector_movers
+from astock_trading.reporting.market_formatters import (
+    _format_stock_label,
+    _source_list_label,
+    format_announcement_intel_line,
+    format_market_intel_line,
+    top_sector_movers,
+)
 
 
 # Discord 品牌色
@@ -73,6 +79,40 @@ def _score_emoji(score: float) -> str:
 
 def _pnl_emoji(v: float) -> str:
     return "🟢" if v >= 0 else "🔴"
+
+
+def _append_market_intel_fields(fields: list[dict], data: dict) -> None:
+    cross_hot = data.get("cross_platform_hot_stocks", []) or []
+    if cross_hot:
+        lines = []
+        for item in cross_hot[:5]:
+            pct = item.get("change_pct", 0) or 0
+            source_count = item.get("source_count", len(item.get("sources", [])) or 1)
+            sources = _source_list_label(item.get("sources", []))
+            source_text = f" · {source_count}源 {sources}" if sources else f" · {source_count}源"
+            lines.append(f"{_format_stock_label(item)} `{pct:+.2f}%`{source_text}")
+        fields.append(_field("跨平台热度", "\n".join(lines), inline=False))
+
+    finance_flash = data.get("finance_flash", []) or []
+    if finance_flash:
+        lines = []
+        for item in finance_flash[:5]:
+            lines.append(format_market_intel_line(item, "finance_flash"))
+        fields.append(_field("财经快讯", "\n".join(lines), inline=False))
+
+    global_risk = data.get("global_risk_news", []) or []
+    if global_risk:
+        lines = []
+        for item in global_risk[:5]:
+            lines.append(format_market_intel_line(item, "global_risk"))
+        fields.append(_field("海外风险", "\n".join(lines), inline=False))
+
+    announcements = data.get("market_announcements", []) or []
+    if announcements:
+        lines = []
+        for item in announcements[:5]:
+            lines.append(format_announcement_intel_line(item))
+        fields.append(_field("公告提示", "\n".join(lines), inline=False))
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +180,28 @@ def format_morning_embed(data: dict) -> dict:
         fields.append(_field("\u200b", "**🎯 核心池**", inline=False))
         for s in core:
             score = s.get("score", 0)
-            fields.append(_field(s.get("name", ""), f"{_score_emoji(score)} **{score:.1f}**"))
+            score_label = s.get("score_label") or "上次评分"
+            scored_at = f"\n日期 `{s['last_scored_at']}`" if s.get("last_scored_at") else ""
+            fields.append(
+                _field(s.get("name", ""), f"{_score_emoji(score)} {score_label} **{score:.1f}**{scored_at}")
+            )
+
+    xueqiu_hot = data.get("xueqiu_hot_stocks", [])
+    if xueqiu_hot:
+        hot_lines = []
+        for item in xueqiu_hot[:5]:
+            rank = item.get("rank") or ""
+            rank_text = f"#{rank} " if rank else ""
+            code = item.get("code") or item.get("symbol", "")
+            name = item.get("name") or code
+            pct = item.get("change_pct", 0) or 0
+            heat = item.get("heat", 0) or 0
+            label = f"{name}({code})" if code and code != name else name
+            heat_text = f" · 热度 {heat}" if heat else ""
+            hot_lines.append(f"{rank_text}{label} `{pct:+.2f}%`{heat_text}")
+        fields.append(_field("雪球热搜", "\n".join(hot_lines), inline=False))
+
+    _append_market_intel_fields(fields, data)
 
     return _embed(
         title=f"📊 盘前摘要 — {date_str}",
@@ -191,6 +252,8 @@ def format_evening_embed(data: dict) -> dict:
             "\n".join(f"• {a}" for a in alerts),
             inline=False,
         ))
+
+    _append_market_intel_fields(fields, data)
 
     return _embed(
         title=f"📈 收盘报告 — {date_str}",

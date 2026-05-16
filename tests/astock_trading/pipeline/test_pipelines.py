@@ -107,12 +107,100 @@ class TestMorningPipeline:
         result = run(ctx, "run_morning_test")
         assert "signal" in result
         assert isinstance(result["risk_alerts"], list)
+        assert result["xueqiu_hot_stocks"] == 0
+
+    def test_includes_xueqiu_hot_stocks_in_summary(self, ctx, monkeypatch):
+        async def fake_collect_xueqiu_hot_stocks(limit=10, list_type="10", run_id=None):
+            return [{
+                "rank": 1,
+                "code": "300274",
+                "name": "阳光电源",
+                "change_pct": 13.27,
+                "heat": 2785,
+            }]
+
+        monkeypatch.setattr(
+            ctx.market_svc,
+            "collect_xueqiu_hot_stocks",
+            fake_collect_xueqiu_hot_stocks,
+        )
+
+        from astock_trading.pipeline.morning import run
+
+        result = run(ctx, "run_morning_xueqiu")
+
+        assert result["xueqiu_hot_stocks"] == 1
+        assert any(field["name"] == "雪球热搜" for field in result["discord_embed"]["fields"])
+
+    def test_includes_opencli_finance_context_in_summary(self, ctx, monkeypatch):
+        async def fake_collect_cross_platform_hot_stocks(limit=10, run_id=None):
+            return [{
+                "rank": 1,
+                "code": "300274",
+                "name": "阳光电源",
+                "change_pct": 13.27,
+                "source_count": 3,
+                "sources": ["xueqiu", "eastmoney", "sinafinance"],
+            }]
+
+        async def fake_collect_finance_flash(limit=20, run_id=None):
+            return [{"time": "09:10", "title": "商务部回应关税安排", "source": "sinafinance"}]
+
+        async def fake_collect_global_risk_news(limit=12, run_id=None):
+            return [{"title": "US-China trade talks continue", "source": "bloomberg"}]
+
+        async def fake_collect_market_announcements(limit=20, run_id=None):
+            return [{"code": "603311", "name": "金海高科", "title": "复牌公告", "category": "复牌公告"}]
+
+        monkeypatch.setattr(ctx.market_svc, "collect_cross_platform_hot_stocks", fake_collect_cross_platform_hot_stocks)
+        monkeypatch.setattr(ctx.market_svc, "collect_finance_flash", fake_collect_finance_flash)
+        monkeypatch.setattr(ctx.market_svc, "collect_global_risk_news", fake_collect_global_risk_news)
+        monkeypatch.setattr(ctx.market_svc, "collect_market_announcements", fake_collect_market_announcements)
+
+        from astock_trading.pipeline.morning import run
+
+        result = run(ctx, "run_morning_opencli")
+
+        field_names = {field["name"] for field in result["discord_embed"]["fields"]}
+        assert result["cross_platform_hot_stocks"] == 1
+        assert result["finance_flash"] == 1
+        assert result["global_risk_news"] == 1
+        assert result["market_announcements"] == 1
+        assert {"跨平台热度", "财经快讯", "海外风险", "公告提示"} <= field_names
 
     def test_writes_obsidian(self, ctx):
         from astock_trading.pipeline.morning import run
         run(ctx, "run_morning_test")
         assert (Path(ctx.vault_path) / "04-决策" / "今日决策.md").exists()
         assert (Path(ctx.vault_path) / "01-状态" / "持仓" / "持仓概览.md").exists()
+
+
+class TestNoonPipeline:
+    def test_includes_opencli_finance_context(self, ctx, monkeypatch):
+        monkeypatch.setattr("astock_trading.reporting.discord_sender.send_embed", lambda *args, **kwargs: (True, None))
+
+        async def fake_collect_cross_platform_hot_stocks(limit=10, run_id=None):
+            return [{
+                "code": "300274",
+                "name": "阳光电源",
+                "change_pct": 13.27,
+                "source_count": 3,
+                "sources": ["xueqiu", "eastmoney", "sinafinance"],
+            }]
+
+        async def fake_collect_finance_flash(limit=20, run_id=None):
+            return [{"time": "11:20", "title": "北向资金继续流入", "source": "eastmoney"}]
+
+        monkeypatch.setattr(ctx.market_svc, "collect_cross_platform_hot_stocks", fake_collect_cross_platform_hot_stocks)
+        monkeypatch.setattr(ctx.market_svc, "collect_finance_flash", fake_collect_finance_flash)
+
+        from astock_trading.pipeline.noon import run
+
+        result = run(ctx, "run_noon_opencli")
+
+        assert result["cross_platform_hot_stocks"] == 1
+        assert result["finance_flash"] == 1
+        assert any(field["name"] == "午间信息" for field in result["discord_embed"]["fields"])
 
 
 class TestScoringPipeline:
@@ -136,6 +224,43 @@ class TestEveningPipeline:
         from astock_trading.pipeline.evening import run
         result = run(ctx, "run_evening_test")
         assert "signal" in result
+
+    def test_includes_opencli_finance_context(self, ctx, monkeypatch):
+        monkeypatch.setattr("astock_trading.reporting.discord_sender.send_embed", lambda *args, **kwargs: (True, None))
+
+        async def fake_collect_cross_platform_hot_stocks(limit=10, run_id=None):
+            return [{
+                "code": "300274",
+                "name": "阳光电源",
+                "change_pct": 13.27,
+                "source_count": 3,
+                "sources": ["xueqiu", "eastmoney", "sinafinance"],
+            }]
+
+        async def fake_collect_finance_flash(limit=20, run_id=None):
+            return [{"time": "15:10", "title": "商务部回应关税安排", "source": "sinafinance"}]
+
+        async def fake_collect_global_risk_news(limit=12, run_id=None):
+            return [{"title": "US-China trade talks continue", "source": "reuters"}]
+
+        async def fake_collect_market_announcements(limit=20, run_id=None):
+            return [{"code": "603311", "name": "金海高科", "title": "复牌公告", "category": "复牌公告"}]
+
+        monkeypatch.setattr(ctx.market_svc, "collect_cross_platform_hot_stocks", fake_collect_cross_platform_hot_stocks)
+        monkeypatch.setattr(ctx.market_svc, "collect_finance_flash", fake_collect_finance_flash)
+        monkeypatch.setattr(ctx.market_svc, "collect_global_risk_news", fake_collect_global_risk_news)
+        monkeypatch.setattr(ctx.market_svc, "collect_market_announcements", fake_collect_market_announcements)
+
+        from astock_trading.pipeline.evening import run
+
+        result = run(ctx, "run_evening_opencli")
+
+        field_names = {field["name"] for field in result["discord_embed"]["fields"]}
+        assert result["cross_platform_hot_stocks"] == 1
+        assert result["finance_flash"] == 1
+        assert result["global_risk_news"] == 1
+        assert result["market_announcements"] == 1
+        assert {"跨平台热度", "财经快讯", "海外风险", "公告提示"} <= field_names
 
     def test_writes_obsidian(self, ctx):
         from astock_trading.pipeline.evening import run

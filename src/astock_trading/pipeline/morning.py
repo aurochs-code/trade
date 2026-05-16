@@ -69,9 +69,21 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
 
     # 3. 核心池
     pool_rows = ctx.conn.execute(
-        "SELECT code, name, score FROM projection_candidate_pool WHERE pool_tier = 'core' ORDER BY score DESC"
+        """SELECT code, name, score, last_scored_at
+           FROM projection_candidate_pool
+           WHERE pool_tier = 'core'
+           ORDER BY score DESC"""
     ).fetchall()
-    core_pool = [{"name": r["name"] or r["code"], "code": r["code"], "score": r["score"] or 0} for r in pool_rows]
+    core_pool = [
+        {
+            "name": r["name"] or r["code"],
+            "code": r["code"],
+            "score": r["score"] or 0,
+            "last_scored_at": r["last_scored_at"],
+            "score_label": "上次评分",
+        }
+        for r in pool_rows
+    ]
 
     # 4. 今日决策
     # 只有 immediate 级别的风控信号才阻止买入，advisory（如时间止损）不阻止
@@ -123,12 +135,23 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         log_lines.extend(["", "### 核心池"])
         for s in core_pool[:5]:
             emoji = "✅" if s["score"] >= 7 else ("🟡" if s["score"] >= 5 else "❌")
-            log_lines.append(f"- {s['name']} {emoji} {s['score']:.1f}")
+            scored_at = f"（{s['last_scored_at']}）" if s.get("last_scored_at") else ""
+            log_lines.append(f"- {s['name']} {emoji} 上次评分 {s['score']:.1f}{scored_at}")
 
     hot_stocks = asyncio.run(ctx.market_svc.collect_hot_stocks(run_id=run_id))
+    xueqiu_hot_stocks = asyncio.run(ctx.market_svc.collect_xueqiu_hot_stocks(run_id=run_id))
+    cross_platform_hot_stocks = asyncio.run(ctx.market_svc.collect_cross_platform_hot_stocks(run_id=run_id))
+    finance_flash = asyncio.run(ctx.market_svc.collect_finance_flash(limit=5, run_id=run_id))
+    global_risk_news = asyncio.run(ctx.market_svc.collect_global_risk_news(limit=5, run_id=run_id))
+    market_announcements = asyncio.run(ctx.market_svc.collect_market_announcements(limit=5, run_id=run_id))
     northbound = asyncio.run(ctx.market_svc.collect_northbound_realtime(run_id=run_id))
     signal_lines = format_market_signals_markdown(
         hot_stocks=hot_stocks,
+        xueqiu_hot_stocks=xueqiu_hot_stocks,
+        cross_platform_hot_stocks=cross_platform_hot_stocks,
+        finance_flash=finance_flash,
+        global_risk_news=global_risk_news,
+        market_announcements=market_announcements,
         northbound=northbound,
     )
     if signal_lines:
@@ -161,6 +184,11 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
             "risk_alerts": risk_alerts,
         },
         "stop_loss_reminders": stop_loss_reminders,
+        "xueqiu_hot_stocks": xueqiu_hot_stocks[:5],
+        "cross_platform_hot_stocks": cross_platform_hot_stocks[:5],
+        "finance_flash": finance_flash[:5],
+        "global_risk_news": global_risk_news[:5],
+        "market_announcements": market_announcements[:5],
     }
     embed = format_morning_embed(discord_data)
 
@@ -185,4 +213,9 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         "positions": len(positions), "core_pool": len(core_pool),
         "risk_alerts": risk_alerts, "discord_embed": embed,
         "hot_stocks": len(hot_stocks),
+        "xueqiu_hot_stocks": len(xueqiu_hot_stocks),
+        "cross_platform_hot_stocks": len(cross_platform_hot_stocks),
+        "finance_flash": len(finance_flash),
+        "global_risk_news": len(global_risk_news),
+        "market_announcements": len(market_announcements),
     }

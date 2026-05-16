@@ -381,6 +381,109 @@ def test_screener_help_via_bin_trade():
     assert "reject" in result.stdout
 
 
+def test_market_intel_help_via_bin_trade():
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "market-intel", "--help"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "市场新闻" in result.stdout
+    assert "brief" in result.stdout
+    assert "search" in result.stdout
+
+
+def test_market_intel_brief_json(monkeypatch):
+    from astock_trading.platform.cli import app
+    import astock_trading.platform.cli.market_intel as market_intel_cli
+
+    class FakeMarketService:
+        async def collect_finance_flash(self, limit=20, run_id=None):
+            return [{"time": "09:01", "title": "机器人板块走强", "source": "eastmoney"}]
+
+        async def collect_global_risk_news(self, limit=12, run_id=None):
+            return [{"title": "Fed rate cut expectations fade", "source": "bloomberg"}]
+
+        async def collect_cross_platform_hot_stocks(self, limit=10, run_id=None):
+            return [{"rank": 1, "name": "双环传动", "code": "002472", "source_count": 3}]
+
+        async def collect_hot_sectors(self, limit=10, sector_type="industry", sort="change", run_id=None):
+            return [{
+                "rank": 1,
+                "name": "机器人",
+                "type": sector_type,
+                "sort": sort,
+                "change_pct": 3.21,
+                "lead_stock": "双环传动",
+            }]
+
+    class FakeConn:
+        def close(self):
+            pass
+
+    class FakeContext:
+        market_svc = FakeMarketService()
+        conn = FakeConn()
+
+    monkeypatch.setattr(market_intel_cli, "build_context", lambda: FakeContext())
+
+    result = CliRunner().invoke(
+        app,
+        ["market-intel", "brief", "--query", "今天热点新闻和强势板块", "--limit", "2", "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["query"] == "今天热点新闻和强势板块"
+    assert payload["finance_flash"][0]["title"] == "机器人板块走强"
+    assert payload["hot_stocks"][0]["code"] == "002472"
+    assert payload["strong_sectors"][0]["name"] == "机器人"
+    assert payload["money_flow_sectors"][0]["sort"] == "money-flow"
+
+
+def test_market_intel_brief_falls_back_to_sector_heatmap(monkeypatch):
+    from astock_trading.platform.cli import app
+    import astock_trading.platform.cli.market_intel as market_intel_cli
+
+    class FakeMarketService:
+        async def collect_finance_flash(self, limit=20, run_id=None):
+            return []
+
+        async def collect_global_risk_news(self, limit=12, run_id=None):
+            return []
+
+        async def collect_cross_platform_hot_stocks(self, limit=10, run_id=None):
+            return []
+
+        async def collect_hot_sectors(self, limit=10, sector_type="industry", sort="change", run_id=None):
+            return []
+
+        async def collect_sector_heatmap(self):
+            return [{"name": "机器人", "change_pct": 3.21, "amount": 123000000, "up_count": 42, "down_count": 3}]
+
+    class FakeConn:
+        def close(self):
+            pass
+
+    class FakeContext:
+        market_svc = FakeMarketService()
+        conn = FakeConn()
+
+    monkeypatch.setattr(market_intel_cli, "build_context", lambda: FakeContext())
+
+    result = CliRunner().invoke(app, ["market-intel", "brief", "--limit", "2", "--no-global", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["strong_sectors"][0]["name"] == "机器人"
+    assert payload["strong_sectors"][0]["source"] == "sector_heatmap"
+
+
 def test_screener_candidates_json_via_bin_trade(tmp_path):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"

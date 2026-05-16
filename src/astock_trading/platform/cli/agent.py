@@ -33,6 +33,8 @@ def register_agent_context(app: typer.Typer) -> None:
                 "screener_refresh": "atrade screener refresh --json",
                 "screener_run": "atrade screener run --query '...' --json",
                 "stock_analyze": "atrade stock analyze CODE_OR_NAME --json",
+                "market_intel": "atrade market-intel brief --query '今天热点新闻和强势板块' --json",
+                "market_news_search": "atrade market-intel search KEYWORD --json",
                 "record_buy": "atrade record-buy CODE SHARES PRICE --yes --json",
                 "record_sell": "atrade record-sell CODE SHARES PRICE --yes --json",
                 "manual_trades": "atrade manual-trades list --json",

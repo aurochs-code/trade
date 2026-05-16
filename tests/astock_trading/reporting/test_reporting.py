@@ -201,14 +201,59 @@ class TestDiscordFormat:
             "market": {"上证指数": {"price": 3200.0, "chg_pct": 0.5}},
             "positions": [{"name": "双环传动", "shares": 100, "price": 15.0}],
             "core_pool": [{"name": "大金重工", "score": 7.5}],
+            "xueqiu_hot_stocks": [{"rank": 1, "name": "阳光电源", "code": "300274", "change_pct": 13.27, "heat": 2785}],
+            "cross_platform_hot_stocks": [{
+                "name": "阳光电源", "code": "300274", "change_pct": 13.27,
+                "source_count": 3, "sources": ["xueqiu", "eastmoney", "sinafinance"],
+            }],
+            "finance_flash": [{
+                "time": "09:10",
+                "title": "商务部回应关税安排",
+                "summary": "中美经贸磋商形成积极共识，双方讨论有关产品降税安排。",
+                "source": "sinafinance",
+            }],
+            "global_risk_news": [{
+                "title": "Fed rate cut expectations fade",
+                "summary": "Treasury yields rise as inflation remains sticky.",
+                "source": "bloomberg",
+            }],
+            "market_announcements": [{"code": "603311", "name": "金海高科", "title": "复牌公告", "category": "复牌公告"}],
         })
         assert "偏强" in embed["description"]
+        field_names = {field["name"] for field in embed["fields"]}
+        assert {"雪球热搜", "跨平台热度", "财经快讯", "海外风险", "公告提示"} <= field_names
+        field_values = "\n".join(field["value"] for field in embed["fields"])
+        assert "上次评分" in field_values
+        flash_field = next(field for field in embed["fields"] if field["name"] == "财经快讯")
+        assert "影响: 宏观/出口链/人民币风险" in flash_field["value"]
+        assert "动作:" in flash_field["value"]
 
     def test_evening_embed(self):
-        assert "收盘报告" in format_evening_embed({
+        embed = format_evening_embed({
             "date": "2026-04-14", "market": {"上证指数": {"price": 3210.0, "chg_pct": 0.3}},
             "positions": [{"name": "双环传动", "shares": 100, "pnl_pct": 2.5}],
-        })["title"]
+            "cross_platform_hot_stocks": [{
+                "name": "阳光电源", "code": "300274", "change_pct": 13.27,
+                "source_count": 3, "sources": ["xueqiu", "eastmoney", "sinafinance"],
+            }],
+            "finance_flash": [{
+                "time": "15:10",
+                "title": "商务部回应关税安排",
+                "summary": "中美经贸磋商形成积极共识，双方讨论有关产品降税安排。",
+                "source": "sinafinance",
+            }],
+            "global_risk_news": [{
+                "title": "Fed rate cut expectations fade",
+                "summary": "Treasury yields rise as inflation remains sticky.",
+                "source": "reuters",
+            }],
+            "market_announcements": [{"code": "603311", "name": "金海高科", "title": "复牌公告", "category": "复牌公告"}],
+        })
+        assert "收盘报告" in embed["title"]
+        field_names = {field["name"] for field in embed["fields"]}
+        assert {"跨平台热度", "财经快讯", "海外风险", "公告提示"} <= field_names
+        risk_field = next(field for field in embed["fields"] if field["name"] == "海外风险")
+        assert "影响: 利率/成长股估值" in risk_field["value"]
 
     def test_scoring_embed(self):
         embed = format_scoring_embed([

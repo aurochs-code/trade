@@ -17,6 +17,7 @@ from astock_trading.platform.cli.events import events_app
 from astock_trading.platform.cli.health import register_health_commands
 from astock_trading.platform.cli.init import register_init_command
 from astock_trading.platform.cli.manual_trades import manual_trades_app
+from astock_trading.platform.cli.market_intel import market_intel_app
 from astock_trading.platform.cli.market_data import register_market_data_commands
 from astock_trading.platform.cli.notifications import notify_app
 from astock_trading.platform.cli.paper import paper_app
@@ -42,6 +43,7 @@ app.add_typer(paper_app)
 app.add_typer(screener_app)
 app.add_typer(stock_app)
 app.add_typer(notify_app)
+app.add_typer(market_intel_app)
 register_agent_context(app)
 register_init_command(app)
 register_diagnostics_commands(app)

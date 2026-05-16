@@ -103,6 +103,10 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         log_lines.extend(["", "### 风控触发"] + risk_alerts)
 
     hot_stocks = asyncio.run(ctx.market_svc.collect_hot_stocks(run_id=run_id))
+    cross_platform_hot_stocks = asyncio.run(ctx.market_svc.collect_cross_platform_hot_stocks(run_id=run_id))
+    finance_flash = asyncio.run(ctx.market_svc.collect_finance_flash(limit=5, run_id=run_id))
+    global_risk_news = asyncio.run(ctx.market_svc.collect_global_risk_news(limit=5, run_id=run_id))
+    market_announcements = asyncio.run(ctx.market_svc.collect_market_announcements(limit=5, run_id=run_id))
     northbound = asyncio.run(ctx.market_svc.collect_northbound_realtime(run_id=run_id))
     dragon_tiger = asyncio.run(ctx.market_svc.collect_daily_dragon_tiger(run_id=run_id))
     lockup = {"upcoming": []}
@@ -115,6 +119,10 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
             lockup["upcoming"].append(enriched)
     signal_lines = format_market_signals_markdown(
         hot_stocks=hot_stocks,
+        cross_platform_hot_stocks=cross_platform_hot_stocks,
+        finance_flash=finance_flash,
+        global_risk_news=global_risk_news,
+        market_announcements=market_announcements,
         northbound=northbound,
         dragon_tiger=dragon_tiger,
         lockup=lockup,
@@ -147,6 +155,10 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
             "pnl_pct": ((p.current_price or p.avg_cost) - p.avg_cost) / p.avg_cost * 100 if p.avg_cost else 0,
         } for p in positions],
         "alerts": risk_alerts,
+        "cross_platform_hot_stocks": cross_platform_hot_stocks[:5],
+        "finance_flash": finance_flash[:5],
+        "global_risk_news": global_risk_news[:5],
+        "market_announcements": market_announcements[:5],
     }
     embed = format_evening_embed(discord_data)
 
@@ -176,5 +188,9 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         "risk_alerts": risk_alerts, "stop_signals": stop_signals,
         "discord_embed": embed,
         "hot_stocks": len(hot_stocks),
+        "cross_platform_hot_stocks": len(cross_platform_hot_stocks),
+        "finance_flash": len(finance_flash),
+        "global_risk_news": len(global_risk_news),
+        "market_announcements": len(market_announcements),
         "dragon_tiger": dragon_tiger.get("total_records", 0) if isinstance(dragon_tiger, dict) else 0,
     }

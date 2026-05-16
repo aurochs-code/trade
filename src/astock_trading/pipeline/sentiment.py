@@ -27,6 +27,15 @@ _RATING_KEYWORDS = {"买入", "增持", "推荐", "强烈推荐", "优于大市"
 _NEGATIVE_KEYWORDS = {"减持", "卖出", "回避", "中性"}
 _EVENT_KEYWORDS = {"业绩预告", "业绩快报", "重大合同", "股权变动", "回购", "增减持",
                    "停牌", "退市", "立案", "处罚", "诉讼", "违规"}
+_OPENCLI_NEGATIVE_KEYWORDS = {"暴跌", "跌停", "爆雷", "违规", "处罚", "退市", "立案", "调查", "减持", "亏损"}
+_OPENCLI_EVENT_KEYWORDS = _EVENT_KEYWORDS | {"中标", "复牌", "控制权", "关税", "制裁", "禁令", "供应中断"}
+_OPENCLI_SOURCE_CN = {
+    "eastmoney": "东财",
+    "sinafinance": "新浪",
+    "xueqiu": "雪球",
+    "bloomberg": "彭博",
+    "reuters": "路透",
+}
 
 
 def _item_hash(item: dict) -> str:
@@ -121,6 +130,40 @@ def _classify_item(item: dict) -> dict | None:
     return None
 
 
+def _classify_opencli_watch_item(item: dict, code: str, name: str, source_kind: str) -> dict | None:
+    """Classify opencli watch-stock items for low-noise sentiment alerts."""
+    title = str(item.get("title") or "").strip()
+    text = str(item.get("summary") or item.get("content") or item.get("text") or "").strip()
+    combined = f"{title} {text}".strip()
+    if not combined:
+        return None
+
+    code_hit = bool(code and code in combined)
+    name_hit = bool(name and name in combined)
+    if not (code_hit or name_hit):
+        return None
+
+    source = str(item.get("source") or "")
+    source_cn = _OPENCLI_SOURCE_CN.get(source, source or "opencli")
+    if any(word in combined for word in _OPENCLI_NEGATIVE_KEYWORDS):
+        return {
+            "level": "negative",
+            "emoji": "🔴",
+            "summary": f"{source_cn if source_kind != 'xueqiu_comments' else '雪球评论'}负面线索",
+            "brief": _extract_brief(combined, 120),
+            "date": str(item.get("time") or item.get("created_at") or "")[:10],
+        }
+    if any(word in combined for word in _OPENCLI_EVENT_KEYWORDS):
+        return {
+            "level": "event",
+            "emoji": "📢",
+            "summary": f"{source_cn if source_kind != 'xueqiu_comments' else '雪球评论'}事件线索",
+            "brief": _extract_brief(combined, 120),
+            "date": str(item.get("time") or item.get("created_at") or "")[:10],
+        }
+    return None
+
+
 def _get_pushed_hashes(conn, hours: int = 24) -> set[str]:
     """获取最近已推送的资讯 hash。"""
     try:
@@ -202,6 +245,61 @@ def _save_cache(conn, symbol: str, items: list[dict], run_id: str):
         )
     except Exception as e:
         _logger.warning(f"[sentiment] save_cache failed: {e}")
+
+
+def _opencli_watch_item_hash(code: str, item: dict) -> str:
+    normalized = {
+        "code": code,
+        "title": item.get("title") or str(item.get("text") or item.get("summary") or "")[:80],
+        "date": str(item.get("time") or item.get("created_at") or "")[:10],
+    }
+    return _item_hash(normalized)
+
+
+def _collect_opencli_watch_alerts(
+    ctx: PipelineContext,
+    watch_stocks: dict[str, str],
+    pushed_hashes: set[str],
+    run_id: str,
+) -> list[dict]:
+    alerts: list[dict] = []
+
+    try:
+        finance_items = asyncio.run(ctx.market_svc.collect_finance_flash(limit=30, run_id=run_id))
+    except Exception as e:
+        _logger.warning(f"[sentiment] opencli finance flash failed: {e}")
+        finance_items = []
+
+    for code, name in watch_stocks.items():
+        for item in finance_items:
+            h = _opencli_watch_item_hash(code, item)
+            if h in pushed_hashes:
+                continue
+            classified = _classify_opencli_watch_item(item, code, name, "finance_flash")
+            if classified is None:
+                continue
+            alerts.append({"code": code, "name": name, "hash": h, **classified})
+            _save_pushed(ctx.conn, code, h, classified["summary"], run_id)
+            pushed_hashes.add(h)
+
+    for code, name in list(watch_stocks.items())[:5]:
+        try:
+            comments = asyncio.run(ctx.market_svc.collect_xueqiu_comments(code, limit=5, run_id=run_id))
+        except Exception as e:
+            _logger.warning(f"[sentiment] xueqiu comments failed: {name}({code}) {e}")
+            comments = []
+        for item in comments:
+            h = _opencli_watch_item_hash(code, item)
+            if h in pushed_hashes:
+                continue
+            classified = _classify_opencli_watch_item(item, code, name, "xueqiu_comments")
+            if classified is None:
+                continue
+            alerts.append({"code": code, "name": name, "hash": h, **classified})
+            _save_pushed(ctx.conn, code, h, classified["summary"], run_id)
+            pushed_hashes.add(h)
+
+    return alerts
 
 
 def run(ctx: PipelineContext, run_id: str) -> dict:
@@ -290,6 +388,9 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
             _save_pushed(ctx.conn, code, h, classified["summary"], run_id)
             pushed_hashes.add(h)
 
+    opencli_alerts = _collect_opencli_watch_alerts(ctx, watch_stocks, pushed_hashes, run_id)
+    alerts.extend(opencli_alerts)
+
     # 4. Obsidian 日志
     if alerts:
         lines = ["## 舆情监控", ""]
@@ -316,5 +417,6 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     return {
         "monitored": len(watch_stocks),
         "alerts": alerts,
+        "opencli_alerts": len(opencli_alerts),
         "cache_hits": cache_hits,
     }

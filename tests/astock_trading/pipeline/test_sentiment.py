@@ -1,7 +1,12 @@
 """Tests for pipeline/sentiment.py — hash, classification, and caching"""
 
 
-from astock_trading.pipeline.sentiment import _item_hash, _classify_item, _extract_brief
+from astock_trading.pipeline.sentiment import (
+    _classify_item,
+    _classify_opencli_watch_item,
+    _extract_brief,
+    _item_hash,
+)
 
 
 class TestItemHash:
@@ -108,6 +113,47 @@ class TestClassifyItem:
         }
         result = _classify_item(item)
         assert result is None
+
+
+class TestOpenCliWatchClassification:
+    def test_finance_flash_matches_watch_stock_event(self):
+        item = {
+            "time": "2026-05-16 09:10:00",
+            "title": "双环传动签署重大合同",
+            "summary": "双环传动公告称公司签署重大合同，金额10亿元。",
+            "source": "eastmoney",
+        }
+
+        result = _classify_opencli_watch_item(item, "002138", "双环传动", "finance_flash")
+
+        assert result is not None
+        assert result["level"] == "event"
+        assert "东财" in result["summary"]
+
+    def test_finance_flash_ignores_unrelated_item(self):
+        item = {
+            "time": "2026-05-16 09:10:00",
+            "title": "市场综述：今日大盘震荡",
+            "summary": "沪指小幅收涨。",
+            "source": "sinafinance",
+        }
+
+        result = _classify_opencli_watch_item(item, "002138", "双环传动", "finance_flash")
+
+        assert result is None
+
+    def test_xueqiu_comment_flags_negative_watch_signal(self):
+        item = {
+            "created_at": "2026-05-16T09:30:05.000Z",
+            "text": "$双环传动(SZ002138)$ 被立案调查传闻需要核实",
+            "source": "xueqiu",
+        }
+
+        result = _classify_opencli_watch_item(item, "002138", "双环传动", "xueqiu_comments")
+
+        assert result is not None
+        assert result["level"] == "negative"
+        assert "雪球评论" in result["summary"]
 
 
 class TestExtractBrief:

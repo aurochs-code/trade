@@ -56,6 +56,7 @@ from astock_trading.market.adapters import (
     MXSentimentAdapter,
     MXScreenerAdapter,
     MootdxMarketAdapter,
+    OpenCliFinanceAdapter,
     BaoStockMarketAdapter,
     TencentFinancialAdapter,
 )
@@ -142,7 +143,13 @@ def _init():
 
     store = MarketStore(_conn)
     _market_svc = MarketService(
-        market_providers=[AStockSignalAdapter(), MXMarketAdapter(), MootdxMarketAdapter(), AkShareMarketAdapter()],
+        market_providers=[
+            AStockSignalAdapter(),
+            OpenCliFinanceAdapter(),
+            MXMarketAdapter(),
+            MootdxMarketAdapter(),
+            AkShareMarketAdapter(),
+        ],
         financial_providers=[TencentFinancialAdapter(), AkShareFinancialAdapter()],
         flow_providers=[BaiduFundFlowAdapter(), AkShareFlowAdapter()],
         sentiment_providers=[MXSentimentAdapter()],

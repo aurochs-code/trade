@@ -18,7 +18,13 @@ from astock_trading.pipeline.context import PipelineContext
 from astock_trading.pipeline.helpers import check_position_risks
 from astock_trading.platform.time import local_today_str
 from astock_trading.reporting.discord import _embed, _field, COLORS
-from astock_trading.reporting.market_formatters import format_sector_heatmap_markdown
+from astock_trading.reporting.market_formatters import (
+    _format_stock_label,
+    _source_label,
+    _source_list_label,
+    format_market_signals_markdown,
+    format_sector_heatmap_markdown,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -54,6 +60,21 @@ def _format_noon_embed(data: dict) -> dict:
     tips = data.get("tips", [])
     if tips:
         fields.append(_field("📋 提示", "\n".join(f"• {t}" for t in tips), inline=False))
+
+    cross_hot = data.get("cross_platform_hot_stocks", []) or []
+    finance_flash = data.get("finance_flash", []) or []
+    info_lines = []
+    for item in cross_hot[:3]:
+        pct = item.get("change_pct", 0) or 0
+        sources = _source_list_label(item.get("sources", []))
+        info_lines.append(f"{_format_stock_label(item)} `{pct:+.2f}%` · {sources}")
+    for item in finance_flash[:3]:
+        source = _source_label(item.get("source", ""))
+        time = item.get("time", "")
+        prefix = f"{time} " if time else ""
+        info_lines.append(f"{prefix}{item.get('title', '')} ({source})")
+    if info_lines:
+        fields.append(_field("午间信息", "\n".join(info_lines), inline=False))
 
     return _embed(
         title=f"☀️ 午休检查 — {date_str}",
@@ -119,6 +140,15 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     if tips:
         log_lines.extend(["", "### 操作提示"] + [f"- {t}" for t in tips])
 
+    cross_platform_hot_stocks = asyncio.run(ctx.market_svc.collect_cross_platform_hot_stocks(run_id=run_id))
+    finance_flash = asyncio.run(ctx.market_svc.collect_finance_flash(limit=5, run_id=run_id))
+    signal_lines = format_market_signals_markdown(
+        cross_platform_hot_stocks=cross_platform_hot_stocks,
+        finance_flash=finance_flash,
+    )
+    if signal_lines:
+        log_lines.extend([""] + signal_lines)
+
     # 行业热力图
     heatmap_sectors = asyncio.run(ctx.market_svc.collect_sector_heatmap())
     _logger.info(f"[noon] 行业热力图: {len(heatmap_sectors)} 个板块")
@@ -136,6 +166,8 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     embed = _format_noon_embed({
         "date": local_today_str(), "signal": signal,
         "positions": pos_data, "alerts": alerts, "tips": tips,
+        "cross_platform_hot_stocks": cross_platform_hot_stocks[:5],
+        "finance_flash": finance_flash[:5],
     })
 
     try:
@@ -156,4 +188,6 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     return {
         "signal": signal, "positions": len(positions),
         "alerts": alerts, "tips": tips, "discord_embed": embed,
+        "cross_platform_hot_stocks": len(cross_platform_hot_stocks),
+        "finance_flash": len(finance_flash),
     }

@@ -652,6 +652,117 @@ class MarketService:
             run_id=run_id,
         )
 
+    async def collect_xueqiu_hot_stocks(
+        self,
+        limit: int = 10,
+        list_type: str = "10",
+        run_id: Optional[str] = None,
+    ) -> list[dict]:
+        return await self._collect_signal(
+            "get_xueqiu_hot_stocks",
+            limit,
+            list_type,
+            kind="xueqiu_hot_stocks",
+            symbol=f"type_{list_type or '10'}",
+            default=[],
+            run_id=run_id,
+        )
+
+    async def collect_cross_platform_hot_stocks(
+        self,
+        limit: int = 10,
+        run_id: Optional[str] = None,
+    ) -> list[dict]:
+        return await self._collect_signal(
+            "get_cross_platform_hot_stocks",
+            limit,
+            kind="cross_platform_hot_stocks",
+            symbol="cn_a",
+            default=[],
+            run_id=run_id,
+        )
+
+    async def collect_finance_flash(self, limit: int = 20, run_id: Optional[str] = None) -> list[dict]:
+        return await self._collect_signal(
+            "get_finance_flash",
+            limit,
+            kind="finance_flash",
+            symbol="cn_a",
+            default=[],
+            run_id=run_id,
+        )
+
+    async def collect_global_risk_news(self, limit: int = 12, run_id: Optional[str] = None) -> list[dict]:
+        return await self._collect_signal(
+            "get_global_risk_news",
+            limit,
+            kind="global_risk_news",
+            symbol="global",
+            default=[],
+            run_id=run_id,
+        )
+
+    async def collect_market_announcements(self, limit: int = 20, run_id: Optional[str] = None) -> list[dict]:
+        return await self._collect_signal(
+            "get_market_announcements",
+            limit,
+            kind="market_announcements",
+            symbol="cn_a",
+            default=[],
+            run_id=run_id,
+        )
+
+    async def collect_xueqiu_comments(
+        self,
+        symbol: str,
+        limit: int = 10,
+        run_id: Optional[str] = None,
+    ) -> list[dict]:
+        normalized = symbol or "unknown"
+        return await self._collect_signal(
+            "get_xueqiu_comments",
+            normalized,
+            limit,
+            kind="xueqiu_comments",
+            symbol=normalized,
+            default=[],
+            run_id=run_id,
+        )
+
+    async def collect_hot_sectors(
+        self,
+        limit: int = 10,
+        sector_type: str = "industry",
+        sort: str = "change",
+        run_id: Optional[str] = None,
+    ) -> list[dict]:
+        return await self._collect_signal(
+            "get_hot_sectors",
+            limit,
+            sector_type,
+            sort,
+            kind=f"hot_sectors_{sector_type}_{sort}",
+            symbol="cn_a",
+            default=[],
+            run_id=run_id,
+        )
+
+    async def collect_news_search(
+        self,
+        query: str,
+        limit: int = 10,
+        run_id: Optional[str] = None,
+    ) -> list[dict]:
+        return await self._collect_signal(
+            "search_market_news",
+            query,
+            limit,
+            kind="market_news_search",
+            symbol=query or "latest",
+            default=[],
+            run_id=run_id,
+        )
+
     async def collect_concept_blocks(self, code: str, run_id: Optional[str] = None) -> dict:
         return await self._collect_signal(
             "get_concept_blocks",

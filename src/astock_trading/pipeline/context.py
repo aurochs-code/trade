@@ -20,7 +20,8 @@ from astock_trading.platform.runs import RunJournal
 from astock_trading.market.adapters import (
     AkShareMarketAdapter, AkShareFinancialAdapter, AkShareFlowAdapter,
     AkShareHKMarketAdapter, AkShareHKFinancialAdapter,
-    MXMarketAdapter, MXSentimentAdapter, AStockSignalAdapter, BaiduFundFlowAdapter, MootdxMarketAdapter, TencentFinancialAdapter,
+    MXMarketAdapter, MXSentimentAdapter, AStockSignalAdapter, BaiduFundFlowAdapter,
+    MootdxMarketAdapter, OpenCliFinanceAdapter, TencentFinancialAdapter,
 )
 from astock_trading.market.service import MarketService
 from astock_trading.market.store import MarketStore
@@ -105,7 +106,14 @@ def build_context(db_path: Optional[Path] = None) -> PipelineContext:
     # Market
     store = MarketStore(conn)
     market_svc = MarketService(
-        market_providers=[AStockSignalAdapter(), MXMarketAdapter(), MootdxMarketAdapter(), AkShareHKMarketAdapter(), AkShareMarketAdapter()],
+        market_providers=[
+            AStockSignalAdapter(),
+            OpenCliFinanceAdapter(),
+            MXMarketAdapter(),
+            MootdxMarketAdapter(),
+            AkShareHKMarketAdapter(),
+            AkShareMarketAdapter(),
+        ],
         financial_providers=[TencentFinancialAdapter(), AkShareHKFinancialAdapter(), AkShareFinancialAdapter()],
         flow_providers=[BaiduFundFlowAdapter(), AkShareFlowAdapter()],
         sentiment_providers=[MXSentimentAdapter()],
