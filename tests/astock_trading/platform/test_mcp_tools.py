@@ -111,6 +111,15 @@ class TestMCPTools:
         assert "decision_gates" in result["inputs"]
         assert result["parameter_profiles"]["need_multiple_profiles"] is True
 
+    def test_trade_analyze_stock_returns_non_executing_report(self, setup_mcp):
+        result = json.loads(setup_mcp.trade_analyze_stock("002138"))
+
+        assert result["analysis"] == "stock"
+        assert result["resolved"]["code"] == "002138"
+        assert result["execution_allowed"] is False
+        assert "score" in result
+        assert "decision" in result
+
     def test_trade_explain_run_reports_missing_run(self, setup_mcp):
         result = json.loads(setup_mcp.trade_explain_run("missing-run-id"))
 

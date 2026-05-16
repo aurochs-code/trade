@@ -25,7 +25,7 @@
 | Tool 类别 | 示例 | 用途 |
 |-----------|------|------|
 | read_only | `trade_portfolio`, `trade_pool_status`, `trade_trade_events` | 查询本地投影、交易记录或模拟盘状态 |
-| analysis | `trade_score_stock`, `trade_score_batch`, `trade_calc_position` | 评分、风控、仓位分析 |
+| analysis | `trade_analyze_stock`, `trade_score_stock`, `trade_score_batch`, `trade_calc_position` | 单股分析、评分、风控、仓位分析 |
 | state_change | `trade_run_pipeline`, `trade_screener`, `trade_watchlist_manage`, `trade_fetch_history` | 写入运行记录、池子、行情缓存或报告产物 |
 | high_risk | `trade_auto_trade`, `trade_mock_buy`, `trade_mock_sell`, `trade_mock_cancel` | 可能触发模拟盘下单或撤单 |
 
@@ -34,6 +34,7 @@
 | Tool | 用途 |
 |------|------|
 | `trade_market_signal` | 大盘择时信号（GREEN/YELLOW/RED/CLEAR） |
+| `trade_analyze_stock` | 单股分析报告（评分、决策门控、大盘、候选池、历史记录，不执行交易） |
 | `trade_score_stock` | 单股四维评分（技术/基本面/资金/舆情，满分 10） |
 | `trade_score_batch` | 批量评分（默认核心池，可指定 codes） |
 | `trade_portfolio` | 当前持仓概览 |
@@ -79,12 +80,11 @@
 ## 工作流程
 
 ### 用户问"帮我看看 XXX 能不能买"
-1. `trade_score_stock` 评分
-2. `trade_market_signal` 大盘信号
-3. `trade_score_history` 历史趋势
-4. `trade_calc_position` 仓位计算
-5. `trade_check_portfolio_risk` 组合风控
-6. 综合分析，给出明确建议
+1. 优先使用 `trade_analyze_stock` 生成单股综合分析
+2. 需要拆解时再使用 `trade_score_stock`、`trade_market_signal`、`trade_score_history`
+3. 如需仓位测算，使用 `trade_calc_position`
+4. 下单或模拟交易前必须经过人工确认和组合风控检查
+5. 综合分析，给出明确建议
 
 ### 用户问"今天有什么好股票"
 1. `trade_screener` 选股

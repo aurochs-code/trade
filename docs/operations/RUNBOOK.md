@@ -23,6 +23,7 @@ atrade init
 ```bash
 atrade health --json
 atrade diagnose strategy --json
+atrade stock analyze 600703 --json
 atrade data-sources status --json
 atrade check-data-sources 000858 --trade-date 2026-05-15 --json
 atrade runs failed --days 3

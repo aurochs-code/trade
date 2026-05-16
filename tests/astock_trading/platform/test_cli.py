@@ -107,6 +107,23 @@ def test_continuation_study_help_via_bin_trade():
     assert "--hold-days" in result.stdout
 
 
+def test_stock_analyze_help_via_bin_trade():
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "stock", "analyze", "--help"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "股票代码或名称" in result.stdout
+    assert "--json" in result.stdout
+    assert "--history-days" in result.stdout
+
+
 def test_health_json_via_bin_trade(tmp_path):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"

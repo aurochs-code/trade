@@ -23,6 +23,7 @@ from astock_trading.platform.cli.pipelines import register_pipeline_commands
 from astock_trading.platform.cli.research import register_research_commands
 from astock_trading.platform.cli.runs import runs_app
 from astock_trading.platform.cli.screener import screener_app
+from astock_trading.platform.cli.stock import stock_app
 from astock_trading.platform.cli.trading import register_trading_commands
 from astock_trading.platform.database import MissingDatabaseUrl
 from astock_trading.platform.runtime_env import load_runtime_env
@@ -38,6 +39,7 @@ app.add_typer(data_sources_app)
 app.add_typer(manual_trades_app)
 app.add_typer(paper_app)
 app.add_typer(screener_app)
+app.add_typer(stock_app)
 register_agent_context(app)
 register_init_command(app)
 register_diagnostics_commands(app)

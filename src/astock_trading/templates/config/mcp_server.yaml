@@ -41,6 +41,7 @@ tool_policy:
       description: Compute or fetch analysis that must not place, cancel, or simulate orders.
       tools:
         - trade_market_signal
+        - trade_analyze_stock
         - trade_score_stock
         - trade_score_batch
         - trade_check_risk

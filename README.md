@@ -35,6 +35,7 @@ atrade init
 - `atrade run-pipeline morning --json`：执行盘前 pipeline
 - `atrade run-pipeline scoring --json`：执行评分 pipeline
 - `atrade diagnose strategy --json`：评估选股、评分、决策门控和参数 profile
+- `atrade stock analyze 600703 --json`：分析单只股票的评分、门控、候选池和历史记录
 - `atrade screener refresh --json`：刷新候选池、评分并更新 projection
 - `atrade screener candidates --json`：查看候选池
 - `atrade status --json`：查看持仓

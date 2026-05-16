@@ -8,7 +8,7 @@ A-Stock Trading 是一个 A 股量化交易辅助系统，采用"四维评分 + 
 
 ## 可用 MCP Tools
 
-稳定入口是 `atrade mcp`。源码 checkout 内 `bin/trade mcp` 仍可用于开发验证。实际 tool 清单以 MCP Server 暴露内容为准；审批和风险分类以 `config/mcp_server.yaml` 为准。
+稳定入口是 `atrade mcp`。源码 checkout 内 `bin/trade mcp` 仍可用于开发验证。实际 tool 清单以 MCP Server 暴露内容为准；审批和风险分类以 `config/mcp_server.yaml` 为准。单股分析优先使用 `trade_analyze_stock`，它只生成评分、门控、候选池和历史记录报告，不执行交易。
 
 | 分类 | 用途 | 审批要求 |
 |------|------|----------|

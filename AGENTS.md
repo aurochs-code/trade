@@ -24,6 +24,7 @@ Use JSON output for automation:
 - `atrade screener candidates --json`
 - `atrade screener refresh --json`
 - `atrade screener run --query "..." --json`
+- `atrade stock analyze CODE_OR_NAME --json`
 - `atrade record-buy CODE SHARES PRICE --yes --json`
 - `atrade record-sell CODE SHARES PRICE --yes --json`
 - `atrade manual-trades list --json`

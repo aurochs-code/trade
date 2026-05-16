@@ -18,6 +18,7 @@ import json
 import logging
 import traceback
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Optional
 
 try:
@@ -70,6 +71,7 @@ from astock_trading.platform.mcp_tools.agent import (
     propose_plan_payload,
 )
 from astock_trading.platform.mcp_tools.pipeline import build_pipeline_context, run_pipeline_payload
+from astock_trading.platform.stock_analysis import analyze_stock
 from astock_trading.strategy.models import ScoringWeights
 from astock_trading.strategy.scorer import Scorer
 from astock_trading.strategy.decider import build_decider_from_config
@@ -243,6 +245,24 @@ def trade_score_batch(codes: str = "") -> str:
     run_scores = [e["payload"] for e in events if e.get("metadata", {}).get("run_id") == run_id]
     run_scores.sort(key=lambda x: x.get("total_score", 0), reverse=True)
     return json.dumps({"scores": run_scores, "count": len(run_scores)}, ensure_ascii=False, default=str)
+
+
+@mcp.tool()
+@_safe
+def trade_analyze_stock(identifier: str, history_days: int = 7) -> str:
+    """生成单股分析报告：评分、决策门控、大盘、候选池和历史记录；不执行交易。"""
+    cfg = _config_snapshot.data.get("strategy", {}) if _config_snapshot else {}
+    ctx = SimpleNamespace(
+        conn=_conn,
+        event_store=_event_store,
+        market_svc=_market_svc,
+        exec_svc=_exec_svc,
+        cfg=cfg,
+        config_version=_config_snapshot.version if _config_snapshot else "unknown",
+        capital=cfg.get("capital", 450000),
+    )
+    payload = asyncio.run(analyze_stock(identifier, ctx, history_days=history_days))
+    return json.dumps(payload, ensure_ascii=False, default=str)
 
 
 # ---------------------------------------------------------------------------
