@@ -12,7 +12,6 @@ from astock_trading.market.models import (
     IndexQuote,
     SentimentData,
     StockQuote,
-    StockSnapshot,
     TechnicalIndicators,
 )
 from astock_trading.market.store import MarketStore
@@ -83,6 +82,34 @@ class MockMarketProvider:
 
     async def get_index(self, symbols):
         return {}
+
+
+class NoIndexProvider:
+    async def get_realtime(self, codes):
+        return {}
+
+    async def get_kline(self, code, period="daily", count=120):
+        return None
+
+
+class TrackingIndexProvider(MockMarketProvider):
+    def __init__(self):
+        super().__init__()
+        self.index_calls = []
+
+    async def get_index(self, symbols):
+        self.index_calls.append(symbols)
+        return {
+            "sh000001": IndexQuote(
+                symbol="sh000001",
+                name="上证指数",
+                price=3100.0,
+                change_pct=0.5,
+                ma20=3000.0,
+                ma60=2950.0,
+                above_ma20=True,
+            )
+        }
 
 
 class TrackingAShareKlineProvider(MockMarketProvider):
@@ -294,6 +321,18 @@ class TestMarketService:
         assert snap.code == "002138"
         assert snap.quote is None
         assert snap.financial is None
+
+    def test_collect_market_state_skips_provider_without_get_index(self):
+        provider = TrackingIndexProvider()
+        svc = MarketService(market_providers=[NoIndexProvider(), provider])
+
+        state, index_data = asyncio.get_event_loop().run_until_complete(
+            svc.collect_market_state("run_test")
+        )
+
+        assert state.signal.value in {"GREEN", "YELLOW", "RED", "CLEAR"}
+        assert provider.index_calls == [["sh000001", "sz399001", "sz399006"]]
+        assert index_data["上证指数"]["symbol"] == "sh000001"
 
     def test_observation_saved(self, store):
         svc = MarketService(

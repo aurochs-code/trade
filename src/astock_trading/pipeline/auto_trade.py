@@ -22,9 +22,8 @@ from astock_trading.pipeline.context import PipelineContext
 from astock_trading.pipeline.paper_account import PaperAccount, PaperPosition, PaperBalance
 from astock_trading.platform.time import MARKET_TZ, iso_to_local, local_date_bounds_utc, local_now
 from astock_trading.platform.time import local_now_str, local_today, local_today_str
-from astock_trading.strategy.models import Action, MarketSignal, Style
+from astock_trading.strategy.models import MarketSignal, Style
 from astock_trading.risk.rules import check_exit_signals, get_risk_params
-from astock_trading.risk.models import RiskParams
 
 _logger = logging.getLogger(__name__)
 

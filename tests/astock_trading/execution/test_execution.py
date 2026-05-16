@@ -2,7 +2,7 @@
 
 import pytest
 
-from astock_trading.execution.models import Order, OrderSide, OrderStatus, Position
+from astock_trading.execution.models import OrderSide, OrderStatus
 from astock_trading.execution.orders import OrderManager
 from astock_trading.execution.positions import PositionManager, PositionProjector
 from astock_trading.execution.service import ExecutionService, SimulatedBroker

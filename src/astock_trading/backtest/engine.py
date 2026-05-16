@@ -22,15 +22,16 @@ backtest/engine.py — 生产级回测引擎
 from __future__ import annotations
 
 import asyncio
-import json
 import math
 from dataclasses import dataclass, field
-from datetime import date, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import pandas as pd
 import yaml
+
+if TYPE_CHECKING:
+    from astock_trading.strategy.models import MarketState
 
 
 # ---------------------------------------------------------------------------
@@ -107,8 +108,6 @@ def _compute_indicators(df: pd.DataFrame, as_of_date: str) -> Optional[dict]:
             ma20_slope = (ma20 - ma20_5d_ago) / ma20_5d_ago
 
     above_ma20 = price > ma20 > 0
-    above_ma60 = price > ma60 > 0
-
     return {
         "ma5": ma5,
         "ma10": ma10,
@@ -336,9 +335,8 @@ class BacktestEngine:
             return {"error": "请先调用 load_data()"}
 
         # 初始化 Scorer 和 Decider
-        from astock_trading.market.models import TechnicalIndicators
         from astock_trading.strategy.models import (
-            DataQuality, ScoringWeights, Style,
+            ScoringWeights,
         )
         from astock_trading.strategy.scorer import Scorer
         from astock_trading.strategy.decider import Decider
@@ -413,7 +411,6 @@ class BacktestEngine:
                 if score.code not in self._positions:
                     continue
 
-                notes_text = " ".join(intent.notes or [])
                 is_market_clear = market.multiplier == 0.0
                 is_individual_clear = intent.action.value == "CLEAR"
 
@@ -649,7 +646,7 @@ class BacktestEngine:
                 rows.append(list(rs.get_row_data()))
             return pd.DataFrame(rows, columns=fields) if rows else pd.DataFrame()
 
-        lg = bs.login()
+        bs.login()
         try:
             for code in codes:
                 bs_code = self._bs_code(code)

@@ -11,7 +11,6 @@ pipeline/shipbuilding_eval.py — 造船板块专项评分
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime
 

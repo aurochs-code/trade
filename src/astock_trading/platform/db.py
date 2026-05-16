@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable
 from typing import Optional
 
-from astock_trading.platform.database import Database, SQLAlchemyCompatConnection
+from astock_trading.platform.database import Database
 
 _BASE_SCHEMA_VERSION = 1
 _SCHEMA_VERSION = 3

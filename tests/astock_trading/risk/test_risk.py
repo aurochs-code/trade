@@ -1,6 +1,5 @@
 """Tests for risk/rules.py and risk/sizing.py — pure functions"""
 
-import pytest
 from datetime import date
 
 from astock_trading.risk.models import RiskParams

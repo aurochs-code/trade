@@ -86,9 +86,6 @@ def compute_technical_indicators(kline: pd.DataFrame, quote: Optional[StockQuote
         prev_ma10 = float(ma10_series.iloc[-2]) if len(ma10_series) >= 2 else 0.0
         golden_cross = bool(prev_ma5 <= prev_ma10 and ma5 > ma10)
 
-    # MA5 > MA10 > MA20 排列
-    arr_positive = bool(ma5 > ma10 > ma20 > 0)
-
     # MA20 斜率（需要用 Series 计算）
     ma20_slope = 0.0
     ma20_series = close.rolling(20).mean()

@@ -257,7 +257,7 @@ class TestWeeklyPipeline:
 
     def test_writes_obsidian(self, ctx):
         from astock_trading.pipeline.weekly import run
-        result = run(ctx, "run_weekly_test")
+        run(ctx, "run_weekly_test")
         vault = Path(ctx.vault_path)
         week_files = list((vault / "03-分析" / "周复盘").glob("*.md"))
         assert len(week_files) >= 1

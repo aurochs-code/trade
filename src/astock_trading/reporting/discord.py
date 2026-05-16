@@ -7,7 +7,6 @@ reporting 不反写任何业务表。
 
 from __future__ import annotations
 
-from typing import Optional
 
 from astock_trading.platform.time import local_now_iso, local_now_str, local_today_str
 from astock_trading.reporting.market_formatters import top_sector_movers

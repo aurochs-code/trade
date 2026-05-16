@@ -17,7 +17,7 @@ import functools
 import json
 import logging
 import traceback
-from datetime import date, datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 try:
@@ -68,11 +68,10 @@ from astock_trading.platform.mcp_tools.agent import (
     propose_plan_payload,
 )
 from astock_trading.platform.mcp_tools.pipeline import build_pipeline_context, run_pipeline_payload
-from astock_trading.strategy.models import ScoringWeights, MarketSignal, MarketState
+from astock_trading.strategy.models import ScoringWeights
 from astock_trading.strategy.scorer import Scorer
 from astock_trading.strategy.decider import Decider
 from astock_trading.strategy.service import StrategyService
-from astock_trading.strategy.timer import compute_market_signal
 from astock_trading.platform.time import is_trading_day, local_now_str, local_today
 
 _logger = logging.getLogger(__name__)
@@ -242,7 +241,7 @@ def trade_score_batch(codes: str = "") -> str:
 
     snapshots = asyncio.run(_market_svc.collect_batch(stock_list, run_id))
     market_state, index_data = asyncio.run(_market_svc.collect_market_state(run_id))
-    decisions = _strategy_svc.evaluate(snapshots, market_state, run_id, config_version)
+    _strategy_svc.evaluate(snapshots, market_state, run_id, config_version)
 
     # 同步指数数据到 projection_market_state 表
     if index_data:

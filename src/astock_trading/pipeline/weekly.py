@@ -45,8 +45,6 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     now = local_now()
     week_start_dt = now - timedelta(days=now.weekday())
     week_end_dt = week_start_dt + timedelta(days=6)
-    week_start = week_start_dt.strftime("%Y-%m-%d")
-    week_end = week_end_dt.strftime("%Y-%m-%d")
     week_start_display = week_start_dt.strftime("%m/%d")
     week_end_display = week_end_dt.strftime("%m/%d")
 
@@ -165,7 +163,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
 
     # 8. 周报
     week_str = now.strftime("%Y-W%W")
-    report = ctx.reporter.generate_weekly_report(week_str)
+    ctx.reporter.generate_weekly_report(week_str)
 
     # 9. Obsidian 周复盘
     ctx.obsidian.write_weekly_review({

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from astock_trading.market.health import evaluate_data_source_health
@@ -77,14 +77,27 @@ def candidate_pool_summary(conn: Any, *, now: datetime | None = None, max_age_da
 
 def diagnose_health(conn: Any) -> dict:
     """Build a read-only health diagnosis for Agent orchestration."""
+    now = utc_now()
+    recent_failed_cutoff = (now.replace(microsecond=0) - timedelta(days=3)).isoformat()
     data_sources = evaluate_data_source_health(conn)
     candidate_pool = candidate_pool_summary(conn)
     failed_runs = conn.execute(
         """SELECT run_id, run_type, started_at, error_message
            FROM run_log
            WHERE status = 'failed'
+             AND started_at >= ?
            ORDER BY started_at DESC
-           LIMIT 10"""
+           LIMIT 10""",
+        (recent_failed_cutoff,),
+    ).fetchall()
+    historical_failed_runs = conn.execute(
+        """SELECT run_id, run_type, started_at, error_message
+           FROM run_log
+           WHERE status = 'failed'
+             AND (started_at < ? OR started_at IS NULL)
+           ORDER BY started_at DESC
+           LIMIT 10""",
+        (recent_failed_cutoff,),
     ).fetchall()
     running_runs = conn.execute(
         """SELECT run_id, run_type, started_at
@@ -135,6 +148,7 @@ def diagnose_health(conn: Any) -> dict:
             "data_sources": data_sources,
             "candidate_pool": candidate_pool,
             "failed_runs": [dict(row) for row in failed_runs],
+            "historical_failed_runs": [dict(row) for row in historical_failed_runs],
             "running_runs": [dict(row) for row in running_runs],
         },
     }

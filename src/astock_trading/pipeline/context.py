@@ -7,9 +7,8 @@ pipeline/context.py — Pipeline 运行上下文
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -20,12 +19,11 @@ from astock_trading.platform.runs import RunJournal
 from astock_trading.market.adapters import (
     AkShareMarketAdapter, AkShareFinancialAdapter, AkShareFlowAdapter,
     AkShareHKMarketAdapter, AkShareHKFinancialAdapter,
-    MXMarketAdapter, MXSentimentAdapter, MXScreenerAdapter,
-    AStockSignalAdapter, BaiduFundFlowAdapter, MootdxMarketAdapter, TencentFinancialAdapter,
+    MXMarketAdapter, MXSentimentAdapter, AStockSignalAdapter, BaiduFundFlowAdapter, MootdxMarketAdapter, TencentFinancialAdapter,
 )
 from astock_trading.market.service import MarketService
 from astock_trading.market.store import MarketStore
-from astock_trading.strategy.models import ScoringWeights, MarketState
+from astock_trading.strategy.models import ScoringWeights
 from astock_trading.strategy.scorer import Scorer
 from astock_trading.strategy.decider import Decider
 from astock_trading.strategy.service import StrategyService
@@ -35,10 +33,6 @@ from astock_trading.execution.trade_logger import TradeLogger
 from astock_trading.reporting.projectors import ProjectionUpdater
 from astock_trading.reporting.reports import ReportGenerator
 from astock_trading.reporting.obsidian import ObsidianProjector
-from astock_trading.reporting.discord import (
-    format_morning_embed, format_evening_embed,
-    format_scoring_embed, format_stop_alert_embed,
-)
 
 _logger = logging.getLogger(__name__)
 

@@ -7,6 +7,9 @@ import os
 import subprocess
 from pathlib import Path
 
+from astock_trading.platform.agent_diagnostics import diagnose_health
+from astock_trading.platform.db import connect, init_db
+
 
 def _cli_env(tmp_path: Path) -> dict:
     env = os.environ.copy()
@@ -33,6 +36,35 @@ def test_diagnose_health_json_via_bin_trade(tmp_path):
     assert "findings" in payload
     assert "recommendations" in payload
     assert "data_sources" in payload["inputs"]
+
+
+def test_diagnose_health_treats_old_failed_runs_as_historical(tmp_path):
+    db_path = tmp_path / "runtime.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        conn.execute(
+            """INSERT INTO run_log
+               (run_id, run_type, scope, config_version, status, started_at, error_message)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "old_failed",
+                "evening",
+                "cn_a",
+                "v_test",
+                "failed",
+                "2026-01-01T00:00:00+00:00",
+                "old failure",
+            ),
+        )
+
+        payload = diagnose_health(conn)
+
+        assert payload["inputs"]["failed_runs"] == []
+        assert payload["inputs"]["historical_failed_runs"][0]["run_id"] == "old_failed"
+        assert "failed runs require review" not in " ".join(payload["findings"])
+    finally:
+        conn.close()
 
 
 def test_explain_run_missing_json_via_bin_trade(tmp_path):

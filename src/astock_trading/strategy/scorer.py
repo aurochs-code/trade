@@ -7,7 +7,7 @@ strategy/scorer.py — 四维评分引擎（纯函数）
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
 from astock_trading.market.models import StockSnapshot
 from astock_trading.strategy.models import (

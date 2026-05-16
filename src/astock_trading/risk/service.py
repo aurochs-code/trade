@@ -8,18 +8,16 @@ risk/service.py — 风控服务层
 from __future__ import annotations
 
 from datetime import date
-from typing import Optional
 
 from astock_trading.platform.events import EventStore
 from astock_trading.risk.models import (
     ExitSignal,
     PortfolioLimits,
     PositionSize,
-    RiskAssessment,
     RiskBreach,
     RiskParams,
 )
-from astock_trading.risk.rules import check_exit_signals, check_portfolio_risk, get_risk_params
+from astock_trading.risk.rules import check_exit_signals, check_portfolio_risk
 from astock_trading.risk.sizing import calc_position_size
 
 

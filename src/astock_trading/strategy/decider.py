@@ -6,7 +6,6 @@ strategy/decider.py — 综合决策引擎（纯函数）
 
 from __future__ import annotations
 
-from typing import Optional
 
 from astock_trading.strategy.models import (
     Action,

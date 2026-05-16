@@ -9,12 +9,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, timedelta
-from typing import Optional
 
 from astock_trading.pipeline.context import PipelineContext
 from astock_trading.execution.models import Position
 from astock_trading.platform.time import local_date_bounds_utc, local_now, local_today
-from astock_trading.risk.models import ExitSignal, RiskParams
+from astock_trading.risk.models import ExitSignal
 from astock_trading.risk.rules import check_exit_signals, get_risk_params
 from astock_trading.strategy.models import Style
 

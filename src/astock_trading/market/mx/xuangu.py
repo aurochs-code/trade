@@ -89,7 +89,10 @@ def _parse_partial_table(text: str) -> List[Dict[str, str]]:
     lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
     if not lines:
         return []
-    split = lambda line: [c.strip() for c in line.split("|") if c.strip()]
+
+    def split(line: str) -> list[str]:
+        return [c.strip() for c in line.split("|") if c.strip()]
+
     headers = split(lines[0])
     if not headers:
         return []

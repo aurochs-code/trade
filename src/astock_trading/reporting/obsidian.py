@@ -570,7 +570,7 @@ class ObsidianProjector:
             lines.append(f"| 决策动作 | {decision.get('action', '—')} |")
             lines.append(f"| 市场信号 | {market_signal} |")
         else:
-            lines.append(f"| 决策动作 | — |")
+            lines.append("| 决策动作 | — |")
             lines.append(f"| 市场信号 | {market_signal} |")
 
         # 池子摘要
@@ -751,7 +751,7 @@ class ObsidianProjector:
         def _table(title: str, entries: list[dict]) -> list[str]:
             if not entries:
                 return []
-            out = [f"", f"## {title}", "",
+            out = ["", f"## {title}", "",
                    "| 股票 | 代码 | 评分 | 连续天数 | 备注 |",
                    "|------|------|------|----------|------|"]
             for e in entries:
@@ -1013,7 +1013,7 @@ class ObsidianProjector:
                 lines.append(f"| {r['pool_tier']} | {r['cnt']} |")
             lines.append("")
 
-        lines.extend(["---", "", f"> 本报告由模拟盘自动交易引擎自动生成", ""])
+        lines.extend(["---", "", "> 本报告由模拟盘自动交易引擎自动生成", ""])
 
         content = "\n".join(lines) + "\n"
         return self._upsert_daily_inspection("模拟盘", content, run_id)
@@ -1110,7 +1110,7 @@ class ObsidianProjector:
             "---",
             f"date: {today}",
             "type: weekly_review",
-            f"tags: [周复盘, 自动更新]",
+            "tags: [周复盘, 自动更新]",
             f"week: {week_str}",
             f"updated_at: {now}",
             "---",
@@ -1123,10 +1123,10 @@ class ObsidianProjector:
             "",
             "| 项目 | 数据 |",
             "|------|------|",
-            f"| 周初资产 | ¥<!-- 手动填写 --> |",
-            f"| 周末资产 | ¥<!-- 手动填写 --> |",
+            "| 周初资产 | ¥<!-- 手动填写 --> |",
+            "| 周末资产 | ¥<!-- 手动填写 --> |",
             f"| 本周盈亏 | ¥{net_pnl:+,.0f} |",
-            f"| 收益率 | <!-- 填写资产后自动计算 --> |",
+            "| 收益率 | <!-- 填写资产后自动计算 --> |",
             f"| 买入次数 | {buy_count} 次 |",
             f"| 卖出次数 | {sell_count} 次 |",
             f"| 胜率 | {win_rate:.0%}（{wins}胜 {losses}负） |",
@@ -1306,7 +1306,7 @@ class ObsidianProjector:
             "---",
             f"date: {today}",
             "type: monthly_review",
-            f"tags: [月复盘, 自动更新]",
+            "tags: [月复盘, 自动更新]",
             f"month: {month_str}",
             f"updated_at: {now}",
             "---",

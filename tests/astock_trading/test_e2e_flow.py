@@ -20,7 +20,6 @@ from datetime import date
 
 from astock_trading.platform.db import init_db, connect
 from astock_trading.platform.events import EventStore
-from astock_trading.platform.config import ConfigRegistry
 from astock_trading.platform.runs import RunJournal
 from astock_trading.market.models import (
     FinancialReport, FundFlow, SentimentData,
@@ -32,15 +31,15 @@ from astock_trading.strategy.models import (
 from astock_trading.strategy.scorer import Scorer
 from astock_trading.strategy.decider import Decider
 from astock_trading.strategy.service import StrategyService
-from astock_trading.risk.models import RiskParams, PortfolioLimits
+from astock_trading.risk.models import PortfolioLimits
 from astock_trading.risk.service import RiskService
-from astock_trading.risk.rules import check_exit_signals, get_risk_params
+from astock_trading.risk.rules import get_risk_params
 from astock_trading.risk.sizing import calc_position_size
 from astock_trading.execution.service import ExecutionService, SimulatedBroker
 from astock_trading.reporting.projectors import ProjectionUpdater
 from astock_trading.reporting.reports import ReportGenerator
 from astock_trading.reporting.obsidian import ObsidianProjector
-from astock_trading.reporting.discord import format_scoring_embed, format_stop_alert_embed
+from astock_trading.reporting.discord import format_scoring_embed
 from astock_trading.strategy.models import Style
 
 
@@ -138,7 +137,7 @@ class TestE2EFlow:
             snapshots, market_state,
             run_id=run_id, config_version="v_test_001",
         )
-        print(f"Step 3: 评分完成")
+        print("Step 3: 评分完成")
         for d in decisions:
             print(f"  {d.name}({d.code}): {d.action.value} score={d.score:.1f} pos={d.position_pct:.1%}")
 
@@ -169,11 +168,12 @@ class TestE2EFlow:
 
         # ── Step 5: 仓位计算 + 买入 ──────────────────────────
         best_buy = buys[0]
-        ps = calc_position_size(
+        position_size = calc_position_size(
             total_capital=450000, current_exposure_pct=0.0,
             price=float(best_buy.score),  # 用 score 作为 price 的近似
             market_multiplier=1.0,
         )
+        assert position_size.shares >= 0
         # 用实际价格买入
         buy_price = snapshots[0].quote.price if best_buy.code == "002138" else snapshots[1].quote.price
         buy_price_cents = int(buy_price * 100)
@@ -217,12 +217,13 @@ class TestE2EFlow:
             price_cents=sell_price_cents, run_id=run_id,
             reason="take_profit",
         )
+        assert sell_order.order_id
         print(f"Step 7: 卖出 {best_buy.name} {shares}股 @ ¥{sell_price:.2f}")
 
         # 验证清仓
         assert execution.get_position(best_buy.code) is None
         assert execution.get_portfolio()["holding_count"] == 0
-        print(f"  持仓清空")
+        print("  持仓清空")
 
         # ── Step 8: 重建投影 ─────────────────────────────────
         env["conn"].execute("DELETE FROM projection_positions")
@@ -243,7 +244,7 @@ class TestE2EFlow:
         trade_history = reporter.generate_trade_history()
         assert "交易记录" in trade_history
 
-        print(f"Step 9: 报告生成完成")
+        print("Step 9: 报告生成完成")
         print(f"  评分报告: {len(scoring_report)} 字符")
         print(f"  收盘报告: {len(evening_report)} 字符")
 
@@ -253,7 +254,7 @@ class TestE2EFlow:
             [strategy._scorer.score(snap) for snap in snapshots]])
         vault = env["vault_path"]
         assert (vault / "01-状态" / "持仓" / "持仓概览.md").exists()
-        print(f"Step 10: Obsidian 投影写入完成")
+        print("Step 10: Obsidian 投影写入完成")
 
         # ── Step 11: Discord 格式化 ──────────────────────────
         score_events = es.query(event_type="score.calculated")
@@ -266,12 +267,12 @@ class TestE2EFlow:
 
         # ── Step 12: 完成 run ────────────────────────────────
         journal.complete_run(run_id, artifacts={"scores": 3, "trades": 2})
-        print(f"Step 12: run 完成")
+        print("Step 12: run 完成")
 
         # ── Step 13: 验证完整审计链 ──────────────────────────
         all_events = es.query()
         event_types = [e["event_type"] for e in all_events]
-        print(f"\nStep 13: 审计链验证")
+        print("\nStep 13: 审计链验证")
         print(f"  总事件数: {len(all_events)}")
 
         # 必须有的事件类型
@@ -288,7 +289,7 @@ class TestE2EFlow:
 
         # 幂等检查
         assert journal.is_completed_today("scoring")
-        print(f"  ✅ 幂等检查: scoring 今日已完成")
+        print("  ✅ 幂等检查: scoring 今日已完成")
 
         print(f"\n{'='*60}")
         print(f"✅ 全流程验证通过！共 {len(all_events)} 个事件")

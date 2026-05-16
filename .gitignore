@@ -44,3 +44,4 @@ data/backups/
 *.sqlite
 *.sqlite3
 src/astock_trading.egg-info/
+src/*.egg-info/

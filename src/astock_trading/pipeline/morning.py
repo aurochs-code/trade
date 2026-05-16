@@ -96,7 +96,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     )
 
     # 5. 盘前报告
-    report = ctx.reporter.generate_morning_report(run_id)
+    ctx.reporter.generate_morning_report(run_id)
 
     # 6. Obsidian
     ctx.obsidian.write_portfolio_status()
@@ -109,7 +109,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         decision={"action": decision_action},
     )
 
-    log_lines = [f"## 盘前摘要", f"", f"大盘信号: **{signal}** (仓位系数 {multiplier})", ""]
+    log_lines = ["## 盘前摘要", "", f"大盘信号: **{signal}** (仓位系数 {multiplier})", ""]
     if positions:
         log_lines.append(f"持仓 {len(positions)} 只")
         for p in positions:

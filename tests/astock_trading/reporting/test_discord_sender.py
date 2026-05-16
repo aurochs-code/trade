@@ -1,7 +1,6 @@
 """Tests for reporting/discord_sender.py — retry logic and env loading"""
 
 import os
-import pytest
 from unittest.mock import patch, MagicMock
 import urllib.error
 
@@ -9,7 +8,6 @@ from astock_trading.reporting.discord_sender import (
     _api_request,
     _load_env_once,
     send_embed,
-    send_text,
 )
 
 

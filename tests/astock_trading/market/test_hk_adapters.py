@@ -1,6 +1,5 @@
 """Tests for HK stock adapter logic — code detection, normalization, routing."""
 
-import pytest
 import asyncio
 import pandas as pd
 
@@ -11,8 +10,6 @@ from astock_trading.market.adapters import (
     AkShareHKFinancialAdapter,
     AkShareMarketAdapter,
     MXMarketAdapter,
-    AkShareFinancialAdapter,
-    AkShareFlowAdapter,
 )
 from astock_trading.market.models import StockQuote
 
@@ -136,8 +133,6 @@ class TestHKAdapterRouting:
 class TestHKKlineFormat:
     def test_kline_adds_change_pct(self):
         """Verify _get_kline_sync adds 涨跌幅 column to HK daily data."""
-        adapter = AkShareHKMarketAdapter()
-
         # Simulate what _get_kline_sync does with a mock DataFrame
         df = pd.DataFrame({
             "date": ["2026-04-10", "2026-04-11", "2026-04-14"],
@@ -163,7 +158,6 @@ class TestHKKlineFormat:
 class TestMixedCodeRouting:
     def test_a_share_realtime_filters_hk(self):
         """AkShareMarketAdapter._get_realtime_sync should skip HK codes."""
-        adapter = AkShareMarketAdapter()
         # We can't call the real API, but we can verify the filtering logic
         # by checking that the code_set only contains A-share codes
         codes = ["600066", "09927", "002138", "00700"]

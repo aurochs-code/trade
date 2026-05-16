@@ -9,7 +9,6 @@ from __future__ import annotations
 from datetime import date
 from typing import Optional
 
-from astock_trading.market.models import StockSnapshot
 from astock_trading.risk.models import ExitSignal, RiskParams, RiskBreach
 from astock_trading.strategy.models import Style
 

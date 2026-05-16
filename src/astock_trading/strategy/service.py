@@ -7,7 +7,6 @@ strategy/service.py — 策略服务层
 
 from __future__ import annotations
 
-from typing import Optional
 
 from astock_trading.market.models import StockSnapshot
 from astock_trading.platform.events import EventStore

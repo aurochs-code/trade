@@ -1,6 +1,5 @@
 """Tests for pipeline/sentiment.py — hash, classification, and caching"""
 
-import pytest
 
 from astock_trading.pipeline.sentiment import _item_hash, _classify_item, _extract_brief
 
@@ -29,7 +28,7 @@ class TestItemHash:
         """Verify it's sha256, not md5."""
         import hashlib
         item = {"code": "002138", "title": "test", "date": "2026-04-10"}
-        key = f"002138test2026-04-10"
+        key = "002138test2026-04-10"
         expected = hashlib.sha256(key.encode()).hexdigest()[:16]
         assert _item_hash(item) == expected
 

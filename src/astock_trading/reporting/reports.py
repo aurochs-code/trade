@@ -7,12 +7,11 @@ reporting/reports.py — 报告生成
 
 from __future__ import annotations
 
-import json
 import uuid
-from typing import Any, Optional
+from typing import Any
 
 from astock_trading.platform.events import EventStore
-from astock_trading.platform.time import local_date_bounds_utc, local_today_str, local_now_str
+from astock_trading.platform.time import local_date_bounds_utc, local_now_str
 from astock_trading.platform.time import local_today, utc_now_iso
 
 
@@ -36,7 +35,7 @@ class ReportGenerator:
         if not scores:
             return f"# 评分报告\n\n> run_id: {run_id}\n\n无评分数据。\n"
 
-        lines = [f"# 评分报告", f"", f"> run_id: {run_id}", f"> 时间: {local_now_str('%Y-%m-%d %H:%M:%S')}", ""]
+        lines = ["# 评分报告", "", f"> run_id: {run_id}", f"> 时间: {local_now_str('%Y-%m-%d %H:%M:%S')}", ""]
         lines.append("| 代码 | 名称 | 总分 | 技术 | 基本面 | 资金 | 舆情 | 风格 | 否决 |")
         lines.append("|------|------|------|------|--------|------|------|------|------|")
 

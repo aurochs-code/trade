@@ -8,11 +8,10 @@ from __future__ import annotations
 
 from typing import Any, Optional, Protocol, runtime_checkable
 
-from astock_trading.execution.models import Balance, Order, OrderSide, Position
+from astock_trading.execution.models import Order, OrderSide, Position
 from astock_trading.execution.orders import OrderManager
 from astock_trading.execution.positions import PositionManager, PositionProjector
 from astock_trading.platform.events import EventStore
-from astock_trading.platform.time import utc_now_iso
 
 
 @runtime_checkable

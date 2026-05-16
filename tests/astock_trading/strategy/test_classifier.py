@@ -1,6 +1,5 @@
 """Tests for strategy/classifier.py — pure function style classification"""
 
-import pytest
 
 from astock_trading.strategy.classifier import (
     calc_daily_volatility,

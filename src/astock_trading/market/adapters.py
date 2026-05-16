@@ -15,8 +15,6 @@ from typing import Optional, Protocol, runtime_checkable
 
 import pandas as pd
 
-_logger = logging.getLogger(__name__)
-
 from astock_trading.platform.time import local_now, local_today
 from astock_trading.market.models import (
     FinancialReport,
@@ -24,8 +22,38 @@ from astock_trading.market.models import (
     IndexQuote,
     SentimentData,
     StockQuote,
-    TechnicalIndicators,
 )
+
+_logger = logging.getLogger(__name__)
+
+
+def _patch_py_mini_racer_destructor() -> None:
+    """Guard AkShare's optional py_mini_racer dependency against noisy partial init cleanup."""
+    try:
+        from py_mini_racer import py_mini_racer
+    except Exception:
+        return
+
+    cls = getattr(py_mini_racer, "MiniRacer", None)
+    if cls is None or getattr(cls, "_astock_safe_del", False):
+        return
+
+    def _safe_del(self) -> None:
+        ext = getattr(self, "ext", None)
+        ctx = getattr(self, "ctx", None)
+        free_context = getattr(ext, "mr_free_context", None) if ext is not None else None
+        if ctx is None or free_context is None:
+            return
+        try:
+            free_context(ctx)
+        except Exception:
+            return
+
+    cls.__del__ = _safe_del
+    cls._astock_safe_del = True
+
+
+_patch_py_mini_racer_destructor()
 
 
 # ---------------------------------------------------------------------------
@@ -1136,7 +1164,6 @@ class AkShareMarketAdapter:
         仅在东财 stock_zh_a_spot_em 断线时使用。
         收盘后可用，日内数据有限（无盘前集合竞价价格）。
         """
-        from datetime import date
 
         result = {}
         today = local_today().strftime("%Y%m%d")
@@ -1948,7 +1975,7 @@ class BaoStockMarketAdapter:
 
             # 计算日期范围（当指定 count 而非起止日期时）
             if start_date is None and count > 0:
-                from datetime import datetime, timedelta
+                from datetime import timedelta
                 end_dt = local_now().replace(tzinfo=None)
                 if freq == "d":
                     days = min(count * 3, 5000)

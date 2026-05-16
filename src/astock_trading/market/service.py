@@ -346,6 +346,12 @@ class MarketService:
 
         index_data = {}
         for provider in self._market:
+            if not hasattr(provider, "get_index"):
+                _logger.debug(
+                    "[market_state] provider %s has no get_index; skipping",
+                    provider.__class__.__name__,
+                )
+                continue
             try:
                 indices = await provider.get_index([
                     "sh000001", "sz399001", "sz399006",
@@ -496,7 +502,7 @@ class MarketService:
 
     def _iter_kline_providers(self, code: str):
         """为指定代码挑选合适的 K 线 provider。"""
-        from astock_trading.market.adapters import AkShareHKMarketAdapter, is_hk_code
+        from astock_trading.market.adapters import AkShareHKMarketAdapter
 
         want_hk = is_hk_code(code)
         for provider in self._market:

@@ -4,7 +4,7 @@ import math
 import logging
 import os
 import time
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl
 
 import requests as rq
 import pandas as pd

@@ -1,6 +1,5 @@
 """Tests for strategy/timer.py — pure function market timing"""
 
-import pytest
 
 from astock_trading.strategy.models import MarketSignal
 from astock_trading.strategy.timer import compute_market_signal

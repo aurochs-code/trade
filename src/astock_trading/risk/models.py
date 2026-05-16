@@ -5,8 +5,7 @@ risk/models.py — 风控领域模型
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
-from typing import Optional, List
+from typing import Optional
 
 from astock_trading.strategy.models import Style
 

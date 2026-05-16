@@ -1,5 +1,4 @@
-"""
-iwencai 数据源接入层
+"""iwencai 数据源接入层
 
 使用方式：
     from data.sources.pywencai import query, get_financial
@@ -11,10 +10,12 @@ iwencai 数据源接入层
     1. get_financial() — 基本面（ROE/营收增长/现金流），作为 financial.py 的补充
     2. query()           — 自然语言选股，作为 stock_screener.py 的补充
 """
-from .wencai import query, fetch_stocks
-
 import logging
+
 import pandas as pd
+
+from .wencai import fetch_stocks as fetch_stocks
+from .wencai import query as query
 
 logger = logging.getLogger("pywencai")
 

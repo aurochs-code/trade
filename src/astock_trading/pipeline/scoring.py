@@ -51,7 +51,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     current_exposure_pct, weekly_buy_count = get_current_exposure(ctx)
 
     # 4. 评分 + 决策（传入真实的仓位数据）
-    decisions = ctx.strategy_svc.evaluate(
+    ctx.strategy_svc.evaluate(
         snapshots, market_state, run_id, ctx.config_version,
         current_exposure_pct=current_exposure_pct,
         weekly_buy_count=weekly_buy_count,
@@ -163,7 +163,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     ctx.obsidian.write_pool_adjustment(run_id, demoted, removed)
 
     # 日志追加
-    lines = [f"## 核心池评分", ""]
+    lines = ["## 核心池评分", ""]
     for s in run_scores:
         total = s.get("total_score", 0)
         emoji = "✅" if total >= 7 else ("🟡" if total >= 5 else "❌")
