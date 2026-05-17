@@ -295,7 +295,13 @@ def _decode_payload(value: Any) -> Any:
         return {"raw": str(value)}
 
 
-def _latest_market_observation(conn: Any, kind: str, *, run_type: str | None = None) -> dict | None:
+def _latest_market_observation(
+    conn: Any,
+    kind: str,
+    *,
+    run_type: str | None = None,
+    fallback_to_latest: bool = False,
+) -> dict | None:
     params: list[Any] = [kind, _today_start_iso()]
     run_filter = ""
     if run_type:
@@ -313,8 +319,11 @@ def _latest_market_observation(conn: Any, kind: str, *, run_type: str | None = N
     ).fetchone()
     if row is None and run_type is not None:
         fallback = _latest_market_observation(conn, kind)
-        if fallback and _observation_run_matches(fallback.get("run_id", ""), run_type):
-            fallback["run_type"] = run_type
+        if fallback and (fallback_to_latest or _observation_run_matches(fallback.get("run_id", ""), run_type)):
+            fallback["requested_run_type"] = run_type
+            fallback["fallback_used"] = True
+            if _observation_run_matches(fallback.get("run_id", ""), run_type):
+                fallback["run_type"] = run_type
             return fallback
         return None
     if row is None:
@@ -326,6 +335,8 @@ def _latest_market_observation(conn: Any, kind: str, *, run_type: str | None = N
         "observed_at": row["observed_at"],
         "run_id": row["run_id"],
         "run_type": row["run_type"],
+        "requested_run_type": run_type or "",
+        "fallback_used": False,
         "payload": _decode_payload(row["payload_json"]),
     }
 
@@ -401,19 +412,24 @@ def _dedupe(items: list[dict], key_fn, *, limit: int) -> list[dict]:
     return result
 
 
-def _market_snapshot(conn: Any, *, run_type: str | None) -> dict:
+def _market_snapshot(conn: Any, *, run_type: str | None, fallback_to_latest: bool = False) -> dict:
     sector_kinds = ("sector_heatmap", "hot_sectors_industry_change", "hot_sectors_concept_change")
     stock_kinds = ("cross_platform_hot_stocks", "xueqiu_hot_stocks", "hot_stocks")
     news_kinds = ("finance_flash", "market_announcements", "global_risk_news")
     observations: dict[str, dict] = {}
+    fallback_used = False
 
     def latest(kind: str) -> dict | None:
-        obs = _latest_market_observation(conn, kind, run_type=run_type)
+        obs = _latest_market_observation(conn, kind, run_type=run_type, fallback_to_latest=fallback_to_latest)
         if obs:
+            nonlocal fallback_used
+            fallback_used = fallback_used or bool(obs.get("fallback_used"))
             observations[kind] = {
                 "observed_at": obs["observed_at"],
                 "run_id": obs["run_id"],
                 "run_type": obs.get("run_type") or "",
+                "requested_run_type": obs.get("requested_run_type") or "",
+                "fallback_used": bool(obs.get("fallback_used")),
                 "source": obs["source"],
                 "count": len(_payload_items(obs["payload"])),
             }
@@ -452,6 +468,8 @@ def _market_snapshot(conn: Any, *, run_type: str | None) -> dict:
     return {
         "phase": TERM_CN.get(run_type or "latest", run_type or "latest"),
         "available": bool(sectors or stocks or news),
+        "fallback_used": fallback_used,
+        "fallback_note": "未找到指定流水的热点缓存，已退回最新可用热点缓存。" if fallback_used else "",
         "sectors": sectors,
         "hot_stocks": stocks,
         "news": news,
@@ -497,13 +515,14 @@ def _market_comparison(morning: dict, close: dict) -> dict:
 
 
 def _market_intel_context(conn: Any, *, mode: str) -> dict:
-    morning = _market_snapshot(conn, run_type="morning")
+    morning = _market_snapshot(conn, run_type="morning", fallback_to_latest=(mode == "morning"))
     if mode == "morning":
         return {
             "mode": mode,
             "current": morning,
             "summary_requirements": [
                 "盘前摘要必须列出热门板块、热门新闻、热门股；没有数据时明确说数据不足。",
+                "如果使用的是最新缓存而非盘前流水，必须说明这是非交易日/手动运行的参考数据。",
                 "热点只作为观察线索，不得直接升级为买入意向。",
             ],
         }
