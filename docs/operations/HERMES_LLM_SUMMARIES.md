@@ -25,6 +25,17 @@ atrade llm-context --mode weekly
 
 Hermes 只保留 `~/.hermes/scripts/` 里的薄包装脚本，不进入交易系统 checkout，不设置 `--workdir`，不加载项目目录作为 agent 工作区。
 
+`atrade llm-context` 的 Markdown 输出会附带统一术语表，并把常见内部字段转成中文展示：
+
+- `execution_allowed=false` → `自动执行：禁止`
+- `proposed` → `计划已生成但不可执行`
+- `candidate_pool_freshness` → `候选池新鲜度`
+- `core_pool` → `核心池`
+- `watch` → `观察`
+- `record-buy` / `record-sell` → `买入记录命令` / `卖出记录命令`
+
+Hermes LLM 最终发到 Discord 的正文不要裸露内部字段名、枚举值或 JSON 路径；如果必须保留协议名，格式为“中文释义（内部字段：protocol_name）”。
+
 ## 安装脚本
 
 ```bash
@@ -56,7 +67,7 @@ chmod +x ~/.hermes/scripts/a_stock_llm_*_context.sh
 
 ```bash
 hermes cron create "20 9 * * 1-5" \
-  "你是 A 股交易系统的盘前中文审计员。只基于脚本输出的 atrade JSON 和报告片段总结，不要臆测外部事实，不要调用或建议自动调用 record-buy / record-sell。明确区分观察、核心池、买入意向；观察不等于买入。数据质量降级时，不要提高执行信心。输出控制在 1200 中文字以内，面向人工确认。如果没有新增可处理事项且脚本上下文也没有异常，输出 [SILENT]。" \
+  "你是 A 股交易系统的盘前中文审计员。只基于脚本输出的 atrade 上下文和报告片段总结，不要臆测外部事实，不要调用或建议自动调用买入/卖出记录命令。最终发到 Discord 的正文必须把内部字段名、枚举值和 JSON 路径转成中文业务释义，不要裸露 execution_allowed、proposed、candidate_pool_freshness 等协议词。明确区分观察、核心池、买入意向；观察不等于买入。数据质量降级时，不要提高执行信心。输出控制在 1200 中文字以内，面向人工确认。如果没有新增可处理事项且脚本上下文也没有异常，输出 [SILENT]。" \
   --name "A股 LLM 盘前摘要" \
   --deliver discord \
   --script a_stock_llm_morning_context.sh

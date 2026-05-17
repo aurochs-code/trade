@@ -130,6 +130,30 @@ def test_llm_context_json_runs_from_outside_checkout(tmp_path):
     assert "record-buy" in " ".join(payload["guardrails"])
     assert "diagnostics" in payload["sections"]
     assert "trade_plan" in payload["sections"]
+    assert payload["term_glossary"]
+
+
+def test_llm_context_markdown_localizes_internal_terms(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "llm-context", "--mode", "morning"],
+        cwd=tmp_path,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    text = result.stdout
+    assert "自动执行：禁止" in text
+    assert "计划已生成但不可执行" in text
+    assert "候选池新鲜度" in text
+    assert "核心池" in text
+    assert "是否允许自动执行" in text
+    assert "execution_allowed=false" not in text
+    assert "status: `" not in text
 
 
 def test_notify_propose_plan_dry_run_json_via_bin_trade(tmp_path):
