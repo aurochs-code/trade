@@ -423,7 +423,8 @@ def test_notify_llm_summary_card_dry_run_json(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["status"] == "dry_run"
     assert payload["embed"]["title"] == "A股收盘复盘｜2026-05-17 15:55"
-    assert payload["embed"]["fields"][0]["name"] == "系统与数据质量"
+    assert payload["embed"]["fields"][0]["name"] == "今日闭环"
+    assert payload["embed"]["fields"][2]["name"] == "🛡️ 系统与数据质量"
     assert payload["notification"]["target"] == "discord"
 
 

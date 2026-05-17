@@ -428,12 +428,23 @@ class TestDiscordFormat:
 """)
 
         assert embed["title"] == "A股盘前摘要｜2026-05-17 09:20"
-        assert embed["color"] == 0x1E88E5
-        assert "今日结论" in embed["description"]
+        assert embed["color"] == 0xFB8C00
+        assert embed["author"]["name"] == "A-Stock Trading · LLM 盘前摘要"
+        assert "只读摘要" in embed["description"]
         field_names = [field["name"] for field in embed["fields"]]
-        assert field_names == ["系统与数据质量", "今日动作", "今日纪律"]
-        assert "数据质量：降级" in embed["fields"][0]["value"]
-        assert "买入意向：无" in embed["fields"][1]["value"]
+        assert field_names == [
+            "今日结论",
+            "自动执行",
+            "🛡️ 系统与数据质量",
+            "🎯 今日动作",
+            "📏 今日纪律",
+        ]
+        assert embed["fields"][0]["inline"] is True
+        assert "观察 / 待人工复核" in embed["fields"][0]["value"]
+        assert "禁止" in embed["fields"][1]["value"]
+        assert "• 数据质量：降级" in embed["fields"][2]["value"]
+        assert "• 买入意向：无" in embed["fields"][3]["value"]
+        assert "非交易指令" in embed["footer"]["text"]
 
 
 class TestObsidianProjector:

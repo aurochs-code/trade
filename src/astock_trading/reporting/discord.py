@@ -140,6 +140,17 @@ def _clean_llm_summary_line(line: str) -> str:
     return text
 
 
+def _strip_markdown_emphasis(text: str) -> str:
+    return text.replace("**", "").replace("__", "").strip()
+
+
+def _llm_summary_value_after_colon(line: str, label: str) -> str:
+    text = _strip_markdown_emphasis(line)
+    pattern = rf"^{re.escape(label)}[:：]\s*(.+)$"
+    match = re.match(pattern, text)
+    return match.group(1).strip() if match else ""
+
+
 def _split_llm_summary_markdown(markdown: str) -> tuple[str, str, list[tuple[str, str]]]:
     title = ""
     description_lines: list[str] = []
@@ -180,6 +191,80 @@ def _split_llm_summary_markdown(markdown: str) -> tuple[str, str, list[tuple[str
     return title, "\n".join(description_lines).strip(), compact_sections
 
 
+def _llm_summary_chips(description: str) -> list[dict]:
+    chips = []
+    for line in description.splitlines():
+        for label in ("今日结论", "今日闭环", "自动执行", "数据来源", "今日交易动作"):
+            value = _llm_summary_value_after_colon(line, label)
+            if value:
+                chips.append(_field(label, value, inline=True))
+                break
+    return chips[:3]
+
+
+def _llm_section_name(name: str) -> str:
+    icons = {
+        "系统与数据质量": "🛡️",
+        "今日动作": "🎯",
+        "市场热点": "🔥",
+        "收盘市场热点": "🔥",
+        "候选池": "📌",
+        "持仓与风险": "💼",
+        "今日纪律": "📏",
+        "今日闭环": "✅",
+        "盘前 vs 收盘": "🔁",
+        "候选池变化": "📌",
+        "明日清单": "📝",
+    }
+    return f"{icons.get(name, '•')} {name}"
+
+
+def _polish_llm_field_value(value: str) -> str:
+    lines = []
+    for raw_line in value.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("- "):
+            line = "• " + line[2:].strip()
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _append_llm_summary_fields(fields: list[dict], name: str, value: str) -> None:
+    polished = _polish_llm_field_value(value)
+    if len(polished) <= 960:
+        fields.append(_field(_llm_section_name(name), polished, inline=False))
+        return
+
+    chunk = ""
+    part = 1
+    for line in polished.splitlines():
+        candidate = f"{chunk}\n{line}".strip() if chunk else line
+        if len(candidate) > 960 and chunk:
+            suffix = "" if part == 1 else f"（续 {part}）"
+            fields.append(_field(f"{_llm_section_name(name)}{suffix}", chunk, inline=False))
+            part += 1
+            chunk = line
+        else:
+            chunk = candidate
+    if chunk:
+        suffix = "" if part == 1 else f"（续 {part}）"
+        fields.append(_field(f"{_llm_section_name(name)}{suffix}", chunk, inline=False))
+
+
+def _llm_summary_color(mode: str, text: str) -> int:
+    if any(token in text for token in ("失败", "错误", "严重异常")):
+        return COLORS["stop_alert"]
+    if any(token in text for token in ("警告", "降级", "待人工复核")):
+        return COLORS["noon"]
+    if mode == "morning":
+        return COLORS["morning"]
+    if mode == "close":
+        return COLORS["evening"]
+    return COLORS["weekly"]
+
+
 def format_llm_summary_embed(mode: str, markdown: str) -> dict:
     """把 Hermes LLM Markdown 摘要转换成 Discord Rich Embed。"""
     title, description, sections = _split_llm_summary_markdown(markdown)
@@ -187,18 +272,21 @@ def format_llm_summary_embed(mode: str, markdown: str) -> dict:
     if not title:
         title = f"A股 LLM {mode_label}"
 
-    fields = []
-    for name, value in sections[:MAX_EMBED_FIELDS]:
-        fields.append(_field(name, value, inline=False))
+    fields = _llm_summary_chips(description)
+    for name, value in sections:
+        if len(fields) >= MAX_EMBED_FIELDS:
+            break
+        _append_llm_summary_fields(fields, name, value)
 
-    color = COLORS["morning"] if mode == "morning" else COLORS["evening"] if mode == "close" else COLORS["weekly"]
-    return _embed(
+    embed = _embed(
         title=title,
-        description=description[:900],
-        color=color,
+        description="**只读摘要** · 人工确认前参考 · 不构成自动交易指令",
+        color=_llm_summary_color(mode, markdown),
         fields=fields,
-        footer=f"A-Stock Trading · LLM {mode_label} · Rich Embed",
+        footer=f"A-Stock Trading · LLM {mode_label} · Rich Embed · 非交易指令",
     )
+    embed["author"] = {"name": f"A-Stock Trading · LLM {mode_label}"}
+    return embed
 
 
 def _score_emoji(score: float) -> str:
