@@ -109,6 +109,29 @@ def test_propose_plan_json_is_non_executing_via_bin_trade(tmp_path):
     assert "actions" in payload
 
 
+def test_llm_context_json_runs_from_outside_checkout(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "llm-context", "--mode", "close", "--json"],
+        cwd=tmp_path,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ok"
+    assert payload["context_type"] == "llm_summary_context"
+    assert payload["mode"] == "close"
+    assert payload["execution_allowed"] is False
+    assert "record-buy" in " ".join(payload["guardrails"])
+    assert "diagnostics" in payload["sections"]
+    assert "trade_plan" in payload["sections"]
+
+
 def test_notify_propose_plan_dry_run_json_via_bin_trade(tmp_path):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"

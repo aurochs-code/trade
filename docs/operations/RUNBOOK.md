@@ -82,6 +82,14 @@ launchctl load ~/Library/LaunchAgents/com.astock_trading.trade.health.plist
 
 盘前/收盘模板中的 `StartCalendarInterval` 只示范周一。生产使用时建议为周一到周五各建一个 plist，或继续使用 `config/astock_trading_crontab_v2`。
 
+## Hermes LLM 摘要
+
+Hermes 定时任务分为两层：原有 `no_agent: true` 任务继续跑确定性流水，LLM 摘要任务只通过 `atrade llm-context --mode ...` 读取上下文后生成中文总结。
+
+安装和任务创建步骤见 `docs/operations/HERMES_LLM_SUMMARIES.md`。Hermes 不应进入交易系统 checkout 或直接运行仓库脚本；不要用 LLM 摘要任务替代盘中风控、止损/止盈、人工确认、pipeline 失败和核心数据源严重异常告警。
+
+完整调度节奏和精简目标见 `docs/operations/HERMES_SCHEDULE.md`。
+
 ## 何时考虑服务化
 
 当前推荐保持 CLI + MCP + MySQL。只有出现以下情况时再引入 HTTP 服务：

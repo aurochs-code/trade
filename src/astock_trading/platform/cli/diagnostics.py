@@ -12,6 +12,7 @@ from astock_trading.platform.agent_diagnostics import (
 )
 from astock_trading.platform.cli.common import json_or_text
 from astock_trading.platform.db import connect, init_db
+from astock_trading.platform.llm_context import build_llm_context, render_llm_context_markdown
 
 
 diagnose_app = typer.Typer(name="diagnose", help="Agent 诊断命令")
@@ -71,5 +72,21 @@ def register_diagnostics_commands(app: typer.Typer) -> None:
         conn = connect()
         try:
             json_or_text(propose_agent_trade_plan(conn), as_json)
+        finally:
+            conn.close()
+
+    @app.command("llm-context")
+    def llm_context_cmd(
+        mode: str = typer.Option("close", "--mode", help="morning / close / weekly"),
+        as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+    ):
+        """生成 Hermes/LLM 摘要用的只读上下文，不执行交易动作。"""
+        if mode not in {"morning", "close", "weekly"}:
+            raise typer.BadParameter("--mode must be morning, close, or weekly")
+        init_db()
+        conn = connect()
+        try:
+            payload = build_llm_context(conn, mode=mode)
+            json_or_text(payload if as_json else render_llm_context_markdown(payload), as_json)
         finally:
             conn.close()
