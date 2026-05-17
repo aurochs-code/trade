@@ -710,7 +710,7 @@ class MarketService:
             change_pct=_num("涨跌幅", "pct_change"),
         )
 
-    async def collect_sector_heatmap(self) -> list[dict]:
+    async def collect_sector_heatmap(self, run_id: Optional[str] = None) -> list[dict]:
         """获取行业板块热力图数据（成交额前 AkShare）。"""
         for provider in self._market:
             if not hasattr(provider, "get_sector_heatmap"):
@@ -718,6 +718,14 @@ class MarketService:
             try:
                 data = await provider.get_sector_heatmap()
                 if data:
+                    if self._store:
+                        self._store.save_observation(
+                            source=provider.__class__.__name__,
+                            kind="sector_heatmap",
+                            symbol="cn_a",
+                            payload={"items": data},
+                            run_id=run_id,
+                        )
                     return data
             except Exception as e:
                 _logger.warning(f"[sector_heatmap] provider failed: {e}")

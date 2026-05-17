@@ -8,6 +8,7 @@ checkout 内脚本。
 from __future__ import annotations
 
 import datetime as dt
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ SECTION_CN = {
     "runs": "流水运行记录",
     "events": "事件记录",
     "reports": "报告片段",
+    "market_intel": "热点与新闻",
 }
 
 TERM_CN = {
@@ -108,7 +110,26 @@ TERM_CN = {
     "warning_signals": "预警信号",
     "data_quality": "数据质量",
     "data_sources": "数据源",
-    "hot_stocks": "热股榜",
+    "market_intel": "热点与新闻",
+    "sectors": "热门板块",
+    "hot_stocks": "热门股",
+    "news": "热门新闻",
+    "comparison": "盘前收盘对比",
+    "morning": "盘前",
+    "evening": "收盘",
+    "close": "收盘",
+    "sector_heatmap": "行业热力图",
+    "hot_sectors_industry_change": "强势行业板块",
+    "hot_sectors_concept_change": "强势概念板块",
+    "hot_sectors_industry_money-flow": "资金流行业板块",
+    "cross_platform_hot_stocks": "跨平台热股",
+    "xueqiu_hot_stocks": "雪球热搜",
+    "finance_flash": "财经快讯",
+    "global_risk_news": "海外风险新闻",
+    "market_announcements": "公告提示",
+    "new": "新增",
+    "persistent": "延续",
+    "faded": "降温",
     "northbound_realtime": "北向实时资金",
     "baidu_fund_flow": "百度资金流",
     "industry_comparison": "行业对比",
@@ -171,6 +192,11 @@ GLOSSARY_ORDER = [
     "portfolio",
     "record-buy",
     "record-sell",
+    "market_intel",
+    "sector_heatmap",
+    "cross_platform_hot_stocks",
+    "finance_flash",
+    "global_risk_news",
 ]
 
 
@@ -258,6 +284,254 @@ def _candidate_rows(conn: Any, *, limit: int = 30) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def _decode_payload(value: Any) -> Any:
+    if value is None:
+        return {}
+    if isinstance(value, dict | list):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return {"raw": str(value)}
+
+
+def _latest_market_observation(conn: Any, kind: str, *, run_type: str | None = None) -> dict | None:
+    params: list[Any] = [kind, _today_start_iso()]
+    run_filter = ""
+    if run_type:
+        run_filter = " AND r.run_type = ?"
+        params.append(run_type)
+    row = conn.execute(
+        f"""SELECT m.source, m.kind, m.symbol, m.observed_at, m.run_id, m.payload_json,
+                  r.run_type
+             FROM market_observations m
+             LEFT JOIN run_log r ON m.run_id = r.run_id
+            WHERE m.kind = ? AND m.observed_at >= ?{run_filter}
+            ORDER BY m.observed_at DESC
+            LIMIT 1""",
+        tuple(params),
+    ).fetchone()
+    if row is None and run_type is not None:
+        fallback = _latest_market_observation(conn, kind)
+        if fallback and _observation_run_matches(fallback.get("run_id", ""), run_type):
+            fallback["run_type"] = run_type
+            return fallback
+        return None
+    if row is None:
+        return None
+    return {
+        "source": row["source"],
+        "kind": row["kind"],
+        "symbol": row["symbol"],
+        "observed_at": row["observed_at"],
+        "run_id": row["run_id"],
+        "run_type": row["run_type"],
+        "payload": _decode_payload(row["payload_json"]),
+    }
+
+
+def _observation_run_matches(run_id: object, run_type: str) -> bool:
+    text = str(run_id or "").lower()
+    aliases = {"evening": ("evening", "close"), "morning": ("morning",), "noon": ("noon",)}
+    return any(alias in text for alias in aliases.get(run_type, (run_type,)))
+
+
+def _payload_items(payload: Any) -> list[dict]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("items", "stocks", "top", "news", "announcements"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _compact_sector(item: dict) -> dict:
+    return {
+        "name": item.get("name") or item.get("板块") or "",
+        "change_pct": item.get("change_pct", item.get("涨跌幅", 0)) or 0,
+        "amount": item.get("amount", item.get("成交额", item.get("main_net", 0))) or 0,
+        "lead_stock": item.get("lead_stock") or item.get("leader") or "",
+        "up_count": item.get("up_count", 0) or 0,
+        "down_count": item.get("down_count", 0) or 0,
+        "source": item.get("source", ""),
+    }
+
+
+def _compact_stock(item: dict, source_label: str) -> dict:
+    return {
+        "code": item.get("code") or item.get("symbol") or "",
+        "name": item.get("name") or item.get("symbol") or item.get("code") or "",
+        "rank": item.get("rank", ""),
+        "change_pct": item.get("change_pct", 0) or 0,
+        "heat": item.get("heat", 0) or 0,
+        "source_count": item.get("source_count", ""),
+        "sources": item.get("sources", []),
+        "reason": item.get("reason", ""),
+        "source": source_label,
+    }
+
+
+def _compact_news(item: dict, source_label: str) -> dict:
+    return {
+        "title": item.get("title") or item.get("content") or item.get("text") or "",
+        "time": item.get("time", ""),
+        "source": item.get("source") or source_label,
+        "summary": item.get("summary") or item.get("content") or "",
+        "code": item.get("code", ""),
+        "name": item.get("name", ""),
+        "category": item.get("category", ""),
+        "kind": source_label,
+    }
+
+
+def _dedupe(items: list[dict], key_fn, *, limit: int) -> list[dict]:
+    seen = set()
+    result = []
+    for item in items:
+        key = key_fn(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _market_snapshot(conn: Any, *, run_type: str | None) -> dict:
+    sector_kinds = ("sector_heatmap", "hot_sectors_industry_change", "hot_sectors_concept_change")
+    stock_kinds = ("cross_platform_hot_stocks", "xueqiu_hot_stocks", "hot_stocks")
+    news_kinds = ("finance_flash", "market_announcements", "global_risk_news")
+    observations: dict[str, dict] = {}
+
+    def latest(kind: str) -> dict | None:
+        obs = _latest_market_observation(conn, kind, run_type=run_type)
+        if obs:
+            observations[kind] = {
+                "observed_at": obs["observed_at"],
+                "run_id": obs["run_id"],
+                "run_type": obs.get("run_type") or "",
+                "source": obs["source"],
+                "count": len(_payload_items(obs["payload"])),
+            }
+        return obs
+
+    sectors: list[dict] = []
+    for kind in sector_kinds:
+        obs = latest(kind)
+        if not obs:
+            continue
+        source_label = TERM_CN.get(kind, kind)
+        for item in _payload_items(obs["payload"]):
+            compacted = _compact_sector(item)
+            compacted["source"] = compacted.get("source") or source_label
+            sectors.append(compacted)
+    sectors = _dedupe(sectors, lambda item: item.get("name"), limit=8)
+
+    stocks: list[dict] = []
+    for kind in stock_kinds:
+        obs = latest(kind)
+        if not obs:
+            continue
+        source_label = TERM_CN.get(kind, kind)
+        stocks.extend(_compact_stock(item, source_label) for item in _payload_items(obs["payload"]))
+    stocks = _dedupe(stocks, lambda item: item.get("code") or item.get("name"), limit=10)
+
+    news: list[dict] = []
+    for kind in news_kinds:
+        obs = latest(kind)
+        if not obs:
+            continue
+        source_label = TERM_CN.get(kind, kind)
+        news.extend(_compact_news(item, source_label) for item in _payload_items(obs["payload"]))
+    news = _dedupe(news, lambda item: item.get("title"), limit=10)
+
+    return {
+        "phase": TERM_CN.get(run_type or "latest", run_type or "latest"),
+        "available": bool(sectors or stocks or news),
+        "sectors": sectors,
+        "hot_stocks": stocks,
+        "news": news,
+        "observations": observations,
+    }
+
+
+def _item_key(item: dict, *fields: str) -> str:
+    for field in fields:
+        value = str(item.get(field) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _compare_items(before: list[dict], after: list[dict], *, key_fields: tuple[str, ...], limit: int = 5) -> dict:
+    before_keys = {_item_key(item, *key_fields) for item in before if _item_key(item, *key_fields)}
+    after_keys = {_item_key(item, *key_fields) for item in after if _item_key(item, *key_fields)}
+    return {
+        "persistent": [item for item in after if _item_key(item, *key_fields) in before_keys][:limit],
+        "new": [item for item in after if _item_key(item, *key_fields) not in before_keys][:limit],
+        "faded": [item for item in before if _item_key(item, *key_fields) not in after_keys][:limit],
+    }
+
+
+def _market_comparison(morning: dict, close: dict) -> dict:
+    if not morning.get("available") or not close.get("available"):
+        return {
+            "available": False,
+            "reason": "盘前或收盘热点数据不足，暂不做强对比。",
+        }
+    return {
+        "available": True,
+        "sectors": _compare_items(morning["sectors"], close["sectors"], key_fields=("name",)),
+        "hot_stocks": _compare_items(morning["hot_stocks"], close["hot_stocks"], key_fields=("code", "name")),
+        "news": _compare_items(morning["news"], close["news"], key_fields=("title",)),
+        "interpretation": [
+            "延续热点代表盘前线索被收盘验证，但仍需价格、资金和风控确认。",
+            "新增热点只作为复盘线索，不等于次日买入意向。",
+            "降温热点用于检查盘前叙事是否失效。",
+        ],
+    }
+
+
+def _market_intel_context(conn: Any, *, mode: str) -> dict:
+    morning = _market_snapshot(conn, run_type="morning")
+    if mode == "morning":
+        return {
+            "mode": mode,
+            "current": morning,
+            "summary_requirements": [
+                "盘前摘要必须列出热门板块、热门新闻、热门股；没有数据时明确说数据不足。",
+                "热点只作为观察线索，不得直接升级为买入意向。",
+            ],
+        }
+
+    close = _market_snapshot(conn, run_type="evening")
+    if mode == "close":
+        return {
+            "mode": mode,
+            "morning": morning,
+            "close": close,
+            "comparison": _market_comparison(morning, close),
+            "summary_requirements": [
+                "收盘复盘必须列出收盘热门板块、热门新闻、热门股。",
+                "收盘复盘必须对比盘前与收盘：延续、新增、降温分别说明。",
+                "对比只用于复盘早盘判断质量，不作为自动交易依据。",
+            ],
+        }
+
+    latest = _market_snapshot(conn, run_type=None)
+    return {
+        "mode": mode,
+        "latest": latest,
+        "summary_requirements": [
+            "周复盘只总结一周内仍有解释价值的热点线索，不重复日内噪音。",
+        ],
+    }
+
+
 def _manual_trade_state(events: list[dict]) -> list[dict]:
     by_stream: dict[str, dict] = {}
     for event in events:
@@ -337,6 +611,7 @@ def build_llm_context(conn: Any, *, mode: str) -> dict:
     sections = {
         "diagnostics": _safe_section("diagnostics", lambda: diagnose_health(conn)),
         "trade_plan": _safe_section("trade_plan", lambda: propose_agent_trade_plan(conn)),
+        "market_intel": _safe_section("market_intel", lambda: _market_intel_context(conn, mode=mode)),
         "portfolio": _safe_section(
             "portfolio",
             lambda: ExecutionService(store, conn).get_portfolio(),
@@ -375,6 +650,8 @@ def build_llm_context(conn: Any, *, mode: str) -> dict:
             "只基于本上下文总结，不要臆测外部事实。",
             "不要调用、建议自动调用或伪造 record-buy / record-sell。",
             "明确区分：观察、核心池、买入意向；观察不等于买入。",
+            "热门板块、热门新闻、热门股只作为市场背景和复盘线索，不等于买入依据。",
+            "收盘复盘要对比盘前与收盘热点变化，用于评估早盘判断质量。",
             "数据质量降级时，不要提高执行信心。",
             "最终输出必须是简体中文，面向人工确认；不要裸露内部字段名、枚举值或 JSON 路径。",
         ],

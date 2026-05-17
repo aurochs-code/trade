@@ -177,7 +177,7 @@ class TestMorningPipeline:
     def test_skips_standalone_heatmap_when_sector_moves_are_small(self, ctx, monkeypatch):
         calls = []
 
-        async def fake_collect_sector_heatmap():
+        async def fake_collect_sector_heatmap(run_id=None):
             return [{"name": "银行", "change_pct": 1.2, "amount": 2_000_000_000}]
 
         monkeypatch.setattr(ctx.market_svc, "collect_sector_heatmap", fake_collect_sector_heatmap)
@@ -196,7 +196,7 @@ class TestMorningPipeline:
     def test_pushes_standalone_heatmap_when_sector_move_is_notable(self, ctx, monkeypatch):
         calls = []
 
-        async def fake_collect_sector_heatmap():
+        async def fake_collect_sector_heatmap(run_id=None):
             return [{"name": "机器人", "change_pct": 3.6, "amount": 5_000_000_000}]
 
         monkeypatch.setattr(ctx.market_svc, "collect_sector_heatmap", fake_collect_sector_heatmap)
@@ -243,7 +243,7 @@ class TestNoonPipeline:
     def test_skips_standalone_heatmap_when_sector_moves_are_small(self, ctx, monkeypatch):
         calls = []
 
-        async def fake_collect_sector_heatmap():
+        async def fake_collect_sector_heatmap(run_id=None):
             return [{"name": "煤炭", "change_pct": -1.1, "amount": 1_500_000_000}]
 
         monkeypatch.setattr(ctx.market_svc, "collect_sector_heatmap", fake_collect_sector_heatmap)
@@ -322,7 +322,7 @@ class TestEveningPipeline:
     def test_close_still_pushes_heatmap_summary(self, ctx, monkeypatch):
         calls = []
 
-        async def fake_collect_sector_heatmap():
+        async def fake_collect_sector_heatmap(run_id=None):
             return [{"name": "家电", "change_pct": 0.8, "amount": 1_000_000_000}]
 
         monkeypatch.setattr(ctx.market_svc, "collect_sector_heatmap", fake_collect_sector_heatmap)

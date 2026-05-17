@@ -90,7 +90,7 @@ async def _collect_brief(
     strong_sectors = _sort_sectors([*industry_sectors, *concept_sectors], limit)
 
     if not strong_sectors and hasattr(market_svc, "collect_sector_heatmap"):
-        heatmap_rows = await market_svc.collect_sector_heatmap()
+        heatmap_rows = await market_svc.collect_sector_heatmap(run_id=run_id)
         strong_sectors = _sector_heatmap_rows(heatmap_rows, limit)
 
     return {

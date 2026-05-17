@@ -151,7 +151,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         log_lines.extend([""] + signal_lines)
 
     # 行业热力图
-    heatmap_sectors = asyncio.run(ctx.market_svc.collect_sector_heatmap())
+    heatmap_sectors = asyncio.run(ctx.market_svc.collect_sector_heatmap(run_id=run_id))
     _logger.info(f"[noon] 行业热力图: {len(heatmap_sectors)} 个板块")
     if heatmap_sectors:
         log_lines.extend(["", "### 行业热力图"] + format_sector_heatmap_markdown(heatmap_sectors))

@@ -294,6 +294,21 @@ class TestMarketService:
         assert store.get_latest_observation("global", "global_risk_news")["items"][0]["source"] == "bloomberg"
         assert store.get_latest_observation("cn_a", "market_announcements")["items"][0]["code"] == "603311"
 
+    def test_collect_sector_heatmap_saves_observation(self, store):
+        class SectorHeatmapProvider:
+            async def get_sector_heatmap(self):
+                return [{"name": "机器人", "change_pct": 3.2, "amount": 1200000000}]
+
+        svc = MarketService(market_providers=[SectorHeatmapProvider()], store=store)
+
+        result = asyncio.get_event_loop().run_until_complete(
+            svc.collect_sector_heatmap(run_id="run_sector")
+        )
+
+        cached = store.get_latest_observation("cn_a", "sector_heatmap")
+        assert result[0]["name"] == "机器人"
+        assert cached["items"][0]["change_pct"] == 3.2
+
     def test_collect_intraday_batch_skips_scoring_dimensions(self, store):
         quote = StockQuote(
             code="002138", name="双环传动", price=15.0,
