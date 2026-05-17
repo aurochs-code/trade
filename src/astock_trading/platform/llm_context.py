@@ -199,6 +199,117 @@ GLOSSARY_ORDER = [
     "global_risk_news",
 ]
 
+DISCIPLINE_LINES = [
+    "先保本金，再谈收益。",
+    "看不懂的时候，不操作也是动作。",
+    "观察不等于买入，热度不等于确定性。",
+    "数据降级时，信心也要降级。",
+    "计划外的交易，先当风险处理。",
+    "错过机会可以复盘，突破纪律必须停止。",
+]
+
+DISCORD_CARD_TEMPLATES = {
+    "morning": """## A股盘前摘要｜YYYY-MM-DD 09:20
+
+**今日结论：不操作 / 观察 / 待人工复核**
+自动执行：禁止
+数据来源：09:15 盘前流水 / 最新缓存（非正式盘前数据）
+
+### 1. 系统与数据质量
+- 系统状态：正常 / 警告 / 失败
+- 数据质量：正常 / 降级 / 失败
+- 缺失或异常：候选池新鲜度、核心池、行情源、新闻源等
+- 对交易判断的影响：可参考 / 只能观察 / 不建议提高信心
+
+### 2. 今日动作
+- 默认动作：不操作 / 只读观察 / 等待人工确认
+- 买入意向：无 / 有但需人工确认
+- 自动扩仓：禁止
+- 主要阻断原因：数据质量、核心池为空、入场信号不足等
+
+### 3. 市场热点
+**热门板块**
+- 板块A：一句话原因
+
+**热门新闻**
+- 新闻A：影响方向
+
+**热门股**
+- 股票A：热度来源 / 涨跌幅 / 只作观察
+
+> 热点只作为市场背景和复盘线索，不作为买入依据。
+
+### 4. 候选池
+- 核心池：N 只
+- 观察池：N 只
+- 买入意向：N 只
+- 主要阻断原因：数据质量 / 入场信号不足 / 核心池为空 / 新鲜度不足
+
+### 5. 持仓与风险
+- 当前持仓：空仓 / N 只
+- 待人工确认事项：无 / N 条
+- 风险提醒：止损、数据异常、报告滞后、不一致项
+
+### 6. 今日纪律
+- 禁止自动买入或卖出
+- 禁止把观察名单当作买入意向
+- 禁止在数据降级时提高执行信心
+- 风控短句：从下方“风控短句候选”选择 1 句""",
+    "close": """## A股收盘复盘｜YYYY-MM-DD 15:55
+
+**今日闭环：完成 / 部分完成 / 异常**
+自动执行：禁止
+今日交易动作：无自动交易 / 有人工确认事项 / 有待复核事项
+
+### 1. 系统与数据质量
+- 盘前流水：完成 / 缺失 / 异常
+- 盘中风控：完成 / 告警 / 异常
+- 收盘流水：完成 / 缺失 / 异常
+- 数据质量：正常 / 降级 / 失败
+- 对复盘结论的影响：可信 / 仅供参考 / 需要人工复核
+
+### 2. 今日闭环
+- 今日交易动作：无 / 有人工确认 / 有待复核
+- 人工确认事项：无 / N 条
+- 最终动作：不操作 / 继续观察 / 等待人工确认
+
+### 3. 收盘市场热点
+**热门板块**
+- 板块A：收盘表现与原因
+
+**热门新闻**
+- 新闻A：收盘后影响
+
+**热门股**
+- 股票A：热度来源 / 涨跌幅 / 是否进入观察
+
+### 4. 盘前 vs 收盘
+- 延续热点：盘前出现且收盘仍强的板块 / 个股
+- 新增热点：盘前没有、收盘出现的板块 / 个股
+- 降温热点：盘前热、收盘弱化的板块 / 个股
+- 判断质量：盘前判断有效 / 偏弱 / 数据不足无法判断
+- 对比只用于复盘早盘判断质量，不作为自动交易依据
+
+### 5. 候选池变化
+- 核心池：早盘 N → 收盘 N
+- 观察池：早盘 N → 收盘 N
+- 新增观察：股票A、股票B
+- 移出/降级：股票C，原因
+- 仍不可买原因：入场信号不足 / 风控否决 / 数据质量不足
+
+### 6. 持仓与风险
+- 当前持仓：空仓 / N 只
+- 今日浮盈亏：如有则展示
+- 风控事项：止损、移动止盈、异常波动、数据不一致
+- 需人工复核：具体事项
+
+### 7. 明日清单
+- 明日继续观察：股票 / 板块
+- 明日优先复核：数据源、候选池、人工确认
+- 明日禁止事项：继续禁止自动执行，观察不等于买入
+- 风控短句：从下方“风控短句候选”选择 1 句""",
+}
+
 
 def _today() -> dt.date:
     return dt.datetime.now().date()
@@ -264,6 +375,43 @@ def _display_payload(value: Any) -> Any:
 
 def _term_glossary() -> list[dict]:
     return [{"term": term, "display": TERM_CN[term]} for term in GLOSSARY_ORDER if term in TERM_CN]
+
+
+def _discord_card_contract(mode: str) -> dict:
+    template = DISCORD_CARD_TEMPLATES.get(mode, "")
+    if not template:
+        return {}
+    return {
+        "format": "Discord Markdown card",
+        "template": template,
+        "rules": [
+            "最终回复必须按模板结构输出，保留标题和章节顺序。",
+            "不要输出原始 JSON、内部字段名、枚举值或 JSON 路径。",
+            "缺少数据时写“暂无可用数据”，不要臆测外部事实。",
+            "系统与数据质量必须作为第 1 区块，并决定后续结论可信度。",
+            "热点只作为市场背景和复盘线索，不作为买入依据。",
+            "末尾只选择 1 句风控短句，不要堆砌多句。",
+        ],
+        "discipline_lines": DISCIPLINE_LINES,
+    }
+
+
+def _summary_guardrails(mode: str) -> list[str]:
+    guardrails = [
+        "只基于本上下文总结，不要臆测外部事实。",
+        "不要调用、建议自动调用或伪造 record-buy / record-sell。",
+        "明确区分：观察、核心池、买入意向；观察不等于买入。",
+        "热门板块、热门新闻、热门股只作为市场背景和复盘线索，不等于买入依据。",
+        "数据质量降级时，不要提高执行信心。",
+        "最终输出必须是简体中文，面向人工确认；不要裸露内部字段名、枚举值或 JSON 路径。",
+    ]
+    if mode == "morning":
+        guardrails.append("盘前摘要要说明热点数据来自盘前流水还是最新缓存。")
+    elif mode == "close":
+        guardrails.append("收盘复盘要对比盘前与收盘热点变化，用于评估早盘判断质量。")
+    elif mode == "weekly":
+        guardrails.append("周复盘只提炼仍有解释价值的运行质量、交易质量和信号质量问题。")
+    return guardrails
 
 
 def _safe_section(name: str, fn) -> dict:
@@ -663,17 +811,10 @@ def build_llm_context(conn: Any, *, mode: str) -> dict:
             "rule": "Discord 最终输出不要裸露内部字段名、枚举值或 JSON 路径；必须改写成中文业务含义。",
             "first_mention": "如确需保留协议名，格式为：中文释义（内部字段：protocol_name）。",
         },
+        "discord_card_contract": _discord_card_contract(mode),
         "term_glossary": _term_glossary(),
         "failed_sections": failed_sections,
-        "guardrails": [
-            "只基于本上下文总结，不要臆测外部事实。",
-            "不要调用、建议自动调用或伪造 record-buy / record-sell。",
-            "明确区分：观察、核心池、买入意向；观察不等于买入。",
-            "热门板块、热门新闻、热门股只作为市场背景和复盘线索，不等于买入依据。",
-            "收盘复盘要对比盘前与收盘热点变化，用于评估早盘判断质量。",
-            "数据质量降级时，不要提高执行信心。",
-            "最终输出必须是简体中文，面向人工确认；不要裸露内部字段名、枚举值或 JSON 路径。",
-        ],
+        "guardrails": _summary_guardrails(mode),
         "sections": sections,
     }
 
@@ -699,6 +840,26 @@ def render_llm_context_markdown(payload: dict) -> str:
     ]
     for guardrail in payload.get("guardrails", []):
         lines.append(f"- {_translate_text(guardrail)}")
+
+    card_contract = payload.get("discord_card_contract") or {}
+    if card_contract:
+        lines.extend([
+            "",
+            "## Discord 卡片输出模板",
+            "",
+            "- 最终回复必须按下面模板生成一张 Discord Markdown 卡片。",
+            "- 保留标题和章节顺序；没有数据时写“暂无可用数据”。",
+            "- 系统与数据质量必须作为第 1 区块，后续结论不能越过这个可信度闸门。",
+            "- 不要输出原始 JSON、代码块、内部字段名、枚举值或 JSON 路径。",
+            "",
+            card_contract["template"],
+            "",
+            "### 风控短句候选",
+            "",
+        ])
+        for line in card_contract.get("discipline_lines", []):
+            lines.append(f"- {line}")
+        lines.extend(["", "只选择 1 句放入最终卡片末尾，不要把候选列表全部输出。"])
 
     lines.extend(["", "## 内部术语表", "", "以下只用于理解上下文，最终摘要不要复述术语表或裸露内部字段名。"])
     for item in payload.get("term_glossary", []):

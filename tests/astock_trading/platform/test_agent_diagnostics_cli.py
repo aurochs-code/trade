@@ -157,6 +157,54 @@ def test_llm_context_markdown_localizes_internal_terms(tmp_path):
     assert "status: `" not in text
 
 
+def test_llm_context_morning_markdown_includes_discord_card_contract(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "llm-context", "--mode", "morning"],
+        cwd=tmp_path,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    text = result.stdout
+    assert "## Discord 卡片输出模板" in text
+    assert "## A股盘前摘要｜YYYY-MM-DD 09:20" in text
+    assert "### 1. 系统与数据质量" in text
+    assert "### 2. 今日动作" in text
+    assert "### 3. 市场热点" in text
+    assert "### 6. 今日纪律" in text
+    assert "数据降级时，信心也要降级" in text
+    assert "热点只作为市场背景和复盘线索，不作为买入依据" in text
+
+
+def test_llm_context_close_markdown_includes_discord_card_contract(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "llm-context", "--mode", "close"],
+        cwd=tmp_path,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    text = result.stdout
+    assert "## Discord 卡片输出模板" in text
+    assert "## A股收盘复盘｜YYYY-MM-DD 15:55" in text
+    assert "### 1. 系统与数据质量" in text
+    assert "### 3. 收盘市场热点" in text
+    assert "### 4. 盘前 vs 收盘" in text
+    assert "### 7. 明日清单" in text
+    assert "计划外的交易，先当风险处理" in text
+    assert "对比只用于复盘早盘判断质量，不作为自动交易依据" in text
+
+
 def test_llm_context_close_includes_market_intel_comparison(tmp_path):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
