@@ -121,8 +121,17 @@ def diagnose_health(conn: Any) -> dict:
         recommendations.append("continue read-only analysis, but avoid expanding execution confidence")
 
     if candidate_pool["total"] == 0:
-        findings.append("candidate pool is empty")
-        recommendations.append("run screener refresh before scoring")
+        if not data_sources.get("required_missing"):
+            findings.append(
+                "candidate pool is empty; required data sources are available, "
+                "so treat this as no qualified candidates after screening"
+            )
+            recommendations.append(
+                "refresh candidates if needed; if it stays empty, report it as no qualified candidates, not missing market data"
+            )
+        else:
+            findings.append("candidate pool is empty")
+            recommendations.append("run screener refresh before scoring")
     elif candidate_pool["core_count"] == 0:
         findings.append("candidate core pool is empty")
         recommendations.append("promote fresh high-score candidates before auto_trade buy-side decisions")

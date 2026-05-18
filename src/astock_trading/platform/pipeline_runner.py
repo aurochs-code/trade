@@ -62,6 +62,7 @@ def execute_pipeline(
 
     try:
         data_health = None
+        data_source_refresh = None
         data_source_warning = None
         if not ignore_data_source_health:
             from astock_trading.market.health import evaluate_data_source_health
@@ -69,9 +70,20 @@ def execute_pipeline(
             data_health = evaluate_data_source_health(ctx.conn)
             gate = data_source_gate_decision(pipeline_type, data_health)
             if gate == "failed":
+                from astock_trading.platform.data_source_refresh import refresh_required_data_sources
+
+                data_source_refresh = refresh_required_data_sources(ctx, run_id=run_id)
+                data_health = evaluate_data_source_health(ctx.conn)
+                gate = data_source_gate_decision(pipeline_type, data_health)
+
+            if gate == "failed":
                 missing = ",".join(data_health.get("required_missing", []))
-                message = f"核心数据源不可用，{pipeline_type} 跳过: {missing}"
-                ctx.run_journal.fail_run(run_id, message, artifacts={"data_sources": data_health})
+                prefix = "核心数据源刷新后仍不可用" if data_source_refresh else "核心数据源不可用"
+                message = f"{prefix}，{pipeline_type} 跳过: {missing}"
+                artifacts = {"data_sources": data_health}
+                if data_source_refresh is not None:
+                    artifacts["data_source_refresh"] = data_source_refresh
+                ctx.run_journal.fail_run(run_id, message, artifacts=artifacts)
                 return {
                     "status": "failed",
                     "pipeline": pipeline_type,
@@ -79,6 +91,7 @@ def execute_pipeline(
                     "reason": "data_source_health_failed",
                     "message": message,
                     "data_sources": data_health,
+                    "data_source_refresh": data_source_refresh,
                 }
             if gate == "warning":
                 missing = ",".join(data_health.get("optional_missing", []))
@@ -95,6 +108,8 @@ def execute_pipeline(
         artifacts = {"result": "ok"}
         if data_health is not None:
             artifacts["data_sources"] = data_health
+        if data_source_refresh is not None:
+            artifacts["data_source_refresh"] = data_source_refresh
         ctx.run_journal.complete_run(run_id, artifacts=artifacts)
 
         payload = {
@@ -105,6 +120,8 @@ def execute_pipeline(
         }
         if data_health is not None:
             payload["data_sources"] = data_health
+        if data_source_refresh is not None:
+            payload["data_source_refresh"] = data_source_refresh
         if data_source_warning is not None:
             payload["data_source_warning"] = data_source_warning
         return payload

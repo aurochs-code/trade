@@ -158,9 +158,11 @@ TERM_CN = {
     "recommendations": "处理建议",
     "required data sources unavailable": "核心数据源不可用",
     "candidate pool is empty": "候选池为空",
+    "candidate pool is empty; required data sources are available, so treat this as no qualified candidates after screening": "候选池为空；核心数据源可用，应表述为筛选后没有合格候选，不是市场数据缺失",
     "candidate core pool is empty": "核心候选池为空",
     "refresh required market data sources before scoring or auto_trade": "评分或模拟交易前需要先刷新核心市场数据源",
     "run screener refresh before scoring": "评分前先刷新筛选器",
+    "refresh candidates if needed; if it stays empty, report it as no qualified candidates, not missing market data": "必要时刷新候选池；若仍为空，应报告为没有合格候选，不要写成市场数据缺失",
 }
 
 TEXT_REPLACEMENTS = {
@@ -168,8 +170,10 @@ TEXT_REPLACEMENTS = {
     "execution_allowed=true": "系统允许自动执行",
     "optional data sources degraded": "辅助数据源降级",
     "candidate core pool is empty": "核心候选池为空",
+    "candidate pool is empty; required data sources are available, so treat this as no qualified candidates after screening": "候选池为空；核心数据源可用，应表述为筛选后没有合格候选，不是市场数据缺失",
     "continue read-only analysis, but avoid expanding execution confidence": "继续只读分析，但不要提高执行信心",
     "promote fresh high-score candidates before auto_trade buy-side decisions": "模拟买入决策前先把新鲜高分候选标的提升到核心池",
+    "refresh candidates if needed; if it stays empty, report it as no qualified candidates, not missing market data": "必要时刷新候选池；若仍为空，应报告为没有合格候选，不要写成市场数据缺失",
     "health/diagnostics": "健康诊断",
     "manual trades": "人工确认交易",
     "manual trade": "人工确认交易",

@@ -68,6 +68,30 @@ def test_diagnose_health_treats_old_failed_runs_as_historical(tmp_path):
         conn.close()
 
 
+def test_diagnose_health_distinguishes_empty_pool_from_missing_market_data(tmp_path):
+    db_path = tmp_path / "runtime.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "hot_stocks", "2026-05-18", {"items": [1]})
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_observation("akshare", "fund_flow", "000858", {"items": [1]})
+
+        payload = diagnose_health(conn)
+
+        assert payload["inputs"]["data_sources"]["required_missing"] == []
+        assert (
+            "candidate pool is empty; required data sources are available, "
+            "so treat this as no qualified candidates after screening"
+        ) in payload["findings"]
+        assert (
+            "refresh candidates if needed; if it stays empty, report it as no qualified candidates, not missing market data"
+        ) in payload["recommendations"]
+    finally:
+        conn.close()
+
+
 def test_explain_run_missing_json_via_bin_trade(tmp_path):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
