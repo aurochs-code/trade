@@ -243,6 +243,30 @@ def test_risk_adaptive_json_via_bin_trade(tmp_path):
     assert result.stderr == ""
 
 
+def test_strategy_profiles_json_via_bin_trade(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "strategy", "profiles", "--json"],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["analysis"] == "strategy_profile_comparison"
+    assert payload["guardrails"]["auto_switch_profile"] is False
+    assert {item["name"] for item in payload["profiles"]} >= {
+        "trend_swing",
+        "short_continuation",
+        "defensive_watch",
+    }
+    assert result.stderr == ""
+
+
 def test_continuation_study_help_via_bin_trade():
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"

@@ -84,6 +84,8 @@
 备注：`atrade calibrate --json` 从 `trade.review.recorded` 提取 MFE/MAE、持仓天数、来源评分和候选池 forward return，输出参数/权重/选股条件建议；`--record` 追加 `strategy.calibration.proposed` 和 Markdown artifact，不自动改配置。
 - [x] P6-1 自适应风控建议闭环
 备注：`atrade risk adaptive --json` 从 `market_bars`、`balance.*` / 余额投影和交易复盘提取波动、回撤、连续盈亏证据，输出止损宽度、仓位上限、买入阈值建议；`--record` 追加 `risk.adaptive_suggestion.proposed` 和 Markdown artifact，不自动改配置、不自动下单。
+- [x] P6-2 多策略 profile 对比入口
+备注：`atrade strategy profiles --json` 对比 `trend_swing / short_continuation / defensive_watch` 的关键阈值、门禁、仓位参数和历史运行/复盘证据；`--record` 追加 `strategy.profile_comparison.proposed` 和 Markdown artifact，不自动切换 `ASTOCK_CONFIG_PROFILE`。
 
 ### 复盘归因深化
 

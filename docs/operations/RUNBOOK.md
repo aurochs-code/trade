@@ -25,6 +25,7 @@ atrade health --json
 atrade diagnose strategy --json
 atrade calibrate --json
 atrade risk adaptive --json
+atrade strategy profiles --json
 atrade screener explain --json
 atrade screener iterate --json
 atrade stock analyze 600703 --json
@@ -151,6 +152,20 @@ atrade risk adaptive --record --json
 样本不足时返回 `insufficient_data`；`--record` 会追加
 `risk.adaptive_suggestion.proposed` 并落一份 Markdown 报告 artifact。该建议只供人工
 复核和后续参数校准使用，不会写 `strategy.yaml`，也不会触发真实交易。
+
+P6-2 多策略 profile 对比只读运行，不自动切换执行 profile：
+
+```bash
+atrade strategy profiles --json
+atrade strategy profiles --record --json
+```
+
+该命令读取 `trend_swing`、`short_continuation`、`defensive_watch` 等配置 profile，
+对比买入阈值、数据质量门禁、仓位上限、短线续涨参数，并匹配 `config_versions` /
+`run_log` / `decision.suggested` / `trade.review.recorded` 判断每个 profile 是否已有
+运行与复盘证据。样本不足时返回 `needs_shadow_validation`；`--record` 会追加
+`strategy.profile_comparison.proposed` 和 Markdown artifact。执行前仍必须显式设置并确认
+`ASTOCK_CONFIG_PROFILE`，不要让 agent 自动切换。
 
 模拟盘 vs 实盘逐笔对账：
 

@@ -31,6 +31,7 @@ from astock_trading.platform.cli.risk import risk_app
 from astock_trading.platform.cli.runs import runs_app
 from astock_trading.platform.cli.screener import screener_app
 from astock_trading.platform.cli.stock import stock_app
+from astock_trading.platform.cli.strategy_profiles import strategy_app
 from astock_trading.platform.cli.trading import register_trading_commands
 from astock_trading.platform.database import MissingDatabaseUrl
 from astock_trading.platform.runtime_env import load_runtime_env
@@ -48,6 +49,7 @@ app.add_typer(paper_app)
 app.add_typer(risk_app)
 app.add_typer(screener_app)
 app.add_typer(stock_app)
+app.add_typer(strategy_app)
 app.add_typer(notify_app)
 app.add_typer(market_intel_app)
 app.add_typer(history_app)

@@ -212,10 +212,11 @@
 ### P6-2 多策略框架
 
 **方案**：
-- [ ] 支持多个独立策略并行运行（不同的评分权重 / 选股条件 / 风控参数）
-- [ ] 每个策略独立统计 P&L、胜率、盈亏比
+- [x] 支持多个独立策略 profile 对比（不同的评分权重 / 选股条件 / 风控参数）
+- [x] 每个策略按已有 profile 运行证据统计决策分布、复盘均值和胜率
 - [ ] 策略间资金隔离，互不影响
 - [ ] 定期对比策略表现，淘汰弱策略
+- 2026-05-19：`atrade strategy profiles --json` 已接入；匹配 `config_versions`、`run_log`、`decision.suggested`、`trade.review.recorded`，`--record` 追加 `strategy.profile_comparison.proposed` 和 Markdown artifact；只输出建议，不自动切换 `ASTOCK_CONFIG_PROFILE`。
 
 ### P6-3 深度归因分析
 
