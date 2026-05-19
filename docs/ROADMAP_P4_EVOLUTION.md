@@ -124,10 +124,11 @@
 **问题**：Hermes-Agent 目前通过 workflow/CLI 被动调用，缺少轻量查询命令。
 
 **方案**：
-- [ ] 新增 `trade digest` 命令：一句话总结今日状态（给 Hermes 生成摘要用）
-- [ ] `trade suggest` 命令：基于当前状态输出下一步建议（买什么 / 卖什么 / 等待）
-- [ ] `trade explain <code>` 命令：解释某只股票的评分明细和决策逻辑
-- [ ] 这三个命令的输出格式对 Hermes 友好（结构化 JSON + 人类可读摘要）
+- [x] 新增 `trade digest` 命令：一句话总结今日状态（给 Hermes 生成摘要用）
+- [x] `trade suggest` 命令：基于当前状态输出下一步建议（买什么 / 卖什么 / 等待）
+- [x] `trade explain <code>` 命令：解释某只股票的评分明细和决策逻辑
+- [x] 这三个命令的输出格式对 Hermes 友好（结构化 JSON + 人类可读摘要）
+  - 2026-05-19：新增 `digest`、`suggest`、`explain CODE` 只读命令；输出包含中文摘要、结构化 next_action 和人工确认护栏。
 
 ### P4-6 历史信号镜像
 

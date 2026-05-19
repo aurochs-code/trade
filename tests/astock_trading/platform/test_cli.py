@@ -1137,6 +1137,107 @@ def test_review_shadow_json_reports_paper_real_deviation_via_bin_trade(tmp_path)
     assert payload["items"][0]["rule_deviation"] == "shadow_divergence"
 
 
+def test_hermes_digest_suggest_explain_json_via_bin_trade(tmp_path):
+    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.events import EventStore
+
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+    db_path = tmp_path / "runtime.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        store = EventStore(conn)
+        score_event_id = store.append(
+            stream="score:002138",
+            stream_type="strategy",
+            event_type="score.calculated",
+            payload={
+                "code": "002138",
+                "name": "双环传动",
+                "total_score": 7.8,
+                "technical_score": 8.1,
+                "fundamental_score": 7.2,
+                "flow_score": 7.5,
+                "sentiment_score": 6.8,
+                "data_quality": "ok",
+                "entry_signal": True,
+                "veto_triggered": False,
+            },
+            metadata={"run_id": "scoring_cli"},
+        )
+        decision_event_id = store.append(
+            stream="decision:002138",
+            stream_type="strategy",
+            event_type="decision.suggested",
+            payload={
+                "code": "002138",
+                "name": "双环传动",
+                "action": "BUY",
+                "score": 7.8,
+                "confidence": 0.76,
+                "source_score_event_id": score_event_id,
+                "veto_reasons": [],
+                "notes": ["入场信号成立"],
+            },
+            metadata={"run_id": "scoring_cli"},
+        )
+        store.append(
+            stream="manual_trade:002138",
+            stream_type="manual_trade",
+            event_type="manual_trade.requested",
+            payload={
+                "status": "pending",
+                "side": "buy",
+                "code": "002138",
+                "name": "双环传动",
+                "score": 7.8,
+                "source_event_id": decision_event_id,
+                "source_score_event_id": score_event_id,
+            },
+            metadata={"run_id": "scoring_cli", "account": "main", "execution": "manual"},
+        )
+    finally:
+        conn.close()
+
+    env = _cli_env(tmp_path)
+    digest = subprocess.run(
+        [str(cli), "digest", "--json"],
+        cwd=root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    suggest = subprocess.run(
+        [str(cli), "suggest", "--json"],
+        cwd=root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    explain = subprocess.run(
+        [str(cli), "explain", "002138", "--json"],
+        cwd=root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    digest_payload = json.loads(digest.stdout)
+    suggest_payload = json.loads(suggest.stdout)
+    explain_payload = json.loads(explain.stdout)
+    assert digest_payload["status"] == "needs_manual_confirmation"
+    assert "待人工确认 1" in digest_payload["summary"]
+    assert suggest_payload["next_action"]["command"] == "atrade manual-trades list --json"
+    assert suggest_payload["execution_allowed"] is False
+    assert explain_payload["code"] == "002138"
+    assert explain_payload["latest_decision"]["action"] == "BUY"
+    assert "买入意向" in explain_payload["summary"]
+
+
 def test_sqlite_to_mysql_migration_dry_run_json_via_bin_trade(tmp_path):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"

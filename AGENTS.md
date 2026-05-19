@@ -54,6 +54,7 @@ Use JSON output for automation:
 - `atrade health --json`
 - `atrade diagnose health --json`
 - `atrade diagnose strategy --json`
+- `atrade digest --json`
 - `atrade events query --json`
 - `atrade events evidence CODE --json`
 - `atrade events backfill-evidence --json`
@@ -65,6 +66,8 @@ Use JSON output for automation:
 - `atrade screener refresh --json`
 - `atrade screener run --query "..." --json`
 - `atrade stock analyze CODE_OR_NAME --json`
+- `atrade suggest --json`
+- `atrade explain CODE --json`
 - `atrade risk check CODE --json`
 - `atrade risk portfolio --json`
 - `atrade risk position CODE SCORE PRICE --json`

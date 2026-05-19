@@ -15,6 +15,7 @@ from astock_trading.platform.cli.db import db_app
 from astock_trading.platform.cli.diagnostics import register_diagnostics_commands
 from astock_trading.platform.cli.events import events_app
 from astock_trading.platform.cli.health import register_health_commands
+from astock_trading.platform.cli.hermes import register_hermes_commands
 from astock_trading.platform.cli.init import register_init_command
 from astock_trading.platform.cli.manual_trades import manual_trades_app
 from astock_trading.platform.cli.market_intel import market_intel_app
@@ -52,6 +53,7 @@ register_agent_context(app)
 register_init_command(app)
 register_diagnostics_commands(app)
 register_health_commands(app)
+register_hermes_commands(app)
 register_market_data_commands(app)
 register_check_data_sources(app)
 register_pipeline_commands(app)

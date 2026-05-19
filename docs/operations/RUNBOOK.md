@@ -128,6 +128,17 @@ atrade review shadow --date 2026-05-18 --record --json
 `not_executed`、`extra_real_trade`、`partial_fill`、`price_slippage` 和
 `manual_override`。
 
+Hermes 轻量查询：
+
+```bash
+atrade digest --json
+atrade suggest --json
+atrade explain 002138 --json
+```
+
+这三类命令只读事件和投影：`digest` 给一句话状态，`suggest` 给下一步建议，
+`explain` 解释单只股票最近评分和决策。它们不会下单，也不会自动调低买入门槛。
+
 ## launchd 安装
 
 模板在 `config/launchd/`。复制到 `~/Library/LaunchAgents/` 后加载：
