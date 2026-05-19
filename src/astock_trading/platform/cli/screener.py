@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
+from datetime import timedelta
 from typing import Optional
 
 import typer
@@ -12,7 +14,7 @@ from astock_trading.pipeline.context import build_context
 from astock_trading.platform.cli.common import json_or_text
 from astock_trading.platform.db import connect
 from astock_trading.platform.events import EventStore
-from astock_trading.platform.time import local_now_str
+from astock_trading.platform.time import local_now, local_now_str
 from astock_trading.reporting.projectors import ProjectionUpdater
 
 
@@ -91,6 +93,351 @@ def _scan_limit(cfg: dict, explicit_limit: Optional[int]) -> int:
     return int(cfg.get("market_scan_limit") or 30)
 
 
+CORE_ROUTE_BLOCKER = "requires_entry_strategy_route"
+ACTION_CN = {
+    "BUY": "买入意向",
+    "SELL": "卖出意向",
+    "WATCH": "观察",
+    "CLEAR": "观望",
+    "NO_TRADE": "不操作",
+}
+MARKET_SIGNAL_CN = {
+    "GREEN": "偏强",
+    "YELLOW": "震荡",
+    "RED": "转弱",
+    "CLEAR": "观望",
+}
+DATA_QUALITY_CN = {
+    "ok": "正常",
+    "degraded": "降级",
+    "error": "错误",
+}
+BLOCKER_CN = {
+    "below_ma20": "跌破 MA20",
+    "limit_up_today": "当日涨停",
+    "consecutive_outflow": "连续资金流出",
+    "consecutive_outflow_warn": "连续资金流出预警",
+    "ma20_trend_down": "MA20 趋势下行",
+    "red_market": "大盘转弱",
+    "earnings_bomb": "业绩雷",
+    CORE_ROUTE_BLOCKER: "缺少有效策略路线",
+}
+
+
+def _label(mapping: dict[str, str], value: object) -> str:
+    text = str(value)
+    return mapping.get(text, text)
+
+
+def _score_value(payload: dict) -> float:
+    return float(payload.get("total_score", payload.get("total", payload.get("score", 0))) or 0)
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
+def _counter_rows(counter: Counter, *, labels: dict[str, str]) -> list[dict]:
+    return [
+        {"reason": key, "label": _label(labels, key), "count": count}
+        for key, count in sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def _quality_rows(counter: Counter) -> list[dict]:
+    order = {"ok": 0, "degraded": 1, "error": 2}
+    return [
+        {"quality": key, "label": _label(DATA_QUALITY_CN, key), "count": count}
+        for key, count in sorted(counter.items(), key=lambda item: (order.get(item[0], 99), item[0]))
+    ]
+
+
+def _decision_count_rows(decisions: list[dict], key: str, labels: dict[str, str]) -> list[dict]:
+    groups: dict[str, list[dict]] = {}
+    for decision in decisions:
+        value = str(decision.get(key, "-"))
+        groups.setdefault(value, []).append(decision)
+    rows = []
+    for value, items in groups.items():
+        scores = [_score_value(item) for item in items]
+        rows.append({
+            key: value,
+            "label": _label(labels, value),
+            "count": len(items),
+            "max_score": max(scores) if scores else 0,
+        })
+    rows.sort(key=lambda item: (-item["count"], item[key]))
+    return rows
+
+
+def _near_miss_blockers(score: dict, buy_threshold: float) -> list[str]:
+    blockers = []
+    hard_veto = score.get("hard_veto_signals") or []
+    if hard_veto:
+        blockers.extend(_label(BLOCKER_CN, item) for item in hard_veto)
+    if not _truthy(score.get("entry_signal")):
+        blockers.append("缺少入场信号")
+    quality = str(score.get("data_quality", "ok"))
+    if quality != "ok":
+        blockers.append(f"数据质量{_label(DATA_QUALITY_CN, quality)}")
+    missing = score.get("data_missing_fields") or []
+    if missing:
+        blockers.append(f"缺失字段: {', '.join(str(item) for item in missing)}")
+    total = _score_value(score)
+    if total < buy_threshold:
+        blockers.append(f"分数低于买入线 {buy_threshold:.1f}")
+    return blockers
+
+
+def _candidate_follow_up_item(score: dict, buy_threshold: float) -> dict:
+    quality = str(score.get("data_quality", "ok"))
+    hard_veto = [str(item) for item in (score.get("hard_veto_signals") or [])]
+    return {
+        "code": score.get("code", ""),
+        "name": score.get("name", ""),
+        "score": _score_value(score),
+        "data_quality": quality,
+        "data_quality_label": _label(DATA_QUALITY_CN, quality),
+        "entry_signal": _truthy(score.get("entry_signal")),
+        "veto_triggered": bool(score.get("veto_triggered")),
+        "hard_veto_signals": hard_veto,
+        "hard_veto_labels": [_label(BLOCKER_CN, item) for item in hard_veto],
+        "missing_fields": [str(item) for item in (score.get("data_missing_fields") or [])],
+        "blockers": _near_miss_blockers(score, buy_threshold),
+    }
+
+
+def _follow_up_candidates(
+    scores: list[dict],
+    *,
+    buy_threshold: float,
+    watch_threshold: float,
+    reject_threshold: float,
+    limit: int = 10,
+) -> dict:
+    sorted_scores = sorted(scores, key=_score_value, reverse=True)
+    near_watch_floor = max(reject_threshold, watch_threshold - 1.0)
+    watch_candidates = []
+    near_watch_candidates = []
+    blocked_high_scores = []
+    data_repair_candidates = []
+
+    for score in sorted_scores:
+        total = _score_value(score)
+        veto = bool(score.get("veto_triggered"))
+        quality = str(score.get("data_quality", "ok"))
+        missing = score.get("data_missing_fields") or []
+        item = _candidate_follow_up_item(score, buy_threshold)
+
+        if not veto and watch_threshold <= total < buy_threshold:
+            watch_candidates.append(item)
+        if not veto and near_watch_floor <= total < watch_threshold:
+            near_watch_candidates.append(item)
+        if veto and total >= watch_threshold:
+            blocked_high_scores.append(item)
+        if quality != "ok" or missing:
+            data_repair_candidates.append(item)
+
+    return {
+        "watch_candidates": watch_candidates[:limit],
+        "near_watch_candidates": near_watch_candidates[:limit],
+        "blocked_high_scores": blocked_high_scores[:limit],
+        "data_repair_candidates": data_repair_candidates[:limit],
+    }
+
+
+def _next_actions(follow_up: dict) -> list[dict]:
+    actions = []
+    watch_candidates = follow_up.get("watch_candidates") or []
+    near_watch_candidates = follow_up.get("near_watch_candidates") or []
+    blocked_high_scores = follow_up.get("blocked_high_scores") or []
+    data_repair_candidates = follow_up.get("data_repair_candidates") or []
+
+    if watch_candidates:
+        code = watch_candidates[0].get("code", "")
+        actions.append({
+            "type": "stock_analysis",
+            "label": "复核观察候选",
+            "command": f"atrade stock analyze {code} --json",
+        })
+    if near_watch_candidates:
+        code = near_watch_candidates[0].get("code", "")
+        actions.append({
+            "type": "near_watch_review",
+            "label": "复核临界观察候选",
+            "command": f"atrade stock analyze {code} --json",
+        })
+    if blocked_high_scores:
+        code = blocked_high_scores[0].get("code", "")
+        actions.append({
+            "type": "blocked_candidate_review",
+            "label": "复核高分被拦截候选",
+            "command": f"atrade stock analyze {code} --json",
+        })
+    if data_repair_candidates:
+        code = data_repair_candidates[0].get("code", "")
+        actions.append({
+            "type": "data_repair_review",
+            "label": "复核数据补齐候选",
+            "command": f"atrade stock analyze {code} --json",
+        })
+    if not actions:
+        actions.append({
+            "type": "refresh_scores",
+            "label": "刷新评分证据",
+            "command": "atrade screener refresh --json",
+        })
+    return actions
+
+
+def _build_screener_explanation(
+    scores: list[dict],
+    decisions: list[dict],
+    *,
+    thresholds: dict[str, float],
+    since: str,
+    run_id: str | None = None,
+    near_miss_margin: float = 1.0,
+    near_miss_limit: int = 20,
+) -> dict:
+    buy_threshold = float(thresholds.get("buy") or 6.0)
+    watch_threshold = float(thresholds.get("watch") or 5.0)
+    reject_threshold = float(thresholds.get("reject") or 4.0)
+    near_buy_floor = max(watch_threshold, buy_threshold - near_miss_margin)
+
+    bucket_counts = {
+        "buy_ready_raw": 0,
+        "near_buy": 0,
+        "watch_band": 0,
+        "reject_band": 0,
+        "below_reject": 0,
+    }
+    quality_counter: Counter = Counter()
+    missing_counter: Counter = Counter()
+    hard_veto_counter: Counter = Counter()
+    decision_veto_counter: Counter = Counter()
+    entry_signal_count = 0
+
+    for score in scores:
+        total = _score_value(score)
+        if total >= buy_threshold:
+            bucket_counts["buy_ready_raw"] += 1
+        elif total >= near_buy_floor:
+            bucket_counts["near_buy"] += 1
+        elif total >= watch_threshold:
+            bucket_counts["watch_band"] += 1
+        elif total >= reject_threshold:
+            bucket_counts["reject_band"] += 1
+        else:
+            bucket_counts["below_reject"] += 1
+
+        quality_counter.update([str(score.get("data_quality", "ok"))])
+        missing_counter.update(str(item) for item in (score.get("data_missing_fields") or []))
+        hard_veto_counter.update(str(item) for item in (score.get("hard_veto_signals") or []))
+        if _truthy(score.get("entry_signal")):
+            entry_signal_count += 1
+
+    for decision in decisions:
+        decision_veto_counter.update(str(item) for item in (decision.get("veto_reasons") or []))
+
+    near_misses = []
+    for score in sorted(scores, key=_score_value, reverse=True):
+        total = _score_value(score)
+        if len(near_misses) >= near_miss_limit:
+            break
+        if total < near_buy_floor or total >= buy_threshold or bool(score.get("veto_triggered")):
+            continue
+        near_misses.append({
+            "code": score.get("code", ""),
+            "name": score.get("name", ""),
+            "score": total,
+            "data_quality": score.get("data_quality", "ok"),
+            "entry_signal": _truthy(score.get("entry_signal")),
+            "blockers": _near_miss_blockers(score, buy_threshold),
+        })
+
+    top_scores = [
+        {
+            "code": score.get("code", ""),
+            "name": score.get("name", ""),
+            "score": _score_value(score),
+            "data_quality": score.get("data_quality", "ok"),
+            "entry_signal": _truthy(score.get("entry_signal")),
+            "veto_triggered": bool(score.get("veto_triggered")),
+            "hard_veto_signals": score.get("hard_veto_signals") or [],
+        }
+        for score in sorted(scores, key=_score_value, reverse=True)[:10]
+    ]
+    follow_up = _follow_up_candidates(
+        scores,
+        buy_threshold=buy_threshold,
+        watch_threshold=watch_threshold,
+        reject_threshold=reject_threshold,
+    )
+
+    recommendations = []
+    if not scores:
+        summary = "最近没有评分事件；先运行 screener run 或 refresh，再判断是否真没有候选。"
+        recommendations.append("先执行 atrade screener refresh --json 生成新的评分证据")
+    elif bucket_counts["buy_ready_raw"] == 0 and not near_misses:
+        summary = "近期候选整体评分不足，当前不应通过降低买入线来制造交易。"
+        recommendations.append("扩大召回或补齐数据源，但保持买入门槛不变")
+    elif near_misses:
+        summary = f"发现 {len(near_misses)} 个临界候选；适合进入观察池，不适合直接当作买入意向。"
+        recommendations.append("把临界候选列入观察并跟踪入场信号、资金流和数据质量变化")
+    else:
+        summary = "近期存在原始分数达标候选，但仍需检查入场信号、数据质量和风控门禁。"
+        recommendations.append("逐只查看高分候选的门禁原因，避免把观察信号误作买入意向")
+
+    if hard_veto_counter:
+        recommendations.append("优先查看硬否决最高的原因，判断是市场结构问题还是数据补齐问题")
+    if quality_counter.get("degraded", 0) or quality_counter.get("error", 0):
+        recommendations.append("补齐降级或错误数据源；热度源只能召回，不能替代行情和资金证据")
+
+    return {
+        "diagnostic": "screener_explain",
+        "status": "ok" if scores else "warning",
+        "summary": summary,
+        "scope": {
+            "since": since,
+            "run_id": run_id,
+            "score_events": len(scores),
+            "decision_events": len(decisions),
+        },
+        "thresholds": {
+            "buy": buy_threshold,
+            "watch": watch_threshold,
+            "reject": reject_threshold,
+            "near_buy_floor": near_buy_floor,
+        },
+        "score_buckets": bucket_counts,
+        "decision_actions": _decision_count_rows(decisions, "action", ACTION_CN),
+        "market_signals": _decision_count_rows(decisions, "market_signal", MARKET_SIGNAL_CN),
+        "blockers": {
+            "entry_signal": {
+                "triggered": entry_signal_count,
+                "missing": max(len(scores) - entry_signal_count, 0),
+            },
+            "hard_veto_reasons": _counter_rows(hard_veto_counter, labels=BLOCKER_CN),
+            "decision_veto_reasons": _counter_rows(decision_veto_counter, labels=BLOCKER_CN),
+            "data_quality": _quality_rows(quality_counter),
+            "missing_fields": [
+                {"field": key, "count": count}
+                for key, count in sorted(missing_counter.items(), key=lambda item: (-item[1], item[0]))
+            ],
+        },
+        "near_misses": near_misses,
+        "follow_up": follow_up,
+        "top_scores": top_scores,
+        "next_actions": _next_actions(follow_up),
+        "recommendations": recommendations,
+    }
+
+
 def _add_watch_candidates(ctx, scores: list[dict], threshold: float, run_id: str) -> list[dict]:
     existing = {
         row["code"]
@@ -139,9 +486,6 @@ def _pool_rows_by_code(ctx) -> dict[str, dict]:
 
 def _score_name(score: dict, existing: dict | None = None) -> str:
     return score.get("name") or (existing or {}).get("name", "") or score.get("code", "")
-
-
-CORE_ROUTE_BLOCKER = "requires_entry_strategy_route"
 
 
 def _route_has_entry_signal(route: object) -> bool:
@@ -378,6 +722,51 @@ def screener_refresh(
 ):
     """刷新候选池：筛选、评分，并把达标结果写入候选池事件和投影。"""
     _run_screener(query, limit, watch_threshold, as_json, refresh_pool=True)
+
+
+@screener_app.command("explain")
+def screener_explain(
+    since: str = typer.Option("", "--since", help="起始时间 ISO；空值使用 --days 回推"),
+    days: int = typer.Option(7, "--days", help="未指定 --since 时回看天数"),
+    run_id: str = typer.Option("", "--run-id", help="只分析指定 run_id 的评分/决策事件"),
+    limit: int = typer.Option(1000, "--limit", help="最大读取事件数量"),
+    near_miss_margin: float = typer.Option(1.0, "--near-miss-margin", help="买入线下方多少分视为临界候选"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """解释近期为什么没有合适候选，输出评分漏斗、否决原因和临界候选。"""
+    if days < 1:
+        raise typer.BadParameter("--days must be >= 1")
+    if limit < 1:
+        raise typer.BadParameter("--limit must be >= 1")
+
+    ctx = build_context()
+    try:
+        since_value = since.strip() or (local_now() - timedelta(days=days)).isoformat()
+        metadata_filter = {"run_id": run_id} if run_id else None
+        score_events = ctx.event_store.query(
+            event_type="score.calculated",
+            since=since_value,
+            limit=limit,
+            metadata_filter=metadata_filter,
+        )
+        decision_events = ctx.event_store.query(
+            event_type="decision.suggested",
+            since=since_value,
+            limit=limit,
+            metadata_filter=metadata_filter,
+        )
+        thresholds = ctx.cfg.get("scoring", {}).get("thresholds", {})
+        payload = _build_screener_explanation(
+            [event["payload"] for event in score_events],
+            [event["payload"] for event in decision_events],
+            thresholds=thresholds,
+            since=since_value,
+            run_id=run_id or None,
+            near_miss_margin=near_miss_margin,
+        )
+        json_or_text(payload, as_json)
+    finally:
+        ctx.conn.close()
 
 
 @screener_app.command("score")

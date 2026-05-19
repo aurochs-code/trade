@@ -132,6 +132,23 @@ def test_stock_analyze_help_via_bin_trade():
     assert "--history-days" in result.stdout
 
 
+def test_screener_explain_help_via_bin_trade():
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "screener", "explain", "--help"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "解释近期为什么没有合适候选" in result.stdout
+    assert "--near-miss-margin" in result.stdout
+    assert "--json" in result.stdout
+
+
 def test_health_json_via_bin_trade(tmp_path):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
@@ -338,6 +355,7 @@ def test_agent_context_json_via_bin_trade():
     payload = json.loads(result.stdout)
     assert "bin/trade" in payload["safe_entrypoints"]
     assert "src/astock_trading/**/*.py" in payload["forbidden_entrypoints"]
+    assert payload["recommended_commands"]["screener_explain"] == "atrade screener explain --json"
 
 
 def test_notify_manual_confirmation_dry_run_json(tmp_path):

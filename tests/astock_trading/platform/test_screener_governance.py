@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from astock_trading.platform.cli.screener import (
     _add_watch_candidates,
     _apply_candidate_pool_refresh,
+    _build_screener_explanation,
     _watch_threshold,
 )
 from astock_trading.platform.db import connect, init_db
@@ -34,6 +35,150 @@ def test_watch_threshold_defaults_to_strategy_config():
 
     assert _watch_threshold(ctx, None) == 5.8
     assert _watch_threshold(ctx, 6.2) == 6.2
+
+
+def test_build_screener_explanation_summarizes_blockers_and_near_misses():
+    scores = [
+        {
+            "code": "001",
+            "name": "临界股",
+            "total_score": 5.7,
+            "data_quality": "ok",
+            "entry_signal": False,
+            "veto_triggered": False,
+            "hard_veto_signals": [],
+            "data_missing_fields": [],
+        },
+        {
+            "code": "002",
+            "name": "跌破均线",
+            "total_score": 0.0,
+            "data_quality": "degraded",
+            "entry_signal": False,
+            "veto_triggered": True,
+            "hard_veto_signals": ["below_ma20"],
+            "data_missing_fields": ["ROE"],
+        },
+        {
+            "code": "003",
+            "name": "评分过低",
+            "total_score": 3.8,
+            "data_quality": "ok",
+            "entry_signal": True,
+            "veto_triggered": False,
+            "hard_veto_signals": [],
+            "data_missing_fields": [],
+        },
+    ]
+    decisions = [
+        {
+            "action": "CLEAR",
+            "score": 5.7,
+            "market_signal": "GREEN",
+            "notes": ["评分过低"],
+            "veto_reasons": [],
+        },
+        {
+            "action": "CLEAR",
+            "score": 0.0,
+            "market_signal": "GREEN",
+            "notes": ["一票否决"],
+            "veto_reasons": ["below_ma20"],
+        },
+    ]
+
+    payload = _build_screener_explanation(
+        scores,
+        decisions,
+        thresholds={"buy": 6.0, "watch": 5.0, "reject": 4.0},
+        since="2026-05-19T00:00:00+08:00",
+        run_id="screener_test",
+    )
+
+    assert payload["diagnostic"] == "screener_explain"
+    assert payload["score_buckets"]["near_buy"] == 1
+    assert payload["score_buckets"]["below_reject"] == 2
+    assert payload["blockers"]["hard_veto_reasons"][0] == {
+        "reason": "below_ma20",
+        "label": "跌破 MA20",
+        "count": 1,
+    }
+    assert payload["blockers"]["decision_veto_reasons"][0] == {
+        "reason": "below_ma20",
+        "label": "跌破 MA20",
+        "count": 1,
+    }
+    assert payload["blockers"]["data_quality"][1] == {
+        "quality": "degraded",
+        "label": "降级",
+        "count": 1,
+    }
+    assert payload["near_misses"][0]["code"] == "001"
+    assert "缺少入场信号" in payload["near_misses"][0]["blockers"]
+    assert "临界候选" in payload["summary"]
+
+
+def test_build_screener_explanation_returns_follow_up_candidate_layers():
+    scores = [
+        {
+            "code": "001",
+            "name": "观察候选",
+            "total_score": 5.3,
+            "data_quality": "ok",
+            "entry_signal": False,
+            "veto_triggered": False,
+            "hard_veto_signals": [],
+            "data_missing_fields": [],
+        },
+        {
+            "code": "002",
+            "name": "临界观察",
+            "total_score": 4.6,
+            "data_quality": "ok",
+            "entry_signal": False,
+            "veto_triggered": False,
+            "hard_veto_signals": [],
+            "data_missing_fields": [],
+        },
+        {
+            "code": "003",
+            "name": "高分被挡",
+            "total_score": 6.2,
+            "data_quality": "ok",
+            "entry_signal": True,
+            "veto_triggered": True,
+            "hard_veto_signals": ["below_ma20"],
+            "data_missing_fields": [],
+        },
+        {
+            "code": "004",
+            "name": "待补数据",
+            "total_score": 4.8,
+            "data_quality": "degraded",
+            "entry_signal": False,
+            "veto_triggered": False,
+            "hard_veto_signals": [],
+            "data_missing_fields": ["ROE", "现金流"],
+        },
+    ]
+
+    payload = _build_screener_explanation(
+        scores,
+        [],
+        thresholds={"buy": 6.0, "watch": 5.0, "reject": 4.0},
+        since="2026-05-19T00:00:00+08:00",
+    )
+
+    assert payload["follow_up"]["watch_candidates"][0]["code"] == "001"
+    assert payload["follow_up"]["near_watch_candidates"][0]["code"] == "004"
+    assert payload["follow_up"]["near_watch_candidates"][1]["code"] == "002"
+    assert payload["follow_up"]["blocked_high_scores"][0]["code"] == "003"
+    assert payload["follow_up"]["data_repair_candidates"][0]["code"] == "004"
+    assert payload["next_actions"][0] == {
+        "type": "stock_analysis",
+        "label": "复核观察候选",
+        "command": "atrade stock analyze 001 --json",
+    }
 
 
 def test_add_watch_candidates_records_candidate_event(tmp_path):

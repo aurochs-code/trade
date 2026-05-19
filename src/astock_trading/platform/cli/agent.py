@@ -30,6 +30,7 @@ def register_agent_context(app: typer.Typer) -> None:
                 "runs": "atrade runs list --json",
                 "portfolio": "atrade status --json",
                 "screener": "atrade screener candidates --json",
+                "screener_explain": "atrade screener explain --json",
                 "screener_refresh": "atrade screener refresh --json",
                 "screener_run": "atrade screener run --query '...' --json",
                 "stock_analyze": "atrade stock analyze CODE_OR_NAME --json",
