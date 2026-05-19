@@ -112,7 +112,8 @@
 - [x] 核心池 snapshot 保留 `data_quality / data_missing_fields`
 - [x] 盘前/收盘 Discord 推送增加数据质量标记
 - [x] `doctor` 增加数据源健康度检查：最近 N 次运行可用率、缓存新鲜度、字段缺失率、最后成功时间
-- [ ] 评分引擎遇到 `data_quality: degraded` 时，显示最近一次有效评分作为参考值，不直接替代当前分数
+- [x] 评分引擎遇到 `data_quality: degraded` 时，显示最近一次有效评分作为参考值，不直接替代当前分数
+  - 2026-05-19：`score.calculated` 降级事件追加 `previous_valid_score`，Discord 评分区展示“上次有效评分”，仅作参考。
 - [x] `data_quality: error` 时新增买入建议降级为 blocked 或 manual_review
 
 ### P4-5 Hermes 交互增强

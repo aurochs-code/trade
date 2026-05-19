@@ -344,6 +344,11 @@ class TestDiscordFormat:
             "score": {
                 "total_score": 6.3,
                 "data_quality": "ok",
+                "previous_valid_score": {
+                    "total_score": 7.2,
+                    "occurred_at": "2026-05-18T07:30:00+00:00",
+                    "reference_only": True,
+                },
                 "entry_signal": True,
                 "strategy_routes": [
                     {
@@ -397,6 +402,8 @@ class TestDiscordFormat:
         assert "不自动下单" in values
         assert "买入意向" in values
         assert "6.3" in values
+        assert "上次有效评分 7.2" in values
+        assert "仅作参考" in values
         assert "放量突破" in values
         assert "现价 12.30" in values
         assert "建议仓位 16%" in values

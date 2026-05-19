@@ -16,6 +16,7 @@ from astock_trading.market.models import (
 )
 from astock_trading.strategy.models import (
     Action,
+    DataQuality,
     MarketSignal,
     MarketState,
     ScoringWeights,
@@ -147,6 +148,52 @@ class TestStrategyService:
         manual_event = event_store.query(event_type="manual_trade.requested")[0]
         assert manual_event["payload"]["source_event_id"] == decision_event["event_id"]
         assert manual_event["payload"]["source_score_event_id"] == score_event["event_id"]
+
+    def test_degraded_score_keeps_previous_valid_score_as_reference_only(self, event_store):
+        previous_event_id = event_store.append(
+            stream="strategy:002138",
+            stream_type="strategy",
+            event_type="score.calculated",
+            payload={
+                "code": "002138",
+                "name": "双环传动",
+                "total_score": 7.2,
+                "data_quality": "ok",
+            },
+            metadata={"run_id": "run_previous", "config_version": "v_old"},
+        )
+        scorer = Scorer(
+            weights=ScoringWeights(technical=3, fundamental=2, flow=2, sentiment=3),
+            veto_rules=[],
+        )
+        decider = Decider(buy_threshold=6.5, watch_threshold=5.0)
+        svc = StrategyService(scorer, decider, event_store)
+        degraded_snapshot = replace(
+            _make_snapshot("002138", "双环传动"),
+            financial=FinancialReport(),
+        )
+
+        svc.evaluate(
+            [degraded_snapshot],
+            MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
+            run_id="run_degraded",
+            config_version="v_new",
+        )
+
+        score_events = event_store.query(event_type="score.calculated")
+        current_payload = score_events[-1]["payload"]
+        assert current_payload["data_quality"] == DataQuality.DEGRADED.value
+        assert current_payload["total_score"] != 7.2
+        assert current_payload["previous_valid_score"] == {
+            "event_id": previous_event_id,
+            "occurred_at": score_events[0]["occurred_at"],
+            "run_id": "run_previous",
+            "config_version": "v_old",
+            "total_score": 7.2,
+            "data_quality": "ok",
+            "reference_only": True,
+            "note": "当前评分数据质量降级时仅作参考，不替代本次评分。",
+        }
 
     def test_evaluate_creates_pending_manual_trade_for_buy_decision(self, event_store):
         scorer = Scorer(

@@ -21,7 +21,7 @@ from astock_trading.platform.domain_events import (
 )
 from astock_trading.platform.events import EventStore
 from astock_trading.strategy.decider import Decider
-from astock_trading.strategy.models import Action, DecisionIntent, MarketState, ScoreResult
+from astock_trading.strategy.models import Action, DataQuality, DecisionIntent, MarketState, ScoreResult
 from astock_trading.strategy.scorer import Scorer
 
 _logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ class StrategyService:
 
         for score_result in results:
             snapshot = next((s for s in snapshots if s.code == score_result.code), None)
-            score_payload = score_result.to_dict()
+            score_payload = self._score_payload_with_reference(score_result)
             if snapshot and snapshot.observation_id:
                 score_payload["source_observation_id"] = snapshot.observation_id
 
@@ -195,11 +195,45 @@ class StrategyService:
             stream=f"strategy:{result.code}",
             stream_type="strategy",
             event_type=SCORE_CALCULATED,
-            payload=result.to_dict(),
+            payload=self._score_payload_with_reference(result),
             metadata={"run_id": run_id, "config_version": config_version},
         ))
 
         return result
+
+    def _score_payload_with_reference(self, score_result: ScoreResult) -> dict[str, Any]:
+        payload = score_result.to_dict()
+        if score_result.data_quality == DataQuality.DEGRADED:
+            previous = self._previous_valid_score_reference(score_result.code)
+            if previous:
+                payload["previous_valid_score"] = previous
+        return payload
+
+    def _previous_valid_score_reference(self, code: str) -> dict[str, Any] | None:
+        events = self._event_store.query(
+            stream=f"strategy:{code}",
+            event_type=SCORE_CALCULATED,
+            limit=1000,
+        )
+        for event in reversed(events):
+            payload = event.get("payload") or {}
+            if payload.get("data_quality") != DataQuality.OK.value:
+                continue
+            total_score = payload.get("total_score")
+            if total_score is None:
+                continue
+            metadata = event.get("metadata") or {}
+            return {
+                "event_id": event.get("event_id"),
+                "occurred_at": event.get("occurred_at"),
+                "run_id": metadata.get("run_id"),
+                "config_version": metadata.get("config_version"),
+                "total_score": total_score,
+                "data_quality": DataQuality.OK.value,
+                "reference_only": True,
+                "note": "当前评分数据质量降级时仅作参考，不替代本次评分。",
+            }
+        return None
 
 
 def _market_state_payload(market_state: MarketState) -> dict[str, Any]:

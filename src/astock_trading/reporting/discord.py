@@ -603,6 +603,15 @@ def format_manual_confirmation_embed(analysis: dict) -> dict:
     market_signal_cn = _label_cn(market_signal)
     total_score = _to_float(score.get("total_score", score.get("total")))
     data_quality = _label_cn(score.get("data_quality", "-"))
+    score_lines = [
+        f"总分 **{total_score:.1f}** · 数据质量：{data_quality}",
+        _dimension_summary(score),
+    ]
+    previous_score = score.get("previous_valid_score") or {}
+    if previous_score:
+        score_lines.append(
+            f"上次有效评分 {_to_float(previous_score.get('total_score')):.1f} · 仅作参考"
+        )
 
     fields = [
         _field(
@@ -616,7 +625,7 @@ def format_manual_confirmation_embed(analysis: dict) -> dict:
         ),
         _field(
             "评分",
-            f"总分 **{total_score:.1f}** · 数据质量：{data_quality}\n{_dimension_summary(score)}",
+            "\n".join(score_lines),
             inline=False,
         ),
         _field(
