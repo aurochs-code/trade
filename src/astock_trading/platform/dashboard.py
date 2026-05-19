@@ -130,7 +130,7 @@ def _market(conn: Any) -> dict:
     rows = [
         _row_dict(row)
         for row in conn.execute(
-            """SELECT index_symbol, name, signal, price_cents, change_pct, ma20_pct, ma60_pct, updated_at
+            """SELECT index_symbol, name, `signal`, price_cents, change_pct, ma20_pct, ma60_pct, updated_at
                FROM projection_market_state
                ORDER BY index_symbol
                LIMIT 20"""
