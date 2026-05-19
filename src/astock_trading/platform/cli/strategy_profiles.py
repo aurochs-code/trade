@@ -5,6 +5,7 @@ from __future__ import annotations
 import typer
 
 from astock_trading.pipeline.context import build_context
+from astock_trading.pipeline.strategy_health import run_strategy_health_review
 from astock_trading.pipeline.strategy_profiles import compare_strategy_profiles, propose_strategy_allocation
 from astock_trading.platform.cli.common import json_or_text
 
@@ -66,6 +67,35 @@ def strategy_allocation(
             profiles=profile_names,
             total_capital=capital,
             min_samples=min_samples,
+            record=record,
+        )
+        if as_json:
+            json_or_text(payload, True)
+            return
+        typer.echo(payload["report_markdown"])
+    finally:
+        ctx.conn.close()
+
+
+@strategy_app.command("health")
+def strategy_health(
+    min_samples: int = typer.Option(10, "--min-samples", help="输出可参考策略体检所需的最少闭合复盘样本"),
+    window_days: int = typer.Option(365, "--window-days", help="复盘样本回看天数"),
+    record: bool = typer.Option(False, "--record/--no-record", help="是否记录 strategy.health_report.proposed 事件"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """P6-3 策略体检：行业、市值、持仓天数、入场信号和时间归因。"""
+    if min_samples < 1:
+        raise typer.BadParameter("--min-samples must be >= 1")
+    if window_days < 1:
+        raise typer.BadParameter("--window-days must be >= 1")
+
+    ctx = build_context()
+    try:
+        payload = run_strategy_health_review(
+            ctx.conn,
+            min_samples=min_samples,
+            window_days=window_days,
             record=record,
         )
         if as_json:

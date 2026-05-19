@@ -287,6 +287,26 @@ def test_strategy_allocation_json_via_bin_trade(tmp_path):
     assert result.stderr == ""
 
 
+def test_strategy_health_json_via_bin_trade(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "strategy", "health", "--json"],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["analysis"] == "strategy_health_review"
+    assert payload["status"] == "insufficient_data"
+    assert payload["guardrails"]["auto_apply"] is False
+    assert result.stderr == ""
+
+
 def test_continuation_study_help_via_bin_trade():
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"

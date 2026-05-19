@@ -26,6 +26,7 @@ atrade diagnose strategy --json
 atrade calibrate --json
 atrade risk adaptive --json
 atrade strategy allocation --json
+atrade strategy health --json
 atrade strategy profiles --json
 atrade screener explain --json
 atrade screener iterate --json
@@ -174,6 +175,18 @@ atrade strategy allocation --record --json
 样本达标的 profile 进入启用候选，负收益或胜率不足的 profile 进入暂停候选，证据不足的
 profile 只做影子验证。`--record` 会追加 `strategy.capital_allocation.proposed` 和
 Markdown artifact。该命令不改真实账户、不分配真实资金、不停用任何 profile。
+
+P6-3 策略体检从闭合交易复盘做深度归因：
+
+```bash
+atrade strategy health --json
+atrade strategy health --record --json
+```
+
+该命令读取 `trade.review.recorded`、交易前假设和来源评分证据，按行业、市值、持仓天数、
+入场信号类型、入场星期和月份统计收益均值、胜率、MFE/MAE，并输出“能力圈”强项/弱项。
+样本不足时返回 `insufficient_data`；`--record` 会追加 `strategy.health_report.proposed`
+和 Markdown artifact。缺少行业、市值或入场信号证据时只标记证据缺口，不让 AI 补写。
 
 模拟盘 vs 实盘逐笔对账：
 

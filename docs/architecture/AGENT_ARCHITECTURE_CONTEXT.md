@@ -156,6 +156,7 @@ atrade db check --json
 - P5 参数校准：`src/astock_trading/pipeline/param_calibration.py`、`atrade calibrate --json`
 - P6 自适应风控建议：`src/astock_trading/pipeline/adaptive_risk.py`、`atrade risk adaptive --json`
 - P6 多策略 profile 对比和隔离资金建议：`src/astock_trading/pipeline/strategy_profiles.py`、`atrade strategy profiles --json`、`atrade strategy allocation --json`
+- P6 策略体检和深度归因：`src/astock_trading/pipeline/strategy_health.py`、`atrade strategy health --json`
 - 历史信号镜像：`src/astock_trading/platform/history_mirror.py`、`src/astock_trading/platform/cli/history.py`、`src/astock_trading/backtest/engine.py`
 - 人工确认：`src/astock_trading/strategy/service.py`、`src/astock_trading/platform/cli/manual_trades.py`、`src/astock_trading/platform/cli/trading.py`
 - 成交和持仓：`src/astock_trading/execution/`

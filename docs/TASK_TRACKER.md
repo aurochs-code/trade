@@ -88,6 +88,8 @@
 备注：`atrade strategy profiles --json` 对比 `trend_swing / short_continuation / defensive_watch` 的关键阈值、门禁、仓位参数和历史运行/复盘证据；`--record` 追加 `strategy.profile_comparison.proposed` 和 Markdown artifact，不自动切换 `ASTOCK_CONFIG_PROFILE`。
 - [x] P6-2 策略隔离资金桶和弱策略复核建议
 备注：`atrade strategy allocation --json` 基于 profile 对比生成隔离资金桶、影子验证、启用候选和暂停候选；`--record` 追加 `strategy.capital_allocation.proposed` 和 Markdown artifact，不自动分配资金、不停用 profile。
+- [x] P6-3 策略体检和深度归因报告
+备注：`atrade strategy health --json` 按行业、市值、持仓天数、入场信号类型和时间维度统计闭合复盘收益，输出能力圈强项/弱项和证据缺口；`--record` 追加 `strategy.health_report.proposed` 和 Markdown artifact。
 
 ### 复盘归因深化
 
