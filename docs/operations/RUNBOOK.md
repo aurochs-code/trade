@@ -24,6 +24,7 @@ atrade init
 atrade health --json
 atrade diagnose strategy --json
 atrade calibrate --json
+atrade dashboard snapshot --json
 atrade risk adaptive --json
 atrade strategy allocation --json
 atrade strategy health --json
@@ -187,6 +188,16 @@ atrade strategy health --record --json
 入场信号类型、入场星期和月份统计收益均值、胜率、MFE/MAE，并输出“能力圈”强项/弱项。
 样本不足时返回 `insufficient_data`；`--record` 会追加 `strategy.health_report.proposed`
 和 Markdown artifact。缺少行业、市值或入场信号证据时只标记证据缺口，不让 AI 补写。
+
+P6-4 仪表盘先使用稳定只读数据契约：
+
+```bash
+atrade dashboard snapshot --json
+```
+
+该命令汇总 `projection_balances`、`projection_positions`、`projection_candidate_pool`、
+`projection_market_state`、`run_log`、`report_artifacts` 和待人工确认事件，输出 Web /
+手机仪表盘可消费的首屏 JSON。它只读数据库，不提供下单、撤单、确认交易或改配置能力。
 
 模拟盘 vs 实盘逐笔对账：
 

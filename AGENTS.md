@@ -54,6 +54,7 @@ Use JSON output for automation:
 - `atrade health --json`
 - `atrade backtest CODES START END --history-mirror --json`
 - `atrade calibrate --json`
+- `atrade dashboard snapshot --json`
 - `atrade diagnose health --json`
 - `atrade diagnose strategy --json`
 - `atrade digest --json`

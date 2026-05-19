@@ -231,10 +231,12 @@
 ### P6-4 Web 仪表盘
 
 **方案**：
-- [ ] 轻量 Web 服务（FastAPI / Streamlit），读取结构化账本
+- [x] 仪表盘只读数据契约，读取结构化账本
+- [ ] 轻量 Web 服务（FastAPI / Streamlit），消费 `atrade dashboard snapshot --json`
 - [ ] 手机可访问：持仓概览 / 今日决策 / 告警列表 / 模拟盘对比
 - [ ] 历史净值曲线 / 回撤图 / 胜率趋势
 - [ ] 不做交易操作，只做展示
+- 2026-05-19：`atrade dashboard snapshot --json` 已接入；汇总持仓、资金、候选池、人工确认、市场状态、运行记录和报告 artifact；只读，不提供交易操作。
 
 ### P6-5 券商 API 接入（可选）
 

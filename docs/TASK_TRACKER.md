@@ -90,6 +90,8 @@
 备注：`atrade strategy allocation --json` 基于 profile 对比生成隔离资金桶、影子验证、启用候选和暂停候选；`--record` 追加 `strategy.capital_allocation.proposed` 和 Markdown artifact，不自动分配资金、不停用 profile。
 - [x] P6-3 策略体检和深度归因报告
 备注：`atrade strategy health --json` 按行业、市值、持仓天数、入场信号类型和时间维度统计闭合复盘收益，输出能力圈强项/弱项和证据缺口；`--record` 追加 `strategy.health_report.proposed` 和 Markdown artifact。
+- [x] P6-4 仪表盘只读数据契约
+备注：`atrade dashboard snapshot --json` 汇总持仓、资金、候选池、人工确认、市场状态、运行记录和报告 artifact，供 Web / 手机仪表盘消费；不提供交易操作。
 
 ### 复盘归因深化
 

@@ -11,6 +11,7 @@ import typer
 from astock_trading.platform.cli.agent import register_agent_context
 from astock_trading.platform.cli.calibration import register_calibration_command
 from astock_trading.platform.cli.config import config_app
+from astock_trading.platform.cli.dashboard import dashboard_app
 from astock_trading.platform.cli.data_sources import data_sources_app, register_check_data_sources
 from astock_trading.platform.cli.db import db_app
 from astock_trading.platform.cli.diagnostics import register_diagnostics_commands
@@ -41,6 +42,7 @@ app = typer.Typer(name="trade", help="A-Stock Trading 交易系统 CLI")
 
 app.add_typer(db_app)
 app.add_typer(config_app)
+app.add_typer(dashboard_app)
 app.add_typer(runs_app)
 app.add_typer(events_app)
 app.add_typer(data_sources_app)
