@@ -47,6 +47,7 @@ def _manual_trade_payload(
 def _build_hypothesis_payload(
     hypothesis: str = "",
     invalidation: str = "",
+    manual_reason: str = "",
     review_after_days: int = 0,
 ) -> dict:
     payload = {}
@@ -54,6 +55,8 @@ def _build_hypothesis_payload(
         payload["thesis"] = hypothesis
     if invalidation:
         payload["invalidation"] = invalidation
+    if manual_reason:
+        payload["manual_reason"] = manual_reason
     if review_after_days > 0:
         payload["review_after_days"] = review_after_days
     return payload
@@ -106,6 +109,9 @@ def register_trading_commands(app: typer.Typer) -> None:
         reason: str = typer.Option("manual", "--reason", help="卖出原因"),
         source_event_id: str = typer.Option("", "--source-event-id", help="来源决策/人工确认事件 ID"),
         source_score_event_id: str = typer.Option("", "--source-score-event-id", help="来源评分事件 ID"),
+        decision_id: str = typer.Option("", "--decision-id", help="来源决策事件 ID；等同 --source-event-id"),
+        signal_id: str = typer.Option("", "--signal-id", help="来源评分/信号事件 ID；等同 --source-score-event-id"),
+        manual_reason: str = typer.Option("", "--manual-reason", help="人工确认原因；会写入交易假设证据"),
         hypothesis: str = typer.Option("", "--hypothesis", help="交易前假设或卖出假设"),
         invalidation: str = typer.Option("", "--invalidation", help="假设失效条件"),
         review_after_days: int = typer.Option(0, "--review-after-days", help="几天后复盘，0 表示不设置"),
@@ -164,11 +170,12 @@ def register_trading_commands(app: typer.Typer) -> None:
                 price_cents=price_cents,
                 fee_cents=fee_cents,
                 reason=reason,
-                source_event_id=source_event_id,
-                source_score_event_id=source_score_event_id,
+                source_event_id=source_event_id or decision_id,
+                source_score_event_id=source_score_event_id or signal_id,
                 hypothesis=_build_hypothesis_payload(
                     hypothesis=hypothesis,
                     invalidation=invalidation,
+                    manual_reason=manual_reason,
                     review_after_days=review_after_days,
                 ),
             )
@@ -215,6 +222,9 @@ def register_trading_commands(app: typer.Typer) -> None:
         style: str = typer.Option("growth", "--style", help="风格：growth / momentum / slow_bull"),
         source_event_id: str = typer.Option("", "--source-event-id", help="来源决策/人工确认事件 ID"),
         source_score_event_id: str = typer.Option("", "--source-score-event-id", help="来源评分事件 ID"),
+        decision_id: str = typer.Option("", "--decision-id", help="来源决策事件 ID；等同 --source-event-id"),
+        signal_id: str = typer.Option("", "--signal-id", help="来源评分/信号事件 ID；等同 --source-score-event-id"),
+        manual_reason: str = typer.Option("", "--manual-reason", help="人工确认原因；会写入交易假设证据"),
         hypothesis: str = typer.Option("", "--hypothesis", help="交易前假设"),
         invalidation: str = typer.Option("", "--invalidation", help="假设失效条件"),
         review_after_days: int = typer.Option(0, "--review-after-days", help="几天后复盘，0 表示不设置"),
@@ -262,11 +272,12 @@ def register_trading_commands(app: typer.Typer) -> None:
                 reason=reason,
                 name=name,
                 style=style,
-                source_event_id=source_event_id,
-                source_score_event_id=source_score_event_id,
+                source_event_id=source_event_id or decision_id,
+                source_score_event_id=source_score_event_id or signal_id,
                 hypothesis=_build_hypothesis_payload(
                     hypothesis=hypothesis,
                     invalidation=invalidation,
+                    manual_reason=manual_reason,
                     review_after_days=review_after_days,
                 ),
             )

@@ -985,6 +985,51 @@ def test_record_buy_json_via_bin_trade(tmp_path):
     assert payload["position_after"]["code"] == "002138"
 
 
+def test_record_buy_json_accepts_decision_signal_and_manual_reason_aliases(tmp_path):
+    from astock_trading.platform.db import connect
+    from astock_trading.platform.events import EventStore
+
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+    db_path = tmp_path / "runtime.db"
+
+    result = subprocess.run(
+        [
+            str(cli),
+            "record-buy",
+            "002138",
+            "100",
+            "15.00",
+            "--name",
+            "双环传动",
+            "--decision-id",
+            "decision_evt_1",
+            "--signal-id",
+            "score_evt_1",
+            "--manual-reason",
+            "人工确认突破后回踩不破",
+            "--yes",
+            "--json",
+        ],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    conn = connect(db_path)
+    try:
+        events = EventStore(conn).query(stream=f"trade:002138:{payload['order_id']}")
+    finally:
+        conn.close()
+    hypothesis = next(event["payload"] for event in events if event["event_type"] == "trade.hypothesis.recorded")
+    assert hypothesis["source_event_id"] == "decision_evt_1"
+    assert hypothesis["source_score_event_id"] == "score_evt_1"
+    assert hypothesis["hypothesis"]["manual_reason"] == "人工确认突破后回踩不破"
+
+
 def test_record_sell_json_via_bin_trade(tmp_path):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
