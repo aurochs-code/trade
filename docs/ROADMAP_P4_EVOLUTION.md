@@ -61,7 +61,8 @@
 - [ ] 首轮实盘只做人工确认执行，系统不直连券商下单
 - [ ] 首轮实盘单笔仓位采用试运行上限（建议不超过正式单票上限的一半，具体金额人工确认）
 - [x] `data_quality != ok` 时，新增买入建议必须降级为"人工复核"，不得作为自动买入依据
-- [ ] 单日异常保护：连续失败 pipeline、关键数据源 error、组合风控 block 时停止新增交易
+- [x] 单日异常保护：连续失败 pipeline、关键数据源 error、组合风控 block 时停止新增交易
+  - 2026-05-19：关键数据源失败继续由 pipeline_runner 阻断；auto_trade 买入前新增 `new_trade_guard`，近期失败 pipeline 或组合风控 breach 会记录诊断并停止新增买入。
 - [ ] 每笔实盘交易记录 `decision_id / signal_id / manual_reason`，方便和模拟盘逐笔对账
 
 ### P4-1 交易日历感知

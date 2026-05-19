@@ -26,6 +26,7 @@ from astock_trading.platform.domain_events import (
     AUTO_TRADE_SUMMARY,
     DECISION_SUGGESTED,
 )
+from astock_trading.platform.pipeline_policy import new_trade_guard_decision
 from astock_trading.platform.time import MARKET_TZ, iso_to_local, local_date_bounds_utc, local_now
 from astock_trading.platform.time import local_now_str, local_today, local_today_str
 from astock_trading.strategy.models import MarketSignal, Style
@@ -164,6 +165,18 @@ def _buy_side_diagnostics(
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     max_age_hours = _buy_guard_max_age_hours(ctx, cfg)
+    guard = _new_trade_guard(ctx)
+    if not guard["allow_new_trades"]:
+        return [
+            _record_buy_diagnostic(
+                ctx,
+                run_id,
+                "new_trade_guard_blocked",
+                "单日异常保护触发，禁止新增买入",
+                guard,
+            )
+        ]
+
     pool = _candidate_pool_state(ctx, current, max_age_hours)
     diagnostics: list[dict] = []
 
@@ -204,6 +217,24 @@ def _buy_side_diagnostics(
         )
 
     return diagnostics
+
+
+def _new_trade_guard(ctx: PipelineContext) -> dict:
+    start_utc, _ = local_date_bounds_utc()
+    failed_runs = (
+        ctx.run_journal.get_failed_runs(days=1)
+        if hasattr(ctx, "run_journal") and ctx.run_journal is not None
+        else []
+    )
+    portfolio_breaches = ctx.event_store.query(
+        event_type="risk.portfolio_breach",
+        since=start_utc,
+        limit=20,
+    )
+    return new_trade_guard_decision(
+        failed_runs=failed_runs,
+        portfolio_breaches=portfolio_breaches,
+    )
 
 
 def _calc_buy_shares(price: float, cash: float, position_pct: float, total_asset: float) -> int:

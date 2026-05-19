@@ -82,3 +82,23 @@ def test_weekly_pipeline_ignores_market_data_source_gate():
     )
 
     assert decision is None
+
+
+def test_new_trade_guard_blocks_failed_runs_data_sources_and_portfolio_breach():
+    from astock_trading.platform.pipeline_policy import new_trade_guard_decision
+
+    decision = new_trade_guard_decision(
+        failed_runs=[{"run_id": "run_failed", "run_type": "evening"}],
+        data_source_health={"status": "failed", "required_missing": ["baidu_fund_flow"]},
+        portfolio_breaches=[
+            {"payload": {"rule": "daily_loss_limit", "description": "单日亏损超限"}}
+        ],
+    )
+
+    assert decision["status"] == "blocked"
+    assert decision["allow_new_trades"] is False
+    assert [item["reason"] for item in decision["blockers"]] == [
+        "recent_failed_pipeline",
+        "data_source_health_failed",
+        "portfolio_risk_block",
+    ]

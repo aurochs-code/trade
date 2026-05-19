@@ -30,13 +30,16 @@ class FakePaperAccount:
 
 
 class FakeEventStore:
-    def __init__(self, decision_events=None):
+    def __init__(self, decision_events=None, portfolio_breach_events=None):
         self.decision_events = decision_events or []
+        self.portfolio_breach_events = portfolio_breach_events or []
         self.appended: list[dict] = []
 
     def query(self, **kwargs):
         if kwargs.get("event_type") == "decision.suggested":
             return self.decision_events[: kwargs.get("limit", len(self.decision_events))]
+        if kwargs.get("event_type") == "risk.portfolio_breach":
+            return self.portfolio_breach_events[: kwargs.get("limit", len(self.portfolio_breach_events))]
         return []
 
     def append(self, stream, stream_type, event_type, payload, metadata=None):
@@ -63,6 +66,14 @@ class FakeMarketService:
         ]
 
 
+class FakeRunJournal:
+    def __init__(self, failed_runs=None):
+        self.failed_runs = failed_runs or []
+
+    def get_failed_runs(self, days=1):
+        return self.failed_runs
+
+
 class FakeObsidian:
     def write_paper_report(self, **kwargs):
         pass
@@ -85,6 +96,7 @@ def auto_trade_ctx(tmp_path):
     ctx = SimpleNamespace(
         conn=conn,
         event_store=FakeEventStore(),
+        run_journal=FakeRunJournal(),
         cfg={
             "auto_trade": {
                 "enabled": True,
@@ -148,6 +160,45 @@ def test_run_skips_buy_and_returns_diagnostic_without_fresh_decision_events(
         "run_id": "run-no-fresh-decision",
         "account": "paper",
     }
+
+
+def test_run_skips_buy_when_new_trade_guard_blocks_failed_runs(
+    auto_trade_ctx,
+    monkeypatch,
+):
+    paper = FakePaperAccount()
+    monkeypatch.setattr("astock_trading.pipeline.auto_trade.PaperAccount", lambda: paper)
+    monkeypatch.setattr(
+        "astock_trading.reporting.discord_sender.send_embed",
+        lambda *args, **kwargs: (True, ""),
+    )
+    now = datetime.now(timezone.utc)
+    _seed_core_candidate(auto_trade_ctx.conn, scored_at=now - timedelta(hours=1))
+    auto_trade_ctx.run_journal = FakeRunJournal(
+        failed_runs=[{"run_id": "run_failed", "run_type": "evening"}]
+    )
+    auto_trade_ctx.event_store = FakeEventStore(
+        decision_events=[
+            {
+                "event_type": "decision.suggested",
+                "occurred_at": now.isoformat(),
+                "payload": {
+                    "action": "BUY",
+                    "code": "002138",
+                    "name": "双环传动",
+                    "score": 7.5,
+                },
+                "metadata": {},
+            }
+        ]
+    )
+
+    result = run(auto_trade_ctx, "run-new-trade-guard")
+
+    assert result["buys"] == []
+    assert result["diagnostics"][0]["reason"] == "new_trade_guard_blocked"
+    assert result["diagnostics"][0]["details"]["blockers"][0]["reason"] == "recent_failed_pipeline"
+    assert paper.buy_calls == []
 
 
 def test_run_skips_buy_and_returns_diagnostic_when_core_pool_is_empty(
