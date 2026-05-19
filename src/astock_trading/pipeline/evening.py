@@ -17,6 +17,7 @@ import logging
 from astock_trading.pipeline.context import PipelineContext
 from astock_trading.pipeline.helpers import check_position_risks
 from astock_trading.pipeline.notification_policy import should_push_sector_heatmap
+from astock_trading.platform.history_mirror import archive_market_signal_snapshot
 from astock_trading.platform.time import local_today_str
 from astock_trading.reporting.discord import format_evening_embed, format_combined_stop_alert_embed
 from astock_trading.reporting.market_formatters import (
@@ -37,6 +38,13 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     # 同步指数数据到 projection_market_state 表
     if index_data:
         ctx.projector.sync_market_state(index_data)
+    history_group_id = archive_market_signal_snapshot(
+        ctx.conn,
+        run_id=run_id,
+        phase="evening",
+        market_state=market_state,
+        index_data=index_data,
+    )
 
     # 2. 持仓 + 风控（带 MA 数据 + 配置文件参数）
     # 先刷新持仓收盘价
@@ -198,4 +206,5 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         "market_announcements": len(market_announcements),
         "dragon_tiger": dragon_tiger.get("total_records", 0) if isinstance(dragon_tiger, dict) else 0,
         "sector_heatmap_pushed": sector_heatmap_pushed,
+        "history_group_id": history_group_id,
     }

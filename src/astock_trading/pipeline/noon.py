@@ -17,6 +17,7 @@ import logging
 from astock_trading.pipeline.context import PipelineContext
 from astock_trading.pipeline.helpers import check_position_risks
 from astock_trading.pipeline.notification_policy import should_push_sector_heatmap
+from astock_trading.platform.history_mirror import archive_market_signal_snapshot
 from astock_trading.platform.time import local_today_str
 from astock_trading.reporting.discord import _embed, _field, COLORS
 from astock_trading.reporting.market_formatters import (
@@ -149,6 +150,13 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     # 同步指数数据到 projection_market_state 表
     if index_data:
         ctx.projector.sync_market_state(index_data)
+    history_group_id = archive_market_signal_snapshot(
+        ctx.conn,
+        run_id=run_id,
+        phase="noon",
+        market_state=market_state,
+        index_data=index_data,
+    )
 
     # 2. 持仓 + 风控（带 MA 数据 + 配置文件参数）
     positions = ctx.exec_svc.get_positions()
@@ -250,4 +258,5 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         "cross_platform_hot_stocks": len(cross_platform_hot_stocks),
         "finance_flash": len(finance_flash),
         "sector_heatmap_pushed": sector_heatmap_pushed,
+        "history_group_id": history_group_id,
     }

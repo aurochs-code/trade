@@ -6,6 +6,8 @@ import sqlite3
 
 import astock_trading.platform.stock_analysis as stock_analysis
 from astock_trading.market.models import StockQuote, StockSnapshot, TechnicalIndicators
+from astock_trading.platform.db import connect, init_db
+from astock_trading.platform.history_mirror import archive_signal_history
 from astock_trading.platform.stock_analysis import (
     build_stock_analysis_payload,
     lookup_stock_identifier_from_db,
@@ -167,6 +169,31 @@ def test_with_resolved_snapshot_name_updates_quote_name_when_provider_returns_co
     assert result.quote.name == "三安光电"
 
 
+def test_recent_history_signal_analysis_returns_real_miss_reason(tmp_path):
+    db_path = tmp_path / "history.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        archive_signal_history(
+            conn,
+            snapshot_date="2026-05-19",
+            history_group_id="hist_stock_analysis",
+            run_id="screener_101500",
+            phase="screener",
+            market={"signal": "YELLOW"},
+            candidates=[{"code": "600703", "name": "三安光电", "total_score": 5.8}],
+            decisions=[{"code": "600703", "name": "三安光电", "action": "WATCH", "notes": ["缺少入场信号"]}],
+        )
+
+        payload = stock_analysis._recent_history_signal_analysis(conn, "600703", days=7)
+    finally:
+        conn.close()
+
+    assert payload["history_group_id"] == "hist_stock_analysis"
+    assert payload["decision_action"] == "WATCH"
+    assert "观察" in payload["miss_reason"]
+
+
 def test_build_stock_analysis_payload_marks_report_non_executable():
     snapshot = StockSnapshot(
         code="600703",
@@ -236,6 +263,12 @@ def test_build_stock_analysis_payload_marks_report_non_executable():
         config_version="v1",
         candidate_pool={"pool_tier": "watch", "score": 6.1},
         history=[{"date": "2026-05-16", "total_score": 6.1}],
+        history_signal={
+            "source": "history_mirror",
+            "snapshot_date": "2026-05-19",
+            "history_group_id": "hist_stock_analysis",
+            "miss_reason": "观察：缺少入场信号",
+        },
     )
 
     assert payload["analysis"] == "stock"
@@ -246,4 +279,6 @@ def test_build_stock_analysis_payload_marks_report_non_executable():
     assert payload["market"]["signal"] == "GREEN"
     assert payload["candidate_pool"]["pool_tier"] == "watch"
     assert payload["history"][0]["total_score"] == 6.1
+    assert payload["history_signal"]["miss_reason"] == "观察：缺少入场信号"
+    assert "历史镜像：观察：缺少入场信号" in payload["findings"]
     assert "manual confirmation" in payload["recommendations"][0]

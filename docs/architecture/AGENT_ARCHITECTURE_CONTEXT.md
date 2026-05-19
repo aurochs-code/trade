@@ -153,7 +153,7 @@ atrade db check --json
 - pipeline：`src/astock_trading/platform/pipeline_runner.py`、`src/astock_trading/pipeline/`
 - 数据源健康：`src/astock_trading/market/health.py`、`src/astock_trading/platform/pipeline_policy.py`
 - 选股和评分：`src/astock_trading/platform/cli/screener.py`、`src/astock_trading/strategy/`
-- 历史信号镜像：`src/astock_trading/platform/history_mirror.py`、`src/astock_trading/platform/cli/history.py`
+- 历史信号镜像：`src/astock_trading/platform/history_mirror.py`、`src/astock_trading/platform/cli/history.py`、`src/astock_trading/backtest/engine.py`
 - 人工确认：`src/astock_trading/strategy/service.py`、`src/astock_trading/platform/cli/manual_trades.py`、`src/astock_trading/platform/cli/trading.py`
 - 成交和持仓：`src/astock_trading/execution/`
 - 投影和报告：`src/astock_trading/reporting/`

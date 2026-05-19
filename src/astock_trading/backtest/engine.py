@@ -25,7 +25,7 @@ import asyncio
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import Any, TYPE_CHECKING, Optional
 
 import pandas as pd
 import yaml
@@ -195,6 +195,35 @@ def _market_state_from_index(
     )
 
 
+def _market_state_from_history_bundle(payload: dict, fallback: "MarketState") -> "MarketState":
+    from astock_trading.strategy.models import MarketSignal, MarketState
+
+    signal_value = str(payload.get("signal") or fallback.signal.value)
+    signal = MarketSignal(signal_value) if signal_value in MarketSignal._value2member_map_ else fallback.signal
+    return MarketState(
+        signal=signal,
+        multiplier=float(payload.get("multiplier", fallback.multiplier) or 0.0),
+        detail=payload.get("detail") or {"source": "history_mirror"},
+    )
+
+
+def _history_score_value(candidate: dict, decision: dict) -> float:
+    value = (
+        candidate.get("total_score")
+        or candidate.get("total")
+        or candidate.get("score")
+        or decision.get("score")
+        or decision.get("confidence")
+        or 0.0
+    )
+    return float(value or 0.0)
+
+
+def _data_quality_from_history(value: object, data_quality_enum):
+    quality = str(value or data_quality_enum.OK.value)
+    return data_quality_enum(quality) if quality in data_quality_enum._value2member_map_ else data_quality_enum.OK
+
+
 # ---------------------------------------------------------------------------
 # BacktestEngine
 # ---------------------------------------------------------------------------
@@ -234,8 +263,9 @@ class Position:
 class BacktestEngine:
     """生产级回测引擎 — 复用 Scorer + Decider。"""
 
-    def __init__(self, config: BacktestConfig):
+    def __init__(self, config: BacktestConfig, history_conn: Any | None = None):
         self.cfg = config
+        self._history_conn = history_conn
         self._scorer = None
         self._decider = None
         self._bars: dict[str, pd.DataFrame] = {}       # code -> df
@@ -249,6 +279,8 @@ class BacktestEngine:
         self._last_week: str = ""
         self._last_index_date: str = ""
         self._financial_cache: dict[str, dict] = {}  # code -> {roe, revenue_growth, ocf}
+        self._history_mirror_dates: list[str] = []
+        self._proxy_replay_dates: list[str] = []
 
     def load_data(
         self,
@@ -380,6 +412,13 @@ class BacktestEngine:
                 self._market_state = MarketState(signal=MarketSignal.CLEAR, multiplier=0.0)
 
             market = self._market_state
+            mirror_replay = self._mirror_replay_for_date(d, market)
+            if mirror_replay is not None:
+                market = mirror_replay["market"]
+                self._market_state = market
+                self._history_mirror_dates.append(d)
+            else:
+                self._proxy_replay_dates.append(d)
 
             # ── 2. 持仓权益 ──────────────────────────────────────────
             portfolio_value = self._cash + sum(
@@ -393,16 +432,18 @@ class BacktestEngine:
 
             # ── 4. 评分 + 决策 ───────────────────────────────────────
             current_exposure = (portfolio_value - self._cash) / portfolio_value if portfolio_value > 0 else 0.0
-            intents = []
+            if mirror_replay is not None:
+                intents = mirror_replay["intents"]
+            else:
+                intents = []
+                for code in self._bars:
+                    snapshot = self._build_snapshot(code, d)
+                    if snapshot is None:
+                        continue
 
-            for code in self._bars:
-                snapshot = self._build_snapshot(code, d)
-                if snapshot is None:
-                    continue
-
-                score = self._scorer.score(snapshot)
-                intent = self._decider.decide(score, market, current_exposure, self._weekly_buy_count)
-                intents.append((score, intent))
+                    score = self._scorer.score(snapshot)
+                    intent = self._decider.decide(score, market, current_exposure, self._weekly_buy_count)
+                    intents.append((score, intent))
 
             # ── 5. 执行 SELL 信号 ───────────────────────────────────
             # 区分大盘 CLEAR（减仓50%）和个股分数低（不等强制卖，等止损）
@@ -502,6 +543,74 @@ class BacktestEngine:
             })
 
         return self._build_report()
+
+    def _mirror_replay_for_date(self, trade_date: str, fallback_market: "MarketState") -> dict | None:
+        """优先读取真实历史信号镜像；没有镜像时让调用方回退到 proxy replay。"""
+        if self._history_conn is None:
+            return None
+
+        from astock_trading.platform.history_mirror import load_signal_history_bundle
+        from astock_trading.strategy.models import (
+            Action,
+            DataQuality,
+            DecisionIntent,
+            ScoreResult,
+        )
+
+        bundle = load_signal_history_bundle(self._history_conn, snapshot_date=trade_date)
+        if not bundle:
+            return None
+
+        sections = bundle.get("sections") or {}
+        market = _market_state_from_history_bundle(sections.get("market") or {}, fallback_market)
+        candidates = {
+            str(item.get("code", "")): item
+            for item in sections.get("candidates", [])
+            if isinstance(item, dict) and item.get("code")
+        }
+        decisions = {
+            str(item.get("code", "")): item
+            for item in sections.get("decision", [])
+            if isinstance(item, dict) and item.get("code")
+        }
+        codes = [code for code in sorted(set(candidates) | set(decisions)) if code in self._bars]
+        intents = []
+        for code in codes:
+            candidate = candidates.get(code, {})
+            decision = decisions.get(code, {})
+            score_value = _history_score_value(candidate, decision)
+            score = ScoreResult(
+                code=code,
+                name=str(candidate.get("name") or decision.get("name") or code),
+                total=score_value,
+                hard_veto=[str(item) for item in candidate.get("hard_veto_signals", [])],
+                veto_triggered=bool(candidate.get("veto_triggered", False)),
+                entry_signal=bool(candidate.get("entry_signal", False)),
+                data_quality=_data_quality_from_history(candidate.get("data_quality"), DataQuality),
+                data_missing_fields=[str(item) for item in candidate.get("data_missing_fields", [])],
+            )
+            action_value = str(decision.get("action") or "WATCH")
+            action = Action(action_value) if action_value in Action._value2member_map_ else Action.WATCH
+            intent = DecisionIntent(
+                code=score.code,
+                name=score.name,
+                action=action,
+                confidence=float(decision.get("confidence", decision.get("score", score.total)) or 0.0),
+                score=score.total,
+                position_pct=float(decision.get("position_pct", 0.0) or 0.0),
+                market_signal=market.signal,
+                market_multiplier=market.multiplier,
+                veto_reasons=[str(item) for item in decision.get("veto_reasons", [])],
+                notes=[str(item) for item in decision.get("notes", [])],
+            )
+            intents.append((score, intent))
+
+        return {
+            "source": "history_mirror",
+            "history_group_id": bundle.get("history_group_id", ""),
+            "market": market,
+            "intents": intents,
+        }
 
     def _build_snapshot(self, code: str, as_of_date: str):
         """从历史数据构建 StockSnapshot。"""
@@ -777,6 +886,10 @@ class BacktestEngine:
             "winning_trades": len(wins),
             "losing_trades": len(sells) - len(wins),
             "positions_open": len(self._positions),
+            "signal_source": {
+                "history_mirror_days": len(self._history_mirror_dates),
+                "proxy_replay_days": len(self._proxy_replay_dates),
+            },
             "equity_curve": self._portfolio_value_series,
             "trades": self._trades[-50:],
         }
@@ -827,6 +940,8 @@ def run_backtest(
     preset: str = "保守验证C",
     initial_cash: float = 100000.0,
     adjustflag: str = "2",
+    use_history_mirror: bool = True,
+    history_db_path: Optional[Path] = None,
 ) -> dict:
     """执行回测的主入口函数（MCP 和 CLI 共用）。
 
@@ -842,15 +957,30 @@ def run_backtest(
     cfg.initial_cash = initial_cash
     cfg.adjustflag = adjustflag
 
+    history_conn = _open_history_connection(use_history_mirror, history_db_path)
     # 初始化引擎
-    engine = BacktestEngine(cfg)
+    engine = BacktestEngine(cfg, history_conn=history_conn)
+    try:
+        # 向前多拉 90 天用于 MA 计算
+        from datetime import date as date_type, timedelta as td
+        pre_start = (date_type.fromisoformat(start) - td(days=90)).isoformat()
 
-    # 向前多拉 90 天用于 MA 计算
-    from datetime import date as date_type, timedelta as td
-    pre_start = (date_type.fromisoformat(start) - td(days=90)).isoformat()
+        load_result = engine.load_data(code_list, start, end, pre_start)
+        if "error" in load_result:
+            return load_result
 
-    load_result = engine.load_data(code_list, start, end, pre_start)
-    if "error" in load_result:
-        return load_result
+        return engine.run()
+    finally:
+        if history_conn is not None:
+            history_conn.close()
 
-    return engine.run()
+
+def _open_history_connection(use_history_mirror: bool, history_db_path: Optional[Path]):
+    if not use_history_mirror:
+        return None
+    try:
+        from astock_trading.platform.db import connect
+
+        return connect(history_db_path) if history_db_path else connect()
+    except Exception:
+        return None

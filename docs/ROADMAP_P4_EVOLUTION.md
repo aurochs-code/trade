@@ -144,10 +144,13 @@
 - 2026-05-19：新增 `signal_history_snapshots` schema v4、`platform/history_mirror.py`、
   `atrade history signal --date YYYY-MM-DD --code CODE --json`；`screener run/refresh`
   和 `scoring` 会把 market / pool / candidates / decision 归入同一 `history_group_id`。
-- [ ] `morning / noon / evening` 补齐 market snapshot history，保留时点差异
-- [ ] `historical_pipeline.py` 优先读取历史信号镜像，缺失时才回退到 proxy replay
+- [x] `morning / noon / evening` 补齐 market snapshot history，保留时点差异
+- [x] `historical_pipeline.py` 优先读取历史信号镜像，缺失时才回退到 proxy replay
 - [x] 新增历史镜像诊断入口：按 `snapshot_date / history_group_id` 查看 market / pool / candidates / decision
-- [ ] 单股验证报告优先引用历史镜像中的真实 miss reason，而不是仅靠事后代理分类
+- [x] 单股验证报告优先引用历史镜像中的真实 miss reason，而不是仅靠事后代理分类
+- 2026-05-19：`morning / noon / evening` 已按各自 phase 归档 market snapshot；
+  `backtest` 默认启用 `--history-mirror`，找不到镜像时回退代理回放；`stock analyze`
+  输出 `history_signal` 并在 findings 中展示历史镜像 miss reason。
 
 ---
 

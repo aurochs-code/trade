@@ -187,6 +187,22 @@ def test_continuation_backtest_help_via_bin_trade():
     assert "--top-n" in result.stdout
 
 
+def test_backtest_help_includes_history_mirror_via_bin_trade():
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "backtest", "--help"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "--history-mirror" in result.stdout
+    assert "--no-history-mirror" in result.stdout
+
+
 def test_continuation_study_help_via_bin_trade():
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"

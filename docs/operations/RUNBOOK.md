@@ -87,6 +87,10 @@ atrade history signal --date 2026-05-19 --code 002138 --json
 没过分数、被否决或只给观察”。如果没有指定 `--history-group-id`，默认读取当天最新
 一组镜像。
 
+`atrade stock analyze CODE --json` 会在 `history_signal` 字段返回最近历史镜像中的
+单股命中/漏判解释，并把真实 miss reason 写入 `findings`。`atrade backtest ...`
+默认优先读取历史镜像；需要只看代理回放时显式加 `--no-history-mirror`。
+
 历史旧事件缺少新证据字段时，不要手工改写 `event_log`。使用 append-only 回填：
 
 ```bash

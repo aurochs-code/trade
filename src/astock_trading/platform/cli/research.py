@@ -35,6 +35,7 @@ def register_research_commands(app: typer.Typer) -> None:
         preset: str = typer.Option("保守验证C", help="策略 preset（对应 strategy.yaml）"),
         initial_cash: float = typer.Option(100000.0, help="初始资金（元）"),
         adjustflag: str = typer.Option("2", help="复权: 2=前复权 1=后复权 3=不复权"),
+        use_history_mirror: bool = typer.Option(True, "--history-mirror/--no-history-mirror", help="优先读取历史信号镜像，缺失时回退代理回放"),
         as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
     ):
         """运行历史回测（生产级四维评分引擎 + baostock 数据）。"""
@@ -47,6 +48,7 @@ def register_research_commands(app: typer.Typer) -> None:
             preset=preset,
             initial_cash=initial_cash,
             adjustflag=adjustflag,
+            use_history_mirror=use_history_mirror,
         )
 
         if "error" in result:

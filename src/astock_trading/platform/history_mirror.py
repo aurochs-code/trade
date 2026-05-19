@@ -110,6 +110,37 @@ def diagnose_signal_history(
     }
 
 
+def load_signal_history_bundle(
+    conn: Any,
+    *,
+    snapshot_date: str,
+    history_group_id: str = "",
+    phases: tuple[str, ...] = ("screener", "scoring"),
+) -> dict[str, Any] | None:
+    """读取可用于历史回放的一组信号镜像，缺失时返回 None。"""
+    if history_group_id:
+        payload = diagnose_signal_history(
+            conn,
+            snapshot_date=snapshot_date,
+            history_group_id=history_group_id,
+        )
+        return payload if payload.get("status") == "ok" else None
+
+    groups = [
+        group
+        for group in _history_groups(conn, snapshot_date)
+        if not phases or group.get("phase") in phases
+    ]
+    if not groups:
+        return None
+    payload = diagnose_signal_history(
+        conn,
+        snapshot_date=snapshot_date,
+        history_group_id=groups[-1]["history_group_id"],
+    )
+    return payload if payload.get("status") == "ok" else None
+
+
 def archive_from_runtime_state(
     conn: Any,
     *,
@@ -130,6 +161,34 @@ def archive_from_runtime_state(
         pool=_pool_snapshot(conn),
         candidates=candidates or [],
         decisions=decisions or [],
+    )
+
+
+def archive_market_signal_snapshot(
+    conn: Any,
+    *,
+    run_id: str,
+    phase: str,
+    market_state: Any,
+    index_data: dict | None = None,
+    history_group_id: str = "",
+) -> str:
+    """归档盘前/午间/收盘看到的大盘信号时点。"""
+    return archive_signal_history(
+        conn,
+        snapshot_date=local_today_str(),
+        history_group_id=history_group_id,
+        run_id=run_id,
+        phase=phase,
+        market={
+            "signal": _market_signal_value(market_state),
+            "multiplier": getattr(market_state, "multiplier", 0.0),
+            "detail": getattr(market_state, "detail", {}) or {},
+            "indices": index_data or {},
+        },
+        pool=_pool_snapshot(conn),
+        candidates=[],
+        decisions=[],
     )
 
 
@@ -258,3 +317,8 @@ def _dominant_signal(rows: list[dict]) -> str:
         if signal:
             return str(signal)
     return ""
+
+
+def _market_signal_value(market_state: Any) -> str:
+    signal = getattr(market_state, "signal", "")
+    return str(getattr(signal, "value", signal))

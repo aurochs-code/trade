@@ -1,5 +1,7 @@
 """Test all four pipelines with mock data (no network)."""
 
+import json
+
 import pytest
 import pandas as pd
 from pathlib import Path
@@ -102,6 +104,20 @@ def ctx(tmp_path):
     conn.close()
 
 
+def _assert_market_history_snapshot(ctx, run_id: str, phase: str) -> None:
+    rows = ctx.conn.execute(
+        """SELECT phase, snapshot_type, payload_json
+           FROM signal_history_snapshots
+           WHERE run_id = ?
+           ORDER BY snapshot_type""",
+        (run_id,),
+    ).fetchall()
+    assert {row["snapshot_type"] for row in rows} == {"market", "pool", "candidates", "decision"}
+    assert {row["phase"] for row in rows} == {phase}
+    market_payload = json.loads(next(row["payload_json"] for row in rows if row["snapshot_type"] == "market"))
+    assert market_payload["signal"] in {"GREEN", "YELLOW", "RED", "CLEAR"}
+
+
 class TestMorningPipeline:
     def test_runs_without_error(self, ctx):
         from astock_trading.pipeline.morning import run
@@ -175,6 +191,16 @@ class TestMorningPipeline:
         assert (Path(ctx.vault_path) / "04-决策" / "今日决策.md").exists()
         assert (Path(ctx.vault_path) / "01-状态" / "持仓" / "持仓概览.md").exists()
 
+    def test_archives_market_history_snapshot(self, ctx, monkeypatch):
+        monkeypatch.setattr("astock_trading.reporting.discord_sender.send_embed", lambda *args, **kwargs: (True, None))
+
+        from astock_trading.pipeline.morning import run
+
+        result = run(ctx, "run_morning_history")
+
+        assert result["history_group_id"].endswith("run_morning_history")
+        _assert_market_history_snapshot(ctx, "run_morning_history", "morning")
+
     def test_skips_standalone_heatmap_when_sector_moves_are_small(self, ctx, monkeypatch):
         calls = []
 
@@ -215,6 +241,16 @@ class TestMorningPipeline:
 
 
 class TestNoonPipeline:
+    def test_archives_market_history_snapshot(self, ctx, monkeypatch):
+        monkeypatch.setattr("astock_trading.reporting.discord_sender.send_embed", lambda *args, **kwargs: (True, None))
+
+        from astock_trading.pipeline.noon import run
+
+        result = run(ctx, "run_noon_history")
+
+        assert result["history_group_id"].endswith("run_noon_history")
+        _assert_market_history_snapshot(ctx, "run_noon_history", "noon")
+
     def test_noon_hot_stock_displays_realtime_quote_before_hot_list_change(self, ctx, monkeypatch):
         monkeypatch.setattr("astock_trading.reporting.discord_sender.send_embed", lambda *args, **kwargs: (True, None))
 
@@ -341,6 +377,16 @@ class TestEveningPipeline:
         from astock_trading.pipeline.evening import run
         result = run(ctx, "run_evening_test")
         assert "signal" in result
+
+    def test_archives_market_history_snapshot(self, ctx, monkeypatch):
+        monkeypatch.setattr("astock_trading.reporting.discord_sender.send_embed", lambda *args, **kwargs: (True, None))
+
+        from astock_trading.pipeline.evening import run
+
+        result = run(ctx, "run_evening_history")
+
+        assert result["history_group_id"].endswith("run_evening_history")
+        _assert_market_history_snapshot(ctx, "run_evening_history", "evening")
 
     def test_includes_opencli_finance_context(self, ctx, monkeypatch):
         monkeypatch.setattr("astock_trading.reporting.discord_sender.send_embed", lambda *args, **kwargs: (True, None))

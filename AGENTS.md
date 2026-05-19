@@ -52,6 +52,7 @@ Use JSON output for automation:
 - `atrade agent-context --json`
 - `atrade doctor --json`
 - `atrade health --json`
+- `atrade backtest CODES START END --history-mirror --json`
 - `atrade diagnose health --json`
 - `atrade diagnose strategy --json`
 - `atrade digest --json`

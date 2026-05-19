@@ -12,6 +12,7 @@ from typing import Any, Awaitable, Callable
 from astock_trading.market.adapters import MXScreenerAdapter
 from astock_trading.market.models import StockSnapshot
 from astock_trading.platform.events import EventStore
+from astock_trading.platform.history_mirror import diagnose_signal_history
 from astock_trading.platform.time import utc_now_iso
 from astock_trading.strategy.decider import build_decider_from_config
 from astock_trading.strategy.models import (
@@ -301,6 +302,7 @@ async def analyze_stock(
         config_version=ctx.config_version,
         candidate_pool=_candidate_pool_row(ctx.conn, code),
         history=_score_history(ctx.conn, code, history_days),
+        history_signal=_recent_history_signal_analysis(ctx.conn, code, history_days),
         decision_inputs={
             "current_exposure_pct": round(current_exposure_pct, 4),
             "weekly_buy_count": weekly_buy_count,
@@ -371,6 +373,46 @@ def _score_history(conn: Any, code: str, days: int) -> list[dict]:
     ]
 
 
+def _recent_history_signal_analysis(conn: Any, code: str, days: int) -> dict | None:
+    try:
+        rows = conn.execute(
+            """SELECT snapshot_date, history_group_id, run_id, phase,
+                      MAX(created_at) AS created_at
+               FROM signal_history_snapshots
+               WHERE phase IN ('screener', 'scoring')
+               GROUP BY snapshot_date, history_group_id, run_id, phase
+               ORDER BY snapshot_date DESC, created_at DESC
+               LIMIT ?""",
+            (max(int(days or 1), 1),),
+        ).fetchall()
+    except Exception:
+        return None
+
+    for row in rows:
+        row_dict = dict(row)
+        payload = diagnose_signal_history(
+            conn,
+            snapshot_date=row_dict["snapshot_date"],
+            history_group_id=row_dict["history_group_id"],
+            code=code,
+        )
+        analysis = payload.get("code_analysis") or {}
+        if analysis:
+            return {
+                "source": "history_mirror",
+                "snapshot_date": payload.get("snapshot_date", ""),
+                "history_group_id": payload.get("history_group_id", ""),
+                "run_id": payload.get("run_id", ""),
+                "phase": payload.get("phase", ""),
+                "decision_action": analysis.get("decision_action", ""),
+                "miss_reason": analysis.get("miss_reason", ""),
+                "candidate": analysis.get("candidate"),
+                "decision": analysis.get("decision"),
+                "pool_item": analysis.get("pool_item"),
+            }
+    return None
+
+
 def _profile_name() -> str:
     import os
 
@@ -389,6 +431,7 @@ def build_stock_analysis_payload(
     config_version: str,
     candidate_pool: dict | None = None,
     history: list[dict] | None = None,
+    history_signal: dict | None = None,
     decision_inputs: dict | None = None,
 ) -> dict:
     """Compose the public, stable stock analysis payload."""
@@ -403,7 +446,7 @@ def build_stock_analysis_payload(
         "veto_reasons": decision.veto_reasons,
         "notes": decision.notes,
     }
-    findings = _findings(snapshot, score, decision, candidate_pool)
+    findings = _findings(snapshot, score, decision, candidate_pool, history_signal)
     recommendations = _recommendations(decision)
 
     return {
@@ -430,6 +473,7 @@ def build_stock_analysis_payload(
         "decision_inputs": decision_inputs or {},
         "candidate_pool": candidate_pool,
         "history": history or [],
+        "history_signal": history_signal,
         "findings": findings,
         "recommendations": recommendations,
     }
@@ -440,6 +484,7 @@ def _findings(
     score: ScoreResult,
     decision: DecisionIntent,
     candidate_pool: dict | None,
+    history_signal: dict | None = None,
 ) -> list[str]:
     findings: list[str] = []
     if snapshot.quote is None:
@@ -458,6 +503,8 @@ def _findings(
         findings.append("not in candidate pool")
     if decision.notes:
         findings.extend(decision.notes)
+    if history_signal and history_signal.get("miss_reason"):
+        findings.append(f"历史镜像：{history_signal['miss_reason']}")
     return findings
 
 
