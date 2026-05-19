@@ -11,6 +11,10 @@ from typing import Any, Optional, Protocol, runtime_checkable
 from astock_trading.execution.models import Order, OrderSide, Position
 from astock_trading.execution.orders import OrderManager
 from astock_trading.execution.positions import PositionManager, PositionProjector
+from astock_trading.platform.domain_events import (
+    TRADE_HYPOTHESIS_RECORDED,
+    TRADE_OUTCOME_RECORDED,
+)
 from astock_trading.platform.events import EventStore
 
 
@@ -276,6 +280,9 @@ class ExecutionService:
         fee_cents: int = 0,
         reason: str = "",
         run_id: str = "",
+        source_event_id: str = "",
+        source_score_event_id: str = "",
+        hypothesis: dict | None = None,
     ) -> Order:
         """
         手动录入已成交的卖出记录（绕过 broker）。
@@ -311,6 +318,20 @@ class ExecutionService:
             shares=shares, price_cents=price_cents,
             run_id=rid, broker="manual",
         )
+        self._record_trade_hypothesis(
+            order_id=order.order_id,
+            code=code,
+            name=name,
+            side="sell",
+            shares=shares,
+            price_cents=price_cents,
+            fee_cents=fee_cents,
+            reason=reason or "manual",
+            run_id=rid,
+            source_event_id=source_event_id,
+            source_score_event_id=source_score_event_id,
+            hypothesis=hypothesis,
+        )
 
         # 成交录入（fill_order 会更新现金）
         self._orders.fill_order(
@@ -321,10 +342,25 @@ class ExecutionService:
         )
 
         # 清仓
-        self._positions.close_position(
+        realized_pnl_cents = self._positions.close_position(
             code=code, shares=shares,
             sell_price_cents=price_cents,
             run_id=rid, reason=reason or "manual",
+        )
+        self._record_trade_outcome(
+            order_id=order.order_id,
+            code=code,
+            name=name,
+            side="sell",
+            shares=shares,
+            fill_price_cents=price_cents,
+            fee_cents=fee_cents,
+            reason=reason or "manual",
+            run_id=rid,
+            source_event_id=source_event_id,
+            source_score_event_id=source_score_event_id,
+            position_after=self._positions.get_position(code),
+            realized_pnl_cents=realized_pnl_cents,
         )
 
         self._notify_trade({
@@ -345,6 +381,9 @@ class ExecutionService:
         run_id: str = "",
         name: str = "",
         style: str = "",
+        source_event_id: str = "",
+        source_score_event_id: str = "",
+        hypothesis: dict | None = None,
     ) -> Order:
         """
         手动录入已成交的买入记录（绕过 broker）。
@@ -372,6 +411,20 @@ class ExecutionService:
             shares=shares, price_cents=price_cents,
             run_id=rid, broker="manual",
         )
+        self._record_trade_hypothesis(
+            order_id=order.order_id,
+            code=code,
+            name=name or code,
+            side="buy",
+            shares=shares,
+            price_cents=price_cents,
+            fee_cents=fee_cents,
+            reason=reason or "manual",
+            run_id=rid,
+            source_event_id=source_event_id,
+            source_score_event_id=source_score_event_id,
+            hypothesis=hypothesis,
+        )
 
         # 成交录入（fill_order 会更新现金）
         self._orders.fill_order(
@@ -382,11 +435,25 @@ class ExecutionService:
         )
 
         # 开仓
-        self._positions.open_position(
+        position = self._positions.open_position(
             code=code, name=name or code, shares=shares,
             avg_cost_cents=price_cents,
             style=style_enum,
             run_id=rid,
+        )
+        self._record_trade_outcome(
+            order_id=order.order_id,
+            code=code,
+            name=name or code,
+            side="buy",
+            shares=shares,
+            fill_price_cents=price_cents,
+            fee_cents=fee_cents,
+            reason=reason or "manual",
+            run_id=rid,
+            source_event_id=source_event_id,
+            source_score_event_id=source_score_event_id,
+            position_after=position,
         )
 
         self._notify_trade({
@@ -416,3 +483,89 @@ class ExecutionService:
                 callback(trade_info)
             except Exception:
                 pass  # hook 失败不影响交易本身
+
+    def _record_trade_hypothesis(
+        self,
+        *,
+        order_id: str,
+        code: str,
+        name: str,
+        side: str,
+        shares: int,
+        price_cents: int,
+        fee_cents: int,
+        reason: str,
+        run_id: str,
+        source_event_id: str = "",
+        source_score_event_id: str = "",
+        hypothesis: dict | None = None,
+    ) -> str:
+        payload = {
+            "order_id": order_id,
+            "code": code,
+            "name": name,
+            "side": side,
+            "shares": shares,
+            "price_cents": price_cents,
+            "fee_cents": fee_cents,
+            "source_event_id": source_event_id,
+            "source_score_event_id": source_score_event_id,
+            "hypothesis": _normalize_hypothesis(hypothesis, reason),
+        }
+        return self._events.append(
+            stream=f"trade:{code}:{order_id}",
+            stream_type="trade",
+            event_type=TRADE_HYPOTHESIS_RECORDED,
+            payload=payload,
+            metadata={"run_id": run_id, "account": "main", "execution": "manual"},
+        )
+
+    def _record_trade_outcome(
+        self,
+        *,
+        order_id: str,
+        code: str,
+        name: str,
+        side: str,
+        shares: int,
+        fill_price_cents: int,
+        fee_cents: int,
+        reason: str,
+        run_id: str,
+        source_event_id: str = "",
+        source_score_event_id: str = "",
+        position_after: Position | None = None,
+        realized_pnl_cents: int | None = None,
+    ) -> str:
+        payload = {
+            "order_id": order_id,
+            "code": code,
+            "name": name,
+            "side": side,
+            "status": "filled",
+            "shares": shares,
+            "fill_price_cents": fill_price_cents,
+            "fee_cents": fee_cents,
+            "reason": reason,
+            "source_event_id": source_event_id,
+            "source_score_event_id": source_score_event_id,
+            "position_after": position_after.to_dict() if position_after else None,
+        }
+        if realized_pnl_cents is not None:
+            payload["realized_pnl_cents"] = realized_pnl_cents
+        return self._events.append(
+            stream=f"trade:{code}:{order_id}",
+            stream_type="trade",
+            event_type=TRADE_OUTCOME_RECORDED,
+            payload=payload,
+            metadata={"run_id": run_id, "account": "main", "execution": "manual"},
+        )
+
+
+def _normalize_hypothesis(hypothesis: dict | None, reason: str) -> dict:
+    payload = dict(hypothesis or {})
+    if reason and not payload.get("manual_reason"):
+        payload["manual_reason"] = reason
+    if reason and not payload.get("thesis"):
+        payload["thesis"] = reason
+    return payload

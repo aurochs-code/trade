@@ -62,18 +62,13 @@ def register_paper_tools(mcp, safe: Callable) -> dict[str, Callable]:
     @safe
     def trade_auto_trade(dry_run: bool = True) -> str:
         """
-        执行模拟盘自动交易（选股→评分→风控→买卖）。
-        dry_run=True 时只记录不下单，False 时真实下单到妙想模拟盘。
-        需要先在 config/strategy.yaml 中启用 auto_trade.enabled: true。
+        执行模拟盘自动交易 pipeline（选股→评分→风控→买卖）。
+        是否启用和 dry_run 均以配置文件为准；MCP 不临时改写运行配置。
         """
         from astock_trading.pipeline.context import build_context
 
         ctx = build_context()
         try:
-            if ctx.config_snapshot and ctx.config_snapshot.data.get("strategy", {}).get("auto_trade"):
-                ctx.config_snapshot.data["strategy"]["auto_trade"]["dry_run"] = dry_run
-                ctx.config_snapshot.data["strategy"]["auto_trade"]["enabled"] = True
-
             run_id = ctx.run_journal.start_run("auto_trade", ctx.config_version)
             from astock_trading.pipeline.auto_trade import run
 

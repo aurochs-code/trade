@@ -1,6 +1,8 @@
 """Tests for MCP Server tools — unit tests calling tool logic directly."""
 
 import json
+from types import SimpleNamespace
+
 import pytest
 
 from astock_trading.platform.db import init_db, connect
@@ -191,6 +193,58 @@ class TestMCPTools:
         assert result["enabled"] is False
         last_run = srv._run_journal.get_last_run("auto_trade")
         assert last_run["status"] == "completed"
+
+    def test_trade_auto_trade_does_not_force_enable_config(self, monkeypatch):
+        from astock_trading.platform.mcp_tools.paper import register_paper_tools
+        import astock_trading.pipeline.auto_trade as auto_trade_pipeline
+        import astock_trading.pipeline.context as pipeline_context
+
+        registered = {}
+
+        class DummyMCP:
+            def tool(self):
+                def decorator(fn):
+                    registered[fn.__name__] = fn
+                    return fn
+
+                return decorator
+
+        class FakeRunJournal:
+            def start_run(self, pipeline_type, config_version):
+                return f"{pipeline_type}_{config_version}"
+
+            def complete_run(self, run_id, artifacts=None):
+                self.completed = {"run_id": run_id, "artifacts": artifacts or {}}
+
+        class FakeConn:
+            def close(self):
+                self.closed = True
+
+        config_snapshot = SimpleNamespace(
+            data={"strategy": {"auto_trade": {"enabled": False, "dry_run": True}}}
+        )
+        fake_ctx = SimpleNamespace(
+            config_snapshot=config_snapshot,
+            config_version="test",
+            run_journal=FakeRunJournal(),
+            conn=FakeConn(),
+        )
+
+        def fake_run(ctx, run_id):
+            return {
+                "enabled": ctx.config_snapshot.data["strategy"]["auto_trade"]["enabled"],
+                "dry_run": ctx.config_snapshot.data["strategy"]["auto_trade"]["dry_run"],
+                "run_id": run_id,
+            }
+
+        monkeypatch.setattr(pipeline_context, "build_context", lambda: fake_ctx)
+        monkeypatch.setattr(auto_trade_pipeline, "run", fake_run)
+
+        register_paper_tools(DummyMCP(), lambda fn: fn)
+        payload = json.loads(registered["trade_auto_trade"](dry_run=False))
+
+        assert payload["enabled"] is False
+        assert payload["dry_run"] is True
 
     def test_trade_run_pipeline_continues_with_data_source_warning(self, setup_mcp, monkeypatch):
         srv = setup_mcp

@@ -39,8 +39,8 @@ report_artifacts (artifact_id PK, run_id, report_type, format, content, delivere
 ### strategy
 | event_type | 说明 |
 |-----------|------|
-| score.calculated | 四维评分完成 |
-| decision.suggested | 交易意图生成 |
+| score.calculated | 四维评分完成；payload 保留各维度分数、说明和 raw_data 证据 |
+| decision.suggested | 交易意图生成；payload 关联 source_score_event_id，并保存决策输入、市场状态和当时规则 |
 | pool.promoted / demoted / removed | 池子变动 |
 
 ### risk
@@ -58,8 +58,19 @@ report_artifacts (artifact_id PK, run_id, report_type, format, content, delivere
 |-----------|------|
 | order.created / filled / cancelled | 订单生命周期 |
 | position.opened / closed | 持仓生命周期 |
+| trade.hypothesis.recorded | 交易前假设，记录人工理由、验证点、失效条件、来源评分/决策事件 |
+| trade.outcome.recorded | 交易后结果，记录成交状态、费用、成交后持仓和已实现盈亏 |
+| trade.review.recorded | 到期交易复盘，记录 MFE/MAE、复盘日收益、假设验证状态和原始 K 线证据 |
+| evidence.backfilled | 历史旧事件证据回填；只追加 legacy payload 和缺失字段说明，不改写原始事件 |
 
 ### platform
 | event_type | 说明 |
 |-----------|------|
 | run.started / completed / failed | 运行生命周期 |
+
+## 证据链约束
+
+- 新事件尽量在原始 payload 中保存原始行情、原始分析、原始决策、交易前假设、交易后结果和复盘证据。
+- 历史旧事件不允许 UPDATE 成“新格式”。回填只能追加 `evidence.backfilled` 或缺失的 `trade.*` 证据事件，并标记 `evidence_status=legacy_partial`。
+- `trade.review.recorded` 的 MFE/MAE 来源是 `market_bars`，payload 中必须保留 `review_evidence.bars`，用于后续人工核对。
+- LLM 摘要不是事实源。最终摘要引用任何判断时必须写 `evidence_id: ...`，证据编号来自 `event_log.event_id`、`market_observations.observation_id` 或其他明确事实编号。

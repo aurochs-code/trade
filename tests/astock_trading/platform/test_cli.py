@@ -199,6 +199,24 @@ def test_data_sources_status_help_via_bin_trade():
     assert "--json" in result.stdout
 
 
+def test_review_trades_help_via_bin_trade():
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "review", "trades", "--help"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "交易后复盘" in result.stdout
+    assert "--record" in result.stdout
+    assert "--as-of" in result.stdout
+    assert "--json" in result.stdout
+
+
 def test_mcp_help_uses_stable_entrypoint():
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
@@ -418,10 +436,10 @@ def test_notify_llm_summary_card_dry_run_json(tmp_path):
 自动执行：禁止
 
 ### 1. 系统与数据质量
-- 数据质量：降级
+- 数据质量：降级（evidence_id: evt_data_1）
 
 ### 4. 盘前 vs 收盘
-- 对比只用于复盘早盘判断质量，不作为自动交易依据
+- 对比只用于复盘早盘判断质量，不作为自动交易依据（evidence_id: evt_compare_1）
 """, encoding="utf-8")
 
     result = CliRunner().invoke(
@@ -445,6 +463,140 @@ def test_notify_llm_summary_card_dry_run_json(tmp_path):
     assert payload["embed"]["fields"][0]["name"] == "今日闭环"
     assert payload["embed"]["fields"][2]["name"] == "🛡️ 系统与数据质量"
     assert payload["notification"]["target"] == "discord"
+
+
+def test_notify_llm_summary_card_accepts_chinese_evidence_label(tmp_path):
+    from astock_trading.platform.cli import app
+
+    payload_path = tmp_path / "llm-summary.md"
+    payload_path.write_text("""## A股收盘复盘｜2026-05-17 15:55
+
+**今日闭环：部分完成**
+自动执行：禁止
+
+### 1. 系统与数据质量
+- 数据质量：降级（证据编号：evt_data_1）
+
+### 4. 盘前 vs 收盘
+- 对比只用于复盘早盘判断质量，不作为自动交易依据（证据编号：evt_compare_1）
+""", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "notify",
+            "llm-summary-card",
+            "--mode",
+            "close",
+            "--payload",
+            str(payload_path),
+            "--dry-run",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "dry_run"
+    assert payload["evidence_validation"]["evidence_ids"] == ["evt_data_1", "evt_compare_1"]
+
+
+def test_notify_llm_summary_card_accepts_unavailable_evidence_marker(tmp_path):
+    from astock_trading.platform.cli import app
+
+    payload_path = tmp_path / "llm-summary.md"
+    payload_path.write_text("""## A股收盘复盘｜2026-05-17 15:55
+
+**今日闭环：部分完成**
+自动执行：禁止
+
+### 1. 系统与数据质量
+- 数据质量：降级
+- 证据编号：暂无可用数据
+
+### 4. 盘前 vs 收盘
+- 对比只用于复盘早盘判断质量，不作为自动交易依据（证据编号：evt_compare_1）
+""", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "notify",
+            "llm-summary-card",
+            "--mode",
+            "close",
+            "--payload",
+            str(payload_path),
+            "--dry-run",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "dry_run"
+    assert payload["evidence_validation"]["evidence_ids"] == ["evt_compare_1"]
+    assert payload["evidence_validation"]["unavailable_sections"] == ["系统与数据质量"]
+
+
+def test_notify_llm_summary_card_rejects_missing_evidence_id(tmp_path):
+    from astock_trading.platform.cli import app
+
+    payload_path = tmp_path / "llm-summary.md"
+    payload_path.write_text("""## A股收盘复盘｜2026-05-17 15:55
+
+**今日闭环：部分完成**
+自动执行：禁止
+
+### 1. 系统与数据质量
+- 数据质量：降级
+""", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "notify",
+            "llm-summary-card",
+            "--mode",
+            "close",
+            "--payload",
+            str(payload_path),
+            "--dry-run",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "failed"
+    assert payload["evidence_validation"]["ok"] is False
+    assert "缺少 evidence_id" in payload["error"]
+
+
+def test_llm_context_markdown_includes_evidence_registry(tmp_path):
+    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.events import EventStore
+    from astock_trading.platform.llm_context import build_llm_context, render_llm_context_markdown
+
+    db_path = tmp_path / "runtime.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        event_id = EventStore(conn).append(
+            "strategy:002138",
+            "strategy",
+            "decision.suggested",
+            {"code": "002138", "action": "WATCH", "summary": "观察"},
+        )
+
+        payload = build_llm_context(conn, mode="close")
+        markdown = render_llm_context_markdown(payload)
+    finally:
+        conn.close()
+
+    assert "## 证据编号清单" in markdown
+    assert f"evidence_id: {event_id}" in markdown
+    assert "每个判断段落必须引用 evidence_id" in markdown
 
 
 def test_daily_inspection_summary_keeps_pending_manual_trade_items():
@@ -539,6 +691,78 @@ def test_market_intel_help_via_bin_trade():
     assert "市场新闻" in result.stdout
     assert "brief" in result.stdout
     assert "search" in result.stdout
+    assert "hot-stocks" in result.stdout
+    assert "northbound" in result.stdout
+    assert "fund-flow" in result.stdout
+    assert "watchlist" in result.stdout
+
+
+def test_risk_position_json_via_bin_trade(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "risk", "position", "002138", "7.5", "15.00", "--json"],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["code"] == "002138"
+    assert payload["score"] == 7.5
+    assert payload["price"] == 15.0
+    assert payload["shares"] > 0
+    assert payload["shares"] % 100 == 0
+
+
+def test_risk_check_json_reports_missing_position_via_bin_trade(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "risk", "check", "002138", "--json"],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload == {"status": "not_held", "code": "002138", "signals": []}
+
+
+def test_market_intel_hot_stocks_json(monkeypatch):
+    from astock_trading.platform.cli import app
+    import astock_trading.platform.cli.market_intel as market_intel_cli
+
+    class FakeMarketService:
+        async def collect_hot_stocks(self, trade_date=None, run_id=None):
+            return [{"code": "002138", "name": "双环传动", "reason": "机器人"}]
+
+    class FakeConn:
+        def close(self):
+            pass
+
+    class FakeContext:
+        market_svc = FakeMarketService()
+        conn = FakeConn()
+
+    monkeypatch.setattr(market_intel_cli, "build_context", lambda: FakeContext())
+
+    result = CliRunner().invoke(
+        app,
+        ["market-intel", "hot-stocks", "--trade-date", "2026-05-17", "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["trade_date"] == "2026-05-17"
+    assert payload["count"] == 1
+    assert payload["stocks"][0]["code"] == "002138"
 
 
 def test_market_intel_brief_json(monkeypatch):
@@ -606,7 +830,7 @@ def test_market_intel_brief_falls_back_to_sector_heatmap(monkeypatch):
         async def collect_hot_sectors(self, limit=10, sector_type="industry", sort="change", run_id=None):
             return []
 
-        async def collect_sector_heatmap(self):
+        async def collect_sector_heatmap(self, run_id=None):
             return [{"name": "机器人", "change_pct": 3.21, "amount": 123000000, "up_count": 42, "down_count": 3}]
 
     class FakeConn:

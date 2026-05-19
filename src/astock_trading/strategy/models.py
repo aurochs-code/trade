@@ -60,6 +60,15 @@ class DimensionScore:
     detail: str
     raw_data: dict = field(default_factory=dict)
 
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "score": self.score,
+            "max_score": self.max_score,
+            "detail": self.detail,
+            "raw_data": self.raw_data,
+        }
+
 
 @dataclass(frozen=True)
 class StrategyRouteEvidence:
@@ -126,6 +135,7 @@ class ScoreResult:
             "style_confidence": self.style_confidence,
             "data_quality": self.data_quality.value,
             "data_missing_fields": self.data_missing_fields,
+            "dimensions": [dimension.to_dict() for dimension in self.dimensions],
             "strategy_routes": [route.to_dict() for route in self.strategy_routes],
             "primary_strategy_route": self.primary_strategy_route,
         }

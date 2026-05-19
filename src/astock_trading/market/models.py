@@ -93,6 +93,7 @@ class StockSnapshot:
     """评分所需的全部数据。由 MarketService 组装，Scorer 消费。"""
     code: str
     name: str
+    observation_id: Optional[str] = None
     quote: Optional[StockQuote] = None
     technical: Optional[TechnicalIndicators] = None
     financial: Optional[FinancialReport] = None

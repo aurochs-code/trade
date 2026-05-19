@@ -41,6 +41,12 @@ Allowed entrypoints:
 
 Do not execute Python files under `src/astock_trading/**/*.py` directly. Those files are internal modules, not operational entrypoints.
 
+CLI is the primary product surface. New operational capability must be exposed
+first as `atrade ... --json` / `bin/trade ... --json`; MCP tools are thin
+agent-client adapters and must not be the only way to access a capability.
+If a useful capability exists only in MCP, add the matching CLI command before
+expanding MCP further.
+
 Use JSON output for automation:
 
 - `atrade agent-context --json`
@@ -49,6 +55,8 @@ Use JSON output for automation:
 - `atrade diagnose health --json`
 - `atrade diagnose strategy --json`
 - `atrade events query --json`
+- `atrade events evidence CODE --json`
+- `atrade events backfill-evidence --json`
 - `atrade runs list --json`
 - `atrade status --json`
 - `atrade screener candidates --json`
@@ -57,8 +65,16 @@ Use JSON output for automation:
 - `atrade screener refresh --json`
 - `atrade screener run --query "..." --json`
 - `atrade stock analyze CODE_OR_NAME --json`
+- `atrade risk check CODE --json`
+- `atrade risk portfolio --json`
+- `atrade risk position CODE SCORE PRICE --json`
+- `atrade market-intel brief --query "..." --json`
+- `atrade market-intel hot-stocks --json`
+- `atrade market-intel northbound --json`
+- `atrade market-intel fund-flow CODE --json`
 - `atrade record-buy CODE SHARES PRICE --yes --json`
 - `atrade record-sell CODE SHARES PRICE --yes --json`
+- `atrade review trades --json`
 - `atrade manual-trades list --json`
 - `atrade paper status --json`
 - `atrade db status --json`

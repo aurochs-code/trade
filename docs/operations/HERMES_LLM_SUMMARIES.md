@@ -44,6 +44,8 @@ Hermes LLM 最终发到 Discord 的正文不要裸露内部字段名、枚举值
 
 `atrade llm-context --mode morning|close` 的 Markdown 输出会附带固定 Discord Markdown 卡片模板。Hermes LLM 最终回复必须保留模板标题和章节顺序，不输出原始 JSON、代码块、内部字段名或 JSON 路径。脚本再用 `atrade notify llm-summary-card` 把该 Markdown 转成 Discord Rich Embed。
 
+LLM 最终回复必须在每个判断段落附带 `evidence_id: ...`。证据编号来自 `atrade llm-context` 输出的“证据编号清单”；没有证据编号的段落只能写“暂无可用数据”。`atrade notify llm-summary-card` 默认会在发送前校验，缺少 `evidence_id` 时返回失败并拒绝发送，避免把 AI 总结当成事实源。
+
 盘前卡片固定顺序：
 
 1. 系统与数据质量

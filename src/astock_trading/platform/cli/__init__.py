@@ -23,6 +23,8 @@ from astock_trading.platform.cli.notifications import notify_app
 from astock_trading.platform.cli.paper import paper_app
 from astock_trading.platform.cli.pipelines import register_pipeline_commands
 from astock_trading.platform.cli.research import register_research_commands
+from astock_trading.platform.cli.review import review_app
+from astock_trading.platform.cli.risk import risk_app
 from astock_trading.platform.cli.runs import runs_app
 from astock_trading.platform.cli.screener import screener_app
 from astock_trading.platform.cli.stock import stock_app
@@ -40,10 +42,12 @@ app.add_typer(events_app)
 app.add_typer(data_sources_app)
 app.add_typer(manual_trades_app)
 app.add_typer(paper_app)
+app.add_typer(risk_app)
 app.add_typer(screener_app)
 app.add_typer(stock_app)
 app.add_typer(notify_app)
 app.add_typer(market_intel_app)
+app.add_typer(review_app)
 register_agent_context(app)
 register_init_command(app)
 register_diagnostics_commands(app)

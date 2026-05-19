@@ -237,6 +237,43 @@ class TestExecutionService:
         assert audit["order"]["status"] == "filled"
         assert audit["position"]["shares"] == 100
 
+    def test_manual_buy_records_hypothesis_and_outcome_evidence(self, svc, event_store):
+        order = svc.record_buy(
+            code="002138",
+            name="双环传动",
+            shares=100,
+            price_cents=1500,
+            fee_cents=5,
+            reason="人工确认突破后回踩不破",
+            run_id="manual_buy_evidence",
+            source_event_id="decision_evt_1",
+            source_score_event_id="score_evt_1",
+            hypothesis={
+                "thesis": "突破后回踩不破，资金流仍为正",
+                "invalidation": "跌破 MA20 或主力连续流出",
+                "review_after_days": 3,
+            },
+        )
+
+        trade_events = event_store.query(stream=f"trade:002138:{order.order_id}")
+        event_types = [event["event_type"] for event in trade_events]
+        assert event_types == ["trade.hypothesis.recorded", "trade.outcome.recorded"]
+
+        hypothesis = trade_events[0]["payload"]
+        assert hypothesis["order_id"] == order.order_id
+        assert hypothesis["side"] == "buy"
+        assert hypothesis["source_event_id"] == "decision_evt_1"
+        assert hypothesis["source_score_event_id"] == "score_evt_1"
+        assert hypothesis["hypothesis"]["thesis"] == "突破后回踩不破，资金流仍为正"
+        assert hypothesis["hypothesis"]["manual_reason"] == "人工确认突破后回踩不破"
+
+        outcome = trade_events[1]["payload"]
+        assert outcome["order_id"] == order.order_id
+        assert outcome["status"] == "filled"
+        assert outcome["fill_price_cents"] == 1500
+        assert outcome["position_after"]["shares"] == 100
+        assert trade_events[1]["metadata"]["run_id"] == "manual_buy_evidence"
+
     def test_manual_buy_audit_detects_position_drift(self, svc, db):
         order = svc.record_buy(
             code="002138",

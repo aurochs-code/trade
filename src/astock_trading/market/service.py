@@ -8,7 +8,8 @@ market/service.py — 市场数据服务
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict, fields, replace
+from dataclasses import asdict, fields, is_dataclass, replace
+from datetime import date, datetime
 import logging
 from typing import Optional
 
@@ -87,6 +88,44 @@ _FINANCIAL_SCORING_FIELDS = ("roe", "revenue_growth", "operating_cash_flow")
 def _financial_from_payload(payload: dict) -> FinancialReport:
     allowed = {field.name for field in fields(FinancialReport)}
     return FinancialReport(**{key: value for key, value in payload.items() if key in allowed})
+
+
+def _jsonable_market_payload(value):
+    if value is None:
+        return None
+    if is_dataclass(value):
+        return _jsonable_market_payload(asdict(value))
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _jsonable_market_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_jsonable_market_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [_jsonable_market_payload(item) for item in value]
+    return value
+
+
+def _snapshot_observation_payload(snapshot: StockSnapshot) -> dict:
+    return {
+        "code": snapshot.code,
+        "name": snapshot.name,
+        "observation_id": snapshot.observation_id,
+        "quote": _jsonable_market_payload(snapshot.quote),
+        "technical": _jsonable_market_payload(snapshot.technical),
+        "financial": _jsonable_market_payload(snapshot.financial),
+        "flow": _jsonable_market_payload(snapshot.flow),
+        "sentiment": _jsonable_market_payload(snapshot.sentiment),
+        "sector": _jsonable_market_payload(snapshot.sector),
+        "completeness": {
+            "has_quote": snapshot.quote is not None,
+            "has_technical": snapshot.technical is not None,
+            "has_financial": snapshot.financial is not None,
+            "has_flow": snapshot.flow is not None,
+            "has_sentiment": snapshot.sentiment is not None,
+            "has_sector": snapshot.sector is not None,
+        },
+    }
 
 
 def _financial_has_data(report: FinancialReport) -> bool:
@@ -254,19 +293,14 @@ class MarketService:
 
             # 存储观测；即使本次抓取全量失败，也保留一次审计痕迹。
             if self._store and run_id:
-                self._store.save_observation(
+                observation_id = self._store.save_observation(
                     source="market_service",
                     kind="snapshot",
                     symbol=code,
-                    payload={
-                        "has_quote": quote is not None,
-                        "has_technical": technical is not None,
-                        "has_financial": fin is not None,
-                        "has_flow": flow is not None,
-                        "has_sentiment": sent is not None,
-                    },
+                    payload=_snapshot_observation_payload(snapshot),
                     run_id=run_id,
                 )
+                snapshot = replace(snapshot, observation_id=observation_id)
 
             return snapshot
 

@@ -35,8 +35,14 @@ def register_agent_context(app: typer.Typer) -> None:
                 "screener_refresh": "atrade screener refresh --json",
                 "screener_run": "atrade screener run --query '...' --json",
                 "stock_analyze": "atrade stock analyze CODE_OR_NAME --json",
+                "risk_check": "atrade risk check CODE --json",
+                "risk_portfolio": "atrade risk portfolio --json",
+                "risk_position": "atrade risk position CODE SCORE PRICE --json",
                 "market_intel": "atrade market-intel brief --query '今天热点新闻和强势板块' --json",
                 "market_news_search": "atrade market-intel search KEYWORD --json",
+                "market_hot_stocks": "atrade market-intel hot-stocks --json",
+                "market_northbound": "atrade market-intel northbound --json",
+                "market_fund_flow": "atrade market-intel fund-flow CODE --json",
                 "record_buy": "atrade record-buy CODE SHARES PRICE --yes --json",
                 "record_sell": "atrade record-sell CODE SHARES PRICE --yes --json",
                 "manual_trades": "atrade manual-trades list --json",
@@ -51,7 +57,7 @@ def register_agent_context(app: typer.Typer) -> None:
             },
             "rules": [
                 "Do not execute Python files under src/astock_trading directly.",
-                "Use CLI/MCP commands for all reads and writes.",
+                "Use CLI commands first; MCP is a thin agent-client adapter.",
                 "Use --json for machine-readable command output.",
             ],
         }

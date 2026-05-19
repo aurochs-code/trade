@@ -25,6 +25,7 @@ def _manual_trade_payload(
     audit: dict,
     position_before,
     position_after,
+    evidence: dict | None = None,
 ) -> dict:
     return {
         "status": "recorded",
@@ -39,6 +40,33 @@ def _manual_trade_payload(
         "audit": audit,
         "position_before": _position_dict(position_before),
         "position_after": _position_dict(position_after),
+        "evidence": evidence or {},
+    }
+
+
+def _build_hypothesis_payload(
+    hypothesis: str = "",
+    invalidation: str = "",
+    review_after_days: int = 0,
+) -> dict:
+    payload = {}
+    if hypothesis:
+        payload["thesis"] = hypothesis
+    if invalidation:
+        payload["invalidation"] = invalidation
+    if review_after_days > 0:
+        payload["review_after_days"] = review_after_days
+    return payload
+
+
+def _trade_evidence_payload(store: EventStore, code: str, order_id: str) -> dict:
+    events = store.query(stream=f"trade:{code}:{order_id}")
+    event_ids = {event["event_type"]: event["event_id"] for event in events}
+    return {
+        "stream": f"trade:{code}:{order_id}",
+        "event_count": len(events),
+        "hypothesis_event_id": event_ids.get("trade.hypothesis.recorded", ""),
+        "outcome_event_id": event_ids.get("trade.outcome.recorded", ""),
     }
 
 
@@ -76,6 +104,11 @@ def register_trading_commands(app: typer.Typer) -> None:
         price: float = typer.Argument(..., help="成交价，如 34.52"),
         fee: float = typer.Option(0, "--fee", help="手续费（元），默认 0"),
         reason: str = typer.Option("manual", "--reason", help="卖出原因"),
+        source_event_id: str = typer.Option("", "--source-event-id", help="来源决策/人工确认事件 ID"),
+        source_score_event_id: str = typer.Option("", "--source-score-event-id", help="来源评分事件 ID"),
+        hypothesis: str = typer.Option("", "--hypothesis", help="交易前假设或卖出假设"),
+        invalidation: str = typer.Option("", "--invalidation", help="假设失效条件"),
+        review_after_days: int = typer.Option(0, "--review-after-days", help="几天后复盘，0 表示不设置"),
         yes: bool = typer.Option(False, "--yes", "-y", help="确认执行（必填）"),
         as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
     ):
@@ -131,10 +164,18 @@ def register_trading_commands(app: typer.Typer) -> None:
                 price_cents=price_cents,
                 fee_cents=fee_cents,
                 reason=reason,
+                source_event_id=source_event_id,
+                source_score_event_id=source_score_event_id,
+                hypothesis=_build_hypothesis_payload(
+                    hypothesis=hypothesis,
+                    invalidation=invalidation,
+                    review_after_days=review_after_days,
+                ),
             )
 
             conn.commit()
             audit = svc.audit_manual_trade_consistency(order.order_id)
+            evidence = _trade_evidence_payload(store, code, order.order_id)
             payload = _manual_trade_payload(
                 side="sell",
                 code=code,
@@ -146,6 +187,7 @@ def register_trading_commands(app: typer.Typer) -> None:
                 audit=audit,
                 position_before=position_before,
                 position_after=svc.get_position(code),
+                evidence=evidence,
             )
             if as_json:
                 json_or_text(payload, True)
@@ -171,6 +213,11 @@ def register_trading_commands(app: typer.Typer) -> None:
         reason: str = typer.Option("manual", "--reason", help="买入原因"),
         name: str = typer.Option("", "--name", help="股票名称（可选）"),
         style: str = typer.Option("growth", "--style", help="风格：growth / momentum / slow_bull"),
+        source_event_id: str = typer.Option("", "--source-event-id", help="来源决策/人工确认事件 ID"),
+        source_score_event_id: str = typer.Option("", "--source-score-event-id", help="来源评分事件 ID"),
+        hypothesis: str = typer.Option("", "--hypothesis", help="交易前假设"),
+        invalidation: str = typer.Option("", "--invalidation", help="假设失效条件"),
+        review_after_days: int = typer.Option(0, "--review-after-days", help="几天后复盘，0 表示不设置"),
         yes: bool = typer.Option(False, "--yes", "-y", help="确认执行（必填）"),
         as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
     ):
@@ -215,10 +262,18 @@ def register_trading_commands(app: typer.Typer) -> None:
                 reason=reason,
                 name=name,
                 style=style,
+                source_event_id=source_event_id,
+                source_score_event_id=source_score_event_id,
+                hypothesis=_build_hypothesis_payload(
+                    hypothesis=hypothesis,
+                    invalidation=invalidation,
+                    review_after_days=review_after_days,
+                ),
             )
 
             conn.commit()
             audit = svc.audit_manual_trade_consistency(order.order_id)
+            evidence = _trade_evidence_payload(store, code, order.order_id)
             payload = _manual_trade_payload(
                 side="buy",
                 code=code,
@@ -230,6 +285,7 @@ def register_trading_commands(app: typer.Typer) -> None:
                 audit=audit,
                 position_before=position_before,
                 position_after=svc.get_position(code),
+                evidence=evidence,
             )
             if as_json:
                 json_or_text(payload, True)

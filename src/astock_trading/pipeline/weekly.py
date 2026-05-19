@@ -22,7 +22,7 @@ from astock_trading.platform.time import iso_to_local, local_date_bounds_utc, lo
 _logger = logging.getLogger(__name__)
 
 
-def _query_filled_orders_this_week(conn, week_start_dt, week_end_dt):
+def _query_filled_orders_this_week(conn, week_start_utc: str, week_after_utc: str):
     """从 projection_orders 表查询本周成交订单（兼容有无 event_store 两种情况）。"""
     rows = conn.execute(
         """
@@ -33,7 +33,7 @@ def _query_filled_orders_this_week(conn, week_start_dt, week_end_dt):
           AND filled_at < ?
         ORDER BY filled_at ASC
         """,
-        (week_start_dt.isoformat(), (week_end_dt + timedelta(days=1)).isoformat()),
+        (week_start_utc, week_after_utc),
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -43,15 +43,16 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
 
     # 1. 本周时间范围
     now = local_now()
-    week_start_dt = now - timedelta(days=now.weekday())
-    week_end_dt = week_start_dt + timedelta(days=6)
-    week_start_display = week_start_dt.strftime("%m/%d")
-    week_end_display = week_end_dt.strftime("%m/%d")
+    week_start_date = now.date() - timedelta(days=now.weekday())
+    week_end_date = week_start_date + timedelta(days=6)
+    week_start_display = week_start_date.strftime("%m/%d")
+    week_end_display = week_end_date.strftime("%m/%d")
 
-    week_start_utc, _ = local_date_bounds_utc(week_start_dt.date())
+    week_start_utc, _ = local_date_bounds_utc(week_start_date)
+    week_after_utc, _ = local_date_bounds_utc(week_end_date + timedelta(days=1))
 
     # 2. 实盘交易统计（从 projection_orders 直接查，绕过 event_store 依赖）
-    week_orders = _query_filled_orders_this_week(ctx.conn, week_start_dt, week_end_dt)
+    week_orders = _query_filled_orders_this_week(ctx.conn, week_start_utc, week_after_utc)
 
     # 平仓盈亏需从 event_store 的 position.closed 事件获取，event_store 不可用时置0
     closed_pnl_by_code: dict[str, list[int]] = {}

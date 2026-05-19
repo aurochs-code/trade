@@ -69,12 +69,17 @@ class StrategyService:
         decisions: list[DecisionIntent] = []
 
         for score_result in results:
+            snapshot = next((s for s in snapshots if s.code == score_result.code), None)
+            score_payload = score_result.to_dict()
+            if snapshot and snapshot.observation_id:
+                score_payload["source_observation_id"] = snapshot.observation_id
+
             # 追加评分事件
-            self._publisher.publish(DomainEvent(
+            score_event_id = self._publisher.publish(DomainEvent(
                 stream=f"strategy:{score_result.code}",
                 stream_type="strategy",
                 event_type=SCORE_CALCULATED,
-                payload=score_result.to_dict(),
+                payload=score_payload,
                 metadata=metadata,
             ))
 
@@ -103,12 +108,18 @@ class StrategyService:
                     "market_multiplier": decision.market_multiplier,
                     "veto_reasons": decision.veto_reasons,
                     "notes": decision.notes,
+                    "source_score_event_id": score_event_id,
+                    "decision_inputs": {
+                        "current_exposure_pct": current_exposure_pct,
+                        "weekly_buy_count": weekly_buy_count,
+                    },
+                    "market_state": _market_state_payload(market_state),
+                    "decision_rules": _decision_rules_payload(self._decider),
                 },
                 metadata=metadata,
             ))
 
             if decision.action == Action.BUY:
-                snapshot = next((s for s in snapshots if s.code == decision.code), None)
                 quote = snapshot.quote if snapshot else None
                 manual_payload = {
                     "status": "pending",
@@ -122,6 +133,7 @@ class StrategyService:
                     "market_signal": decision.market_signal.value,
                     "market_multiplier": decision.market_multiplier,
                     "source_event_id": decision_event_id,
+                    "source_score_event_id": score_event_id,
                 }
                 manual_metadata = {**metadata, "account": "main", "execution": "manual"}
                 manual_event_id = self._publisher.publish(DomainEvent(
@@ -188,3 +200,27 @@ class StrategyService:
         ))
 
         return result
+
+
+def _market_state_payload(market_state: MarketState) -> dict[str, Any]:
+    return {
+        "signal": market_state.signal.value,
+        "multiplier": market_state.multiplier,
+        "detail": market_state.detail,
+    }
+
+
+def _decision_rules_payload(decider: Decider) -> dict[str, Any]:
+    return {
+        "buy_threshold": decider.buy_threshold,
+        "watch_threshold": decider.watch_threshold,
+        "reject_threshold": decider.reject_threshold,
+        "single_max_pct": decider.single_max_pct,
+        "total_max_pct": decider.total_max_pct,
+        "weekly_max": decider.weekly_max,
+        "require_entry_signal_for_buy": decider.require_entry_signal_for_buy,
+        "min_data_quality_for_buy": decider.min_data_quality_for_buy,
+        "max_missing_fields_for_buy": decider.max_missing_fields_for_buy,
+        "critical_missing_fields_for_buy": sorted(decider.critical_missing_fields_for_buy),
+        "min_position_pct_for_buy": decider.min_position_pct_for_buy,
+    }

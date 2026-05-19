@@ -365,6 +365,16 @@ class TestMarketService:
         assert snap.financial.roe == 12.0
         assert snap.flow is not None
         assert snap.sentiment is not None
+        obs = store.get_latest_observation("002138", "snapshot")
+        assert obs["quote"]["close"] == 15.0
+        assert obs["financial"]["roe"] == 12.0
+        assert obs["flow"]["net_inflow_1d"] == 6e8
+        assert obs["completeness"]["has_quote"] is True
+        row = store._conn.execute(
+            "SELECT observation_id FROM market_observations WHERE symbol = ? AND kind = ?",
+            ("002138", "snapshot"),
+        ).fetchone()
+        assert snap.observation_id == row["observation_id"]
 
     def test_get_financial_merges_partial_provider_reports(self, store):
         valuation = MockFinancialProvider({

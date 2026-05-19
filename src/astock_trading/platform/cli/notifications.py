@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 import typer
@@ -21,6 +22,15 @@ from astock_trading.reporting.discord_sender import send_embed
 
 
 notify_app = typer.Typer(name="notify", help="Discord 通知")
+
+_EVIDENCE_ID_RE = re.compile(
+    r"(?:\bevidence_ids?\s*[:：]\s*|证据编号\s*[:：]\s*)([-A-Za-z0-9_.,:; ]+)"
+)
+_UNAVAILABLE_EVIDENCE_RE = re.compile(
+    r"(?:\bevidence_ids?\s*[:：]\s*|证据编号\s*[:：]\s*)(?:暂无可用数据|无|none|n/a)",
+    re.IGNORECASE,
+)
+_SECTION_RE = re.compile(r"(?m)^###\s+\d+[.、]?\s+(.+)$")
 
 
 def _notification_payload(
@@ -48,6 +58,64 @@ def _send_or_dry_run(embed: dict, content: str, dry_run: bool) -> tuple[bool, st
     if dry_run:
         return True, ""
     return send_embed(embed, content=content)
+
+
+def validate_llm_summary_evidence(summary: str) -> dict:
+    """校验 LLM 最终摘要是否按章节附带 evidence_id。"""
+    evidence_ids = _extract_evidence_ids(summary)
+    missing_sections: list[str] = []
+    unavailable_sections: list[str] = []
+    matches = list(_SECTION_RE.finditer(summary))
+    if not matches:
+        return {
+            "ok": bool(evidence_ids),
+            "evidence_ids": evidence_ids,
+            "missing_sections": [] if evidence_ids else ["全文"],
+            "unavailable_sections": [],
+        }
+
+    for idx, match in enumerate(matches):
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(summary)
+        title = match.group(1).strip()
+        body = summary[start:end].strip()
+        if not _section_has_claim(body):
+            continue
+        if not _EVIDENCE_ID_RE.search(body):
+            if _UNAVAILABLE_EVIDENCE_RE.search(body):
+                unavailable_sections.append(title)
+                continue
+            missing_sections.append(title)
+    return {
+        "ok": not missing_sections,
+        "evidence_ids": evidence_ids,
+        "missing_sections": missing_sections,
+        "unavailable_sections": unavailable_sections,
+    }
+
+
+def _extract_evidence_ids(summary: str) -> list[str]:
+    ids: list[str] = []
+    seen: set[str] = set()
+    for match in _EVIDENCE_ID_RE.finditer(summary):
+        raw = match.group(1)
+        for part in re.split(r"[,，、\s]+", raw):
+            evidence_id = part.strip(" .;；()（）[]【】")
+            if evidence_id and evidence_id not in seen:
+                seen.add(evidence_id)
+                ids.append(evidence_id)
+    return ids
+
+
+def _section_has_claim(body: str) -> bool:
+    for line in body.splitlines():
+        text = line.strip()
+        if not text.startswith("-"):
+            continue
+        if "暂无可用数据" in text and not _EVIDENCE_ID_RE.search(text):
+            continue
+        return True
+    return False
 
 
 def _result_json(results_by_name: dict[str, dict], name: str) -> Any:
@@ -209,12 +277,23 @@ def notify_llm_summary_card(
     payload_file: Path = typer.Option(..., "--payload", help="LLM Markdown 摘要文件"),
     mode: str = typer.Option(..., "--mode", help="morning / close / weekly"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只生成卡片，不发送 Discord"),
+    allow_missing_evidence: bool = typer.Option(False, "--allow-missing-evidence", help="应急放行缺少 evidence_id 的摘要"),
     as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
 ):
     """从 Hermes LLM Markdown 摘要生成 Discord Rich Embed。"""
     if mode not in {"morning", "close", "weekly"}:
         raise typer.BadParameter("--mode must be morning, close, or weekly")
     summary = payload_file.read_text(encoding="utf-8")
+    evidence_validation = validate_llm_summary_evidence(summary)
+    if not allow_missing_evidence and not evidence_validation["ok"]:
+        payload = {
+            "status": "failed",
+            "mode": mode,
+            "error": "LLM 摘要缺少 evidence_id，已拒绝发送。",
+            "evidence_validation": evidence_validation,
+        }
+        json_or_text(payload, as_json)
+        raise typer.Exit(1)
     embed = format_llm_summary_embed(mode, summary)
     content = {
         "morning": "A股 LLM 盘前摘要",
@@ -227,7 +306,7 @@ def notify_llm_summary_card(
         dry_run=dry_run,
         ok=ok,
         error=error,
-        extra={"mode": mode},
+        extra={"mode": mode, "evidence_validation": evidence_validation},
     )
     json_or_text(result, as_json)
     if not dry_run and not ok:

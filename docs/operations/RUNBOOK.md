@@ -72,6 +72,50 @@ atrade db migrate-sqlite-to-mysql --sqlite-path PATH_TO_ARCHIVED_SQLITE_DB --jso
 
 `runs cleanup-stale` 默认 dry-run。确认历史 running run 可以清理时再加 `--yes`。
 
+## 证据链查询与人工成交记录
+
+AI 摘要只作为报告层输出，不能当作事实来源。需要复盘某只股票时，先拉取事件证据链：
+
+```bash
+atrade events evidence 002138 --json
+```
+
+该命令会按股票代码汇总评分、决策、人工确认、订单、持仓和交易复盘事件。
+
+历史旧事件缺少新证据字段时，不要手工改写 `event_log`。使用 append-only 回填：
+
+```bash
+atrade events backfill-evidence --json
+atrade events backfill-evidence --code 002138 --apply --json
+```
+
+回填事件会标记 `legacy_partial`，只说明“旧事件当时缺什么、旧 payload 是什么”，不能把事后总结伪造成交易前证据。
+
+人工买卖补录时可以同时写入交易前假设和来源事件：
+
+```bash
+atrade record-buy 002138 100 15.00 --yes --json \
+  --source-event-id DECISION_OR_MANUAL_EVENT_ID \
+  --source-score-event-id SCORE_EVENT_ID \
+  --hypothesis "突破后回踩不破，资金流仍为正" \
+  --invalidation "跌破 MA20 或主力连续流出" \
+  --review-after-days 3
+```
+
+`record-buy` / `record-sell` 会额外写入 `trade.hypothesis.recorded` 和
+`trade.outcome.recorded`，用于把交易前假设、成交后结果和后续复盘证据串起来。
+
+到达 `--review-after-days` 后，使用历史 K 线计算 MFE/MAE 并写入复盘证据：
+
+```bash
+atrade review trades --json
+atrade review trades --record --json
+atrade review trades --code 002138 --as-of 2026-05-18 --record --json
+```
+
+`--record` 会追加 `trade.review.recorded`；不加 `--record` 只预览。复盘依赖
+`market_bars`，没有 K 线时会返回 `insufficient_market_bars`，不要让 LLM 自行猜测 MFE/MAE。
+
 ## launchd 安装
 
 模板在 `config/launchd/`。复制到 `~/Library/LaunchAgents/` 后加载：
@@ -89,6 +133,8 @@ launchctl load ~/Library/LaunchAgents/com.astock_trading.trade.health.plist
 Hermes 定时任务分为两层：原有 `no_agent: true` 任务继续跑确定性流水，LLM 摘要任务只通过 `atrade llm-context --mode ...` 读取上下文后生成中文总结。
 
 安装和任务创建步骤见 `docs/operations/HERMES_LLM_SUMMARIES.md`。Hermes 不应进入交易系统 checkout 或直接运行仓库脚本；不要用 LLM 摘要任务替代盘中风控、止损/止盈、人工确认、pipeline 失败和核心数据源严重异常告警。
+
+`atrade llm-context --mode morning|close|weekly` 会输出“证据编号清单”。Hermes LLM 最终摘要每个判断段落必须写 `evidence_id: ...`；`atrade notify llm-summary-card` 默认会拒绝缺少 `evidence_id` 的摘要。
 
 完整调度节奏和精简目标见 `docs/operations/HERMES_SCHEDULE.md`。
 

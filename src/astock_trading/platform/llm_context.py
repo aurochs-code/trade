@@ -403,6 +403,7 @@ def _discord_card_contract(mode: str) -> dict:
 def _summary_guardrails(mode: str) -> list[str]:
     guardrails = [
         "只基于本上下文总结，不要臆测外部事实。",
+        "每个判断段落必须引用 evidence_id；没有证据编号的内容只能写“暂无可用数据”。",
         "不要调用、建议自动调用或伪造 record-buy / record-sell。",
         "明确区分：观察、核心池、买入意向；观察不等于买入。",
         "热门板块、热门新闻、热门股只作为市场背景和复盘线索，不等于买入依据。",
@@ -732,6 +733,64 @@ def _manual_trade_state(events: list[dict]) -> list[dict]:
     return sorted(by_stream.values(), key=lambda item: item.get("updated_at", ""), reverse=True)
 
 
+def _evidence_registry(sections: dict) -> list[dict]:
+    """从上下文中抽取 LLM 必须引用的证据编号。"""
+    registry: list[dict] = []
+    seen: set[str] = set()
+
+    def add(evidence_id: object, *, source_section: str, kind: str = "", label: str = "") -> None:
+        eid = str(evidence_id or "").strip()
+        if not eid or eid in seen:
+            return
+        seen.add(eid)
+        registry.append({
+            "evidence_id": eid,
+            "source_section": source_section,
+            "kind": kind,
+            "label": label,
+        })
+
+    def walk(value: Any, source_section: str) -> None:
+        if isinstance(value, dict):
+            if value.get("event_id"):
+                add(
+                    value.get("event_id"),
+                    source_section=source_section,
+                    kind=str(value.get("event_type") or "event"),
+                    label=str(value.get("stream") or value.get("code") or ""),
+                )
+            if value.get("requested_event_id"):
+                add(
+                    value.get("requested_event_id"),
+                    source_section=source_section,
+                    kind="manual_trade.requested",
+                    label=str(value.get("code") or value.get("stream") or ""),
+                )
+            if value.get("resolution_event_id"):
+                add(
+                    value.get("resolution_event_id"),
+                    source_section=source_section,
+                    kind="manual_trade.resolution",
+                    label=str(value.get("code") or value.get("stream") or ""),
+                )
+            if value.get("observation_id"):
+                add(
+                    value.get("observation_id"),
+                    source_section=source_section,
+                    kind="market_observation",
+                    label=str(value.get("kind") or value.get("symbol") or ""),
+                )
+            for item in value.values():
+                walk(item, source_section)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item, source_section)
+
+    for name, section in sections.items():
+        walk(section.get("data", section), name)
+    return registry[:120]
+
+
 def _report_paths(mode: str) -> list[tuple[str, str]]:
     paths = [
         ("今日决策", "04-决策/今日决策.md"),
@@ -804,6 +863,7 @@ def build_llm_context(conn: Any, *, mode: str) -> dict:
     }
 
     failed_sections = [name for name, value in sections.items() if value.get("status") != "ok"]
+    evidence_registry = _evidence_registry(sections)
     return {
         "status": "warning" if failed_sections else "ok",
         "context_type": "llm_summary_context",
@@ -819,6 +879,12 @@ def build_llm_context(conn: Any, *, mode: str) -> dict:
         "term_glossary": _term_glossary(),
         "failed_sections": failed_sections,
         "guardrails": _summary_guardrails(mode),
+        "evidence_contract": {
+            "required": True,
+            "field_name": "evidence_id",
+            "rule": "最终摘要中每个判断段落必须引用 evidence_id；没有证据编号的内容只能写“暂无可用数据”。",
+        },
+        "evidence_registry": evidence_registry,
         "sections": sections,
     }
 
@@ -839,6 +905,7 @@ def render_llm_context_markdown(payload: dict) -> str:
         "## 输出要求",
         "",
         "- 最终发到 Discord 的内容必须使用中文业务表述，不要直接展示内部字段名、枚举值或 JSON 路径。",
+        "- 每个判断段落必须引用 evidence_id；没有证据编号的内容只能写“暂无可用数据”。",
         "- 如果必须保留协议名，第一次出现写成“中文释义（内部字段：protocol_name）”，不要单独裸露英文术语。",
         "- 下方代码块是取数依据，不是最终报告模板；请先转义后再总结。",
     ]
@@ -868,6 +935,21 @@ def render_llm_context_markdown(payload: dict) -> str:
     lines.extend(["", "## 内部术语表", "", "以下只用于理解上下文，最终摘要不要复述术语表或裸露内部字段名。"])
     for item in payload.get("term_glossary", []):
         lines.append(f"- `{item['term']}`：{item['display']}")
+
+    lines.extend(["", "## 证据编号清单", ""])
+    registry = payload.get("evidence_registry", []) or []
+    if registry:
+        lines.append("最终摘要引用事实时使用 `evidence_id: ...`，可用编号如下：")
+        for item in registry:
+            lines.append(
+                "- "
+                f"evidence_id: {item.get('evidence_id')} | "
+                f"来源: {SECTION_CN.get(item.get('source_section'), item.get('source_section'))} | "
+                f"类型: {_term_label(item.get('kind'))} | "
+                f"线索: {item.get('label') or '无'}"
+            )
+    else:
+        lines.append("暂无事件证据编号；最终摘要只能写“暂无可用数据”，不能补写判断。")
 
     for name, section in payload.get("sections", {}).items():
         lines.extend(["", f"## {SECTION_CN.get(name, name)}", ""])

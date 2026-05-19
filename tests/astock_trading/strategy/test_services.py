@@ -1,6 +1,7 @@
 """Tests for strategy/service.py and risk/service.py — service layer with event_log"""
 
 import pytest
+from dataclasses import replace
 from datetime import date
 
 from astock_trading.platform.db import init_db, connect
@@ -92,6 +93,60 @@ class TestStrategyService:
         for ev in score_events:
             assert ev["metadata"]["run_id"] == "run_test_001"
             assert ev["metadata"]["config_version"] == "v_test"
+
+    def test_evaluate_persists_raw_scoring_and_decision_evidence(self, event_store):
+        scorer = Scorer(
+            weights=ScoringWeights(technical=3, fundamental=2, flow=2, sentiment=3),
+            veto_rules=[],
+        )
+        decider = Decider(buy_threshold=6.5, watch_threshold=5.0)
+        svc = StrategyService(scorer, decider, event_store)
+
+        market = MarketState(
+            signal=MarketSignal.GREEN,
+            multiplier=0.5,
+            detail={"indices": {"沪深300": {"signal": "GREEN", "change_pct": 1.2}}},
+        )
+        snapshot = replace(
+            _make_snapshot("002138", "双环传动"),
+            observation_id="obs_snapshot_1",
+        )
+        svc.evaluate(
+            [snapshot],
+            market,
+            run_id="run_evidence",
+            config_version="v_test",
+            current_exposure_pct=0.12,
+            weekly_buy_count=1,
+        )
+
+        score_event = event_store.query(event_type="score.calculated")[0]
+        dimensions = {
+            item["name"]: item for item in score_event["payload"]["dimensions"]
+        }
+        assert dimensions["technical"]["raw_data"]["rsi"] == 55.0
+        assert dimensions["technical"]["raw_data"]["volume_ratio"] == 1.8
+        assert dimensions["flow"]["raw_data"]["main_net_inflow"] == 6e8
+        assert score_event["payload"]["source_observation_id"] == "obs_snapshot_1"
+
+        decision_event = event_store.query(event_type="decision.suggested")[0]
+        decision_payload = decision_event["payload"]
+        assert decision_payload["source_score_event_id"] == score_event["event_id"]
+        assert decision_payload["decision_inputs"] == {
+            "current_exposure_pct": 0.12,
+            "weekly_buy_count": 1,
+        }
+        assert decision_payload["market_state"] == {
+            "signal": "GREEN",
+            "multiplier": 0.5,
+            "detail": market.detail,
+        }
+        assert decision_payload["decision_rules"]["buy_threshold"] == 6.5
+        assert decision_payload["decision_rules"]["watch_threshold"] == 5.0
+
+        manual_event = event_store.query(event_type="manual_trade.requested")[0]
+        assert manual_event["payload"]["source_event_id"] == decision_event["event_id"]
+        assert manual_event["payload"]["source_score_event_id"] == score_event["event_id"]
 
     def test_evaluate_creates_pending_manual_trade_for_buy_decision(self, event_store):
         scorer = Scorer(
