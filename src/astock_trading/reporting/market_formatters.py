@@ -6,6 +6,20 @@ reporting/market_formatters.py — 市场数据格式化辅助
 
 from __future__ import annotations
 
+import math
+
+
+def _to_float_or_none(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
 
 def _format_amount_short(amount: float) -> str:
     if amount >= 1e8:
@@ -38,6 +52,25 @@ def _source_label(source: str) -> str:
 
 def _source_list_label(sources: list[str]) -> str:
     return "/".join(_source_label(s) for s in sources if s)
+
+
+def format_hot_stock_change_context(item: dict) -> str:
+    """格式化热榜个股涨跌信息，避免把热榜口径误当实时行情。"""
+    realtime_pct = _to_float_or_none(item.get("realtime_change_pct"))
+    realtime_price = _to_float_or_none(item.get("realtime_price"))
+    hot_list_pct = _to_float_or_none(item.get("change_pct"))
+
+    parts = []
+    if realtime_pct is not None:
+        if realtime_price is not None and realtime_price > 0:
+            parts.append(f"现价 `{realtime_price:.2f}`")
+        parts.append(f"现涨 `{realtime_pct:+.2f}%`")
+        if hot_list_pct is not None:
+            parts.append(f"热榜口径 `{hot_list_pct:+.2f}%`")
+    elif hot_list_pct is not None:
+        parts.append(f"热榜口径 `{hot_list_pct:+.2f}%`(非实时)")
+
+    return " · ".join(parts) if parts else "热榜关注"
 
 
 def _brief_text(item: dict) -> str:
@@ -199,10 +232,10 @@ def format_market_signals_markdown(
         lines.append("")
         lines.append("**跨平台热度**")
         for item in cross_platform_hot_stocks[:5]:
-            pct = item.get("change_pct", 0) or 0
             sources = _source_list_label(item.get("sources", []))
             source_count = item.get("source_count", len(item.get("sources", [])) or 1)
-            lines.append(f"- {_format_stock_label(item)} `{pct:+.2f}%` {source_count}源共振 {sources}".rstrip())
+            change_text = format_hot_stock_change_context(item)
+            lines.append(f"- {_format_stock_label(item)} {change_text} · {source_count}源共振 {sources}".rstrip())
 
     market_announcements = market_announcements or []
     if market_announcements:

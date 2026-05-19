@@ -1,5 +1,9 @@
 from astock_trading.reporting.discord import format_combined_stop_alert_embed, format_sector_heatmap_embed
-from astock_trading.reporting.market_formatters import format_sector_heatmap_markdown, top_sector_movers
+from astock_trading.reporting.market_formatters import (
+    format_market_signals_markdown,
+    format_sector_heatmap_markdown,
+    top_sector_movers,
+)
 
 
 def test_top_sector_movers_returns_largest_losers():
@@ -16,6 +20,22 @@ def test_top_sector_movers_returns_largest_losers():
 
     assert [sector["name"] for sector in gainers] == ["A", "B"]
     assert [sector["name"] for sector in losers] == ["E", "F", "D"]
+
+
+def test_cross_platform_hot_stock_change_is_labeled_as_hot_list_context():
+    lines = format_market_signals_markdown(
+        cross_platform_hot_stocks=[{
+            "name": "巨轮智能",
+            "code": "002031",
+            "change_pct": 9.95,
+            "source_count": 3,
+            "sources": ["xueqiu", "eastmoney", "sinafinance"],
+        }]
+    )
+
+    text = "\n".join(lines)
+
+    assert "热榜口径 `+9.95%`(非实时)" in text
 
 
 def test_sector_heatmap_embed_uses_strongest_losers():

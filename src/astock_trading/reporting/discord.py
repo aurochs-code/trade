@@ -14,6 +14,7 @@ from astock_trading.reporting.market_formatters import (
     _format_stock_label,
     _source_list_label,
     format_announcement_intel_line,
+    format_hot_stock_change_context,
     format_market_intel_line,
     top_sector_movers,
 )
@@ -341,11 +342,11 @@ def _append_market_intel_fields(fields: list[dict], data: dict) -> None:
     if cross_hot:
         lines = []
         for item in cross_hot[:5]:
-            pct = item.get("change_pct", 0) or 0
             source_count = item.get("source_count", len(item.get("sources", [])) or 1)
             sources = _source_list_label(item.get("sources", []))
             source_text = f" · {source_count}源 {sources}" if sources else f" · {source_count}源"
-            lines.append(f"{_format_stock_label(item)} `{pct:+.2f}%`{source_text}")
+            change_text = format_hot_stock_change_context(item)
+            lines.append(f"{_format_stock_label(item)} {change_text}{source_text}")
         fields.append(_field("跨平台热度", "\n".join(lines), inline=False))
 
     finance_flash = data.get("finance_flash", []) or []

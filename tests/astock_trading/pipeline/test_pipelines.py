@@ -4,7 +4,7 @@ import pytest
 import pandas as pd
 from pathlib import Path
 
-from astock_trading.market.models import StockQuote
+from astock_trading.market.models import StockQuote, StockSnapshot
 from astock_trading.platform.db import init_db, connect
 from astock_trading.platform.events import EventStore
 from astock_trading.platform.runs import RunJournal
@@ -214,6 +214,50 @@ class TestMorningPipeline:
 
 
 class TestNoonPipeline:
+    def test_noon_hot_stock_displays_realtime_quote_before_hot_list_change(self, ctx, monkeypatch):
+        monkeypatch.setattr("astock_trading.reporting.discord_sender.send_embed", lambda *args, **kwargs: (True, None))
+
+        async def fake_collect_cross_platform_hot_stocks(limit=10, run_id=None):
+            return [{
+                "code": "002031",
+                "name": "巨轮智能",
+                "change_pct": 9.95,
+                "source_count": 3,
+                "sources": ["xueqiu", "eastmoney", "sinafinance"],
+            }]
+
+        async def fake_collect_intraday_batch(codes, run_id=None):
+            assert codes == [{"code": "002031", "name": "巨轮智能"}]
+            return [StockSnapshot(
+                code="002031",
+                name="巨轮智能",
+                quote=StockQuote(
+                    code="002031",
+                    name="巨轮智能",
+                    price=8.22,
+                    open=8.10,
+                    high=8.53,
+                    low=8.05,
+                    close=8.22,
+                    volume=1000000,
+                    amount=2_801_000_000,
+                    change_pct=0.49,
+                ),
+            )]
+
+        monkeypatch.setattr(ctx.market_svc, "collect_cross_platform_hot_stocks", fake_collect_cross_platform_hot_stocks)
+        monkeypatch.setattr(ctx.market_svc, "collect_intraday_batch", fake_collect_intraday_batch)
+
+        from astock_trading.pipeline.noon import run
+
+        result = run(ctx, "run_noon_hot_quote")
+
+        noon_info = next(field for field in result["discord_embed"]["fields"] if field["name"] == "午间信息")
+        assert "巨轮智能(002031)" in noon_info["value"]
+        assert "现价 `8.22`" in noon_info["value"]
+        assert "现涨 `+0.49%`" in noon_info["value"]
+        assert "热榜口径 `+9.95%`" in noon_info["value"]
+
     def test_includes_opencli_finance_context(self, ctx, monkeypatch):
         monkeypatch.setattr("astock_trading.reporting.discord_sender.send_embed", lambda *args, **kwargs: (True, None))
 

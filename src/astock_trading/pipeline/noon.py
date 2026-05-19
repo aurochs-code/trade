@@ -23,11 +23,61 @@ from astock_trading.reporting.market_formatters import (
     _format_stock_label,
     _source_label,
     _source_list_label,
+    format_hot_stock_change_context,
     format_market_signals_markdown,
     format_sector_heatmap_markdown,
 )
 
 _logger = logging.getLogger(__name__)
+
+
+def _normal_a_stock_code(item: dict) -> str:
+    code = str(item.get("code") or item.get("symbol") or "").strip()
+    return code if code.isdigit() and len(code) == 6 else ""
+
+
+async def _attach_realtime_hot_stock_quotes(market_svc, hot_stocks: list[dict], run_id: str) -> list[dict]:
+    """给热榜个股补实时行情字段；失败时保留原始热榜口径。"""
+    if not hot_stocks:
+        return []
+
+    enriched = [dict(item) for item in hot_stocks]
+    quote_targets = []
+    seen_codes = set()
+    for item in enriched[:5]:
+        code = _normal_a_stock_code(item)
+        if not code or code in seen_codes:
+            continue
+        seen_codes.add(code)
+        quote_targets.append({"code": code, "name": item.get("name") or code})
+
+    if not quote_targets:
+        return enriched
+
+    try:
+        snapshots = await market_svc.collect_intraday_batch(quote_targets, run_id=run_id)
+    except Exception as exc:
+        _logger.warning("[noon] 热榜实时行情校验失败，保留热榜口径: %s", exc)
+        return enriched
+
+    quotes_by_code = {}
+    for snapshot in snapshots:
+        quote = getattr(snapshot, "quote", None)
+        if quote is None:
+            continue
+        code = getattr(snapshot, "code", "") or getattr(quote, "code", "")
+        if code:
+            quotes_by_code[str(code)] = quote
+
+    for item in enriched:
+        quote = quotes_by_code.get(_normal_a_stock_code(item))
+        if quote is None:
+            continue
+        item["realtime_price"] = quote.price
+        item["realtime_change_pct"] = quote.change_pct
+        item["realtime_high"] = quote.high
+        item["realtime_amount"] = quote.amount
+    return enriched
 
 
 def _format_noon_embed(data: dict) -> dict:
@@ -66,9 +116,9 @@ def _format_noon_embed(data: dict) -> dict:
     finance_flash = data.get("finance_flash", []) or []
     info_lines = []
     for item in cross_hot[:3]:
-        pct = item.get("change_pct", 0) or 0
         sources = _source_list_label(item.get("sources", []))
-        info_lines.append(f"{_format_stock_label(item)} `{pct:+.2f}%` · {sources}")
+        change_text = format_hot_stock_change_context(item)
+        info_lines.append(f"{_format_stock_label(item)} {change_text} · {sources}".rstrip(" ·"))
     for item in finance_flash[:3]:
         source = _source_label(item.get("source", ""))
         time = item.get("time", "")
@@ -142,6 +192,9 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         log_lines.extend(["", "### 操作提示"] + [f"- {t}" for t in tips])
 
     cross_platform_hot_stocks = asyncio.run(ctx.market_svc.collect_cross_platform_hot_stocks(run_id=run_id))
+    cross_platform_hot_stocks = asyncio.run(
+        _attach_realtime_hot_stock_quotes(ctx.market_svc, cross_platform_hot_stocks, run_id)
+    )
     finance_flash = asyncio.run(ctx.market_svc.collect_finance_flash(limit=5, run_id=run_id))
     signal_lines = format_market_signals_markdown(
         cross_platform_hot_stocks=cross_platform_hot_stocks,
