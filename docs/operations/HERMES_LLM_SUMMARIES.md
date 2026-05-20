@@ -82,6 +82,7 @@ mkdir -p ~/.hermes/scripts
 cat > ~/.hermes/scripts/a_stock_llm_summary_embed.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+
 mode="${1:-}"
 if [[ "$mode" != "morning" && "$mode" != "close" ]]; then
   echo "usage: a_stock_llm_summary_embed.sh morning|close" >&2
@@ -92,32 +93,108 @@ tmp_prompt="$(mktemp)"
 tmp_summary="$(mktemp)"
 trap 'rm -f "$tmp_prompt" "$tmp_summary"' EXIT
 
+project_dir="${ASTOCK_PROJECT_DIR:-/Users/hxh/Documents/a-stock-trading}"
+log_dir="${ASTOCK_CRON_LOG_DIR:-$project_dir/logs/cron}"
+mkdir -p "$log_dir"
+log_file="$log_dir/a_stock_llm_${mode}_$(date +%Y%m%d_%H%M%S).log"
+log() { printf '[%s] %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$*" >> "$log_file"; }
+fail() {
+  local step="$1"
+  local code="${2:-1}"
+  log "failed step=${step} exit=${code}"
+  echo "${title}: ${step} failed exit=${code} log=${log_file}" >&2
+  exit "$code"
+}
+
 if [[ "$mode" == "morning" ]]; then
+  title="A股 LLM 盘前摘要"
   limit="1400"
 else
+  title="A股 LLM 收盘复盘"
   limit="1600"
 fi
 
-context="$(atrade llm-context --mode "$mode")"
+log "start mode=${mode}"
+context="$(atrade llm-context --mode "$mode" 2>>"$log_file")" || fail "llm-context" "$?"
+log "llm-context ok bytes=${#context}"
 
 cat > "$tmp_prompt" <<PROMPT
 你是 A 股交易系统的中文审计员。只基于下方 atrade 上下文和报告片段总结，不要臆测外部事实，不要调用或建议自动调用买入/卖出记录命令。
-最终只输出 Discord 卡片正文，保留上下文中“Discord 卡片输出模板”的标题和章节顺序。系统与数据质量必须是第 1 区块。
-热门板块、热门新闻、热门股只作为市场背景和复盘线索，不得直接升级为买入意向。输出控制在 ${limit} 中文字以内。
+
+输出要求：
+- 最终只输出 Discord 卡片正文，不要输出解释、代码块、JSON、内部字段名、枚举值或 JSON 路径。
+- 必须保留上下文中“Discord 卡片输出模板”的标题和章节顺序。
+- 系统与数据质量必须是第 1 区块，并明确说明它对判断可信度的影响。
+- 热门板块、热门新闻、热门股只作为市场背景和复盘线索，不得直接升级为买入意向。
+- 明确区分观察、核心池、买入意向；观察不等于买入。
+- 数据质量降级时，不要提高执行信心。
+- 每个有判断或结论的章节至少保留 1 个中文证据编号，格式为“证据编号：...”；只在上下文明确给出与该事实同一数据段或同一标的的编号时引用；没有明确对应编号时写“证据编号：暂无可用数据”，不要借用不相关编号；最终不要输出 evidence_id 字段名。
+- 末尾只选择 1 句上下文提供的风控短句，不要堆砌多句。
+- 输出控制在 ${limit} 中文字以内，面向人工确认。
+
+下方是取数上下文：
 
 ${context}
 PROMPT
 
-hermes --ignore-rules -z "$(cat "$tmp_prompt")" > "$tmp_summary"
+hermes --ignore-rules -z "$(cat "$tmp_prompt")" > "$tmp_summary" 2>>"$log_file" || fail "hermes-llm" "$?"
+log "hermes-llm ok bytes=$(wc -c < "$tmp_summary" | tr -d ' ')"
+python3 - "$tmp_summary" <<'PY' 2>>"$log_file" || fail "normalize-evidence" "$?"
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+section_re = re.compile(r"(?m)^(#{2,3})\s+(.+?)\s*$")
+matches = list(section_re.finditer(text))
+if not matches:
+    print("normalize-evidence autofilled_sections=none", file=sys.stderr)
+    sys.exit(0)
+parts = []
+pos = 0
+autofilled_sections = []
+for i, m in enumerate(matches):
+    body_start = m.end()
+    end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+    parts.append(text[pos:body_start])
+    body = text[body_start:end]
+    has_claim = any(line.strip().startswith(("-", "•")) for line in body.splitlines())
+    if has_claim and "证据编号" not in body:
+        sep = "" if body.endswith("\n") else "\n"
+        body = f"{body}{sep}- 证据编号：暂无可用数据\n"
+        autofilled_sections.append(m.group(2).strip())
+    parts.append(body)
+    pos = end
+parts.append(text[pos:])
+path.write_text("".join(parts), encoding="utf-8")
+if autofilled_sections:
+    print(
+        "normalize-evidence autofilled_sections=" + " | ".join(autofilled_sections),
+        file=sys.stderr,
+    )
+else:
+    print("normalize-evidence autofilled_sections=none", file=sys.stderr)
+PY
+log "normalize-evidence ok"
+
+if [[ ! -s "$tmp_summary" ]]; then
+  fail "empty-summary" 1
+fi
 
 notify_args=(notify llm-summary-card --mode "$mode" --payload "$tmp_summary" --json)
 if [[ "${ASTOCK_LLM_CARD_DRY_RUN:-}" == "1" ]]; then
   notify_args+=(--dry-run)
 fi
-send_result="$(atrade "${notify_args[@]}")"
+send_result="$(atrade "${notify_args[@]}" 2>>"$log_file")" || {
+  rc="$?"
+  printf '%s\n' "$send_result" >> "$log_file"
+  fail "notify-llm-summary-card" "$rc"
+}
+printf '%s\n' "$send_result" >> "$log_file"
+log "notify ok"
 
 printf '[SILENT]\n'
-printf '%s\n' "$send_result"
 EOF
 
 cat > ~/.hermes/scripts/a_stock_llm_morning_embed.sh <<'EOF'
@@ -142,11 +219,19 @@ ASTOCK_LLM_CARD_DRY_RUN=1 ~/.hermes/scripts/a_stock_llm_morning_embed.sh
 ASTOCK_LLM_CARD_DRY_RUN=1 ~/.hermes/scripts/a_stock_llm_close_embed.sh
 ```
 
-脚本内部会调用一次 `hermes -z`，建议把 Hermes cron 脚本超时设置到 300 秒：
+成功时脚本 stdout 只输出 `[SILENT]`，避免 Hermes 原生 `deliver=discord`
+再发送一条普通文本。详细 `atrade notify ... --json` 结果、失败步骤和自动补齐
+证据编号的章节会写入：
+
+```text
+/Users/hxh/Documents/a-stock-trading/logs/cron/a_stock_llm_<mode>_*.log
+```
+
+脚本内部会调用一次 `hermes -z`，建议把 Hermes cron 脚本超时设置到 900 秒：
 
 ```yaml
 cron:
-  script_timeout_seconds: 300
+  script_timeout_seconds: 900
 ```
 
 ## 创建 Hermes LLM cron

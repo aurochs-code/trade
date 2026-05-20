@@ -81,7 +81,7 @@ def diagnose_signal_history(
         """SELECT snapshot_type, payload_json, run_id, phase, created_at
            FROM signal_history_snapshots
            WHERE snapshot_date = ? AND history_group_id = ?
-           ORDER BY created_at, snapshot_type""",
+           ORDER BY snapshot_type""",
         (date_value, selected_group_id),
     ).fetchall()
     sections = _empty_sections()
@@ -194,7 +194,7 @@ def archive_market_signal_snapshot(
 
 def _market_snapshot(conn: Any) -> dict:
     rows = conn.execute(
-        """SELECT index_symbol, name, signal, price_cents, change_pct, ma20_pct, ma60_pct, updated_at
+        """SELECT index_symbol, name, `signal`, price_cents, change_pct, ma20_pct, ma60_pct, updated_at
            FROM projection_market_state
            ORDER BY index_symbol"""
     ).fetchall()
