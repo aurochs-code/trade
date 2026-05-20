@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
@@ -430,33 +431,53 @@ class AkShareFinancialAdapter:
 class AkShareFlowAdapter:
     """AkShare 资金流向 adapter。"""
 
+    def __init__(self) -> None:
+        self._last_errors: dict[str, dict] = {}
+
     async def get_fund_flow(self, code: str, days: int = 5) -> Optional[FundFlow]:
         return await asyncio.to_thread(self._get_flow_sync, code, days)
 
+    def get_last_error(self, code: str) -> dict | None:
+        return self._last_errors.get(code)
+
     def _get_flow_sync(self, code: str, days: int) -> Optional[FundFlow]:
         """主入口：优先东财，失败则降级到腾讯 tick。"""
-        try:
-            if is_hk_code(code):
-                return None
-            # 1. 优先东财资金流
-            result = self._get_flow_from_em(code, days)
-            if result is not None:
-                return result
-            # 2. 东财断线，降级到腾讯分笔
-            result = self._get_flow_from_tx_tick(code)
-            if result is not None:
-                return result
+        self._last_errors.pop(code, None)
+        if is_hk_code(code):
             return None
-        except Exception:
-            return None
+        subsource_errors: list[dict] = []
 
-    def _get_flow_from_em(self, code: str, days: int) -> Optional[FundFlow]:
+        # 1. 优先东财资金流
+        result = self._get_flow_from_em(code, days, subsource_errors)
+        if result is not None:
+            return result
+        # 2. 东财断线，降级到腾讯分笔
+        result = self._get_flow_from_tx_tick(code, subsource_errors)
+        if result is not None:
+            return result
+
+        self._last_errors[code] = self._build_flow_error(subsource_errors)
+        return None
+
+    def _get_flow_from_em(
+        self,
+        code: str,
+        days: int,
+        subsource_errors: list[dict] | None = None,
+    ) -> Optional[FundFlow]:
         """东财资金流接口，失败时返回 None（ caller 会尝试腾讯降级）。"""
         try:
             import akshare as ak
             market = "sh" if code.startswith(("6", "9")) else "sz"
             df = ak.stock_individual_fund_flow(stock=code, market=market)
             if df is None or df.empty:
+                self._append_subsource_error(
+                    subsource_errors,
+                    subsource="eastmoney_fund_flow",
+                    status="em_fund_flow_empty",
+                    error_type="EmptyResult",
+                    error_message="东财资金流返回空结果",
+                )
                 return None
 
             recent = df.tail(days)
@@ -476,10 +497,21 @@ class AkShareFlowAdapter:
                 net_inflow_1d=total_net,
                 consecutive_outflow_days=outflow_streak,
             )
-        except Exception:
+        except Exception as exc:
+            self._append_subsource_error(
+                subsource_errors,
+                subsource="eastmoney_fund_flow",
+                status="em_fund_flow_failed",
+                error_type=exc.__class__.__name__,
+                error_message=str(exc),
+            )
             return None
 
-    def _get_flow_from_tx_tick(self, code: str) -> Optional[FundFlow]:
+    def _get_flow_from_tx_tick(
+        self,
+        code: str,
+        subsource_errors: list[dict] | None = None,
+    ) -> Optional[FundFlow]:
         """腾讯分笔成交降级：按买盘/卖盘汇总估算主力净流入。
 
         适用场景：东财 stock_individual_fund_flow 接口断线时。
@@ -494,8 +526,17 @@ class AkShareFlowAdapter:
             else:
                 symbol = f"sz{code}"
 
-            df = ak.stock_zh_a_tick_tx_js(symbol=symbol)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="正在下载数据，请稍等")
+                df = ak.stock_zh_a_tick_tx_js(symbol=symbol)
             if df is None or df.empty:
+                self._append_subsource_error(
+                    subsource_errors,
+                    subsource="tencent_tick",
+                    status="tx_tick_empty",
+                    error_type="EmptyResult",
+                    error_message="腾讯 tick 返回空结果",
+                )
                 return None
 
             buy_mask = df["性质"].str.contains("买", na=False)
@@ -520,8 +561,46 @@ class AkShareFlowAdapter:
                 main_force_ratio=main_force_ratio,
                 consecutive_outflow_days=outflow_streak,
             )
-        except Exception:
+        except Exception as exc:
+            self._append_subsource_error(
+                subsource_errors,
+                subsource="tencent_tick",
+                status="tx_tick_failed",
+                error_type=exc.__class__.__name__,
+                error_message=str(exc),
+            )
             return None
+
+    def _append_subsource_error(
+        self,
+        subsource_errors: list[dict] | None,
+        *,
+        subsource: str,
+        status: str,
+        error_type: str,
+        error_message: str,
+    ) -> None:
+        if subsource_errors is None:
+            return
+        subsource_errors.append({
+            "subsource": subsource,
+            "status": status,
+            "error_type": error_type,
+            "error_message": error_message,
+        })
+
+    def _build_flow_error(self, subsource_errors: list[dict]) -> dict:
+        statuses = [str(item.get("status", "")) for item in subsource_errors if item]
+        has_failed = any(status.endswith("_failed") for status in statuses)
+        return {
+            "status": "provider_error" if has_failed else "empty",
+            "error_type": "AkShareFlowSubsourcesFailed" if has_failed else "EmptyResult",
+            "error_message": (
+                "AkShare 资金流子源全部失败: "
+                + (", ".join(statuses) if statuses else "no_subsource_result")
+            ),
+            "subsource_errors": subsource_errors,
+        }
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 
 from astock_trading.market.store import MarketStore
-from astock_trading.platform.agent_diagnostics import diagnose_health
+from astock_trading.platform.agent_diagnostics import diagnose_health, propose_agent_trade_plan
 from astock_trading.platform.db import connect, init_db
 
 
@@ -92,6 +92,35 @@ def test_diagnose_health_distinguishes_empty_pool_from_missing_market_data(tmp_p
         conn.close()
 
 
+def test_diagnose_health_reports_unresolved_provider_failures(tmp_path):
+    db_path = tmp_path / "runtime.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "hot_stocks", "2026-05-18", {"items": [1]})
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_observation("akshare", "fund_flow", "000858", {"items": [1]})
+        store.save_provider_failure(
+            source="BaiduFundFlowAdapter",
+            target_kind="fund_flow",
+            symbol="603215",
+            status="parse_error",
+            error_type="JSONDecodeError",
+            error_message="Expecting value",
+            run_id="run_unresolved_provider_failure",
+        )
+
+        payload = diagnose_health(conn)
+
+        assert payload["status"] == "warning"
+        assert payload["inputs"]["data_sources"]["provider_failures"]["unresolved_recent"] == 1
+        assert "1 个 provider 失败未被 fallback 补齐" in payload["findings"]
+        assert "查看 data_sources.provider_failures.unresolved，先修未补齐的数据源再扩大交易判断" in payload["recommendations"]
+    finally:
+        conn.close()
+
+
 def test_explain_run_missing_json_via_bin_trade(tmp_path):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
@@ -132,6 +161,69 @@ def test_propose_plan_json_is_non_executing_via_bin_trade(tmp_path):
     assert payload["plan_type"] == "agent_trade_plan"
     assert "diagnostics" in payload
     assert "actions" in payload
+
+
+def test_propose_plan_inspects_data_sources_when_latest_l1_coverage_is_degraded(tmp_path):
+    from astock_trading.platform.history_mirror import archive_signal_history
+    from astock_trading.platform.time import utc_now_iso
+
+    db_path = tmp_path / "runtime.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "hot_stocks", "2026-05-20", {"items": [1]})
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_observation("AkShareFlowAdapter", "fund_flow", "002138", {"items": [1]})
+        conn.execute(
+            """INSERT INTO projection_candidate_pool
+               (code, pool_tier, name, score, added_at, last_scored_at, streak_days, note)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("002138", "core", "双环传动", 7.1, utc_now_iso(), utc_now_iso(), 2, "测试核心候选"),
+        )
+        store.save_observation(
+            "market_service",
+            "snapshot",
+            "002138",
+            {
+                "code": "002138",
+                "name": "双环传动",
+                "completeness": {
+                    "has_quote": True,
+                    "has_technical": True,
+                    "has_financial": True,
+                    "has_flow": False,
+                    "has_sentiment": True,
+                    "has_sector": True,
+                },
+            },
+            run_id="screener_l1_degraded",
+        )
+        archive_signal_history(
+            conn,
+            snapshot_date="2026-05-20",
+            history_group_id="hist_l1_degraded",
+            run_id="screener_l1_degraded",
+            phase="screener",
+            candidates=[
+                {
+                    "code": "002138",
+                    "name": "双环传动",
+                    "total_score": 7.1,
+                    "data_quality": "degraded",
+                    "data_missing_fields": ["资金流"],
+                }
+            ],
+        )
+
+        payload = propose_agent_trade_plan(conn)
+
+        assert payload["execution_allowed"] is False
+        assert payload["data_source_blockers"][0]["reason"] == "latest_screener_l1_coverage_degraded"
+        assert payload["actions"][0]["type"] == "inspect_data_sources"
+        assert "逐票 L1 覆盖不足" in payload["actions"][0]["reason"]
+    finally:
+        conn.close()
 
 
 def test_llm_context_json_runs_from_outside_checkout(tmp_path):

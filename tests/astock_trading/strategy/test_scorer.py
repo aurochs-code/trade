@@ -215,6 +215,15 @@ def test_degraded_data_quality(scorer):
     assert len(result.data_missing_fields) > 0
 
 
+def test_missing_flow_degrades_data_quality(scorer):
+    s = _make_snapshot(flow=None)
+
+    result = scorer.score(s)
+
+    assert result.data_quality == DataQuality.DEGRADED
+    assert "资金流" in result.data_missing_fields
+
+
 def test_batch_score_sorted(scorer):
     s1 = _make_snapshot(code="001", name="高分股",
                         technical=TechnicalIndicators(

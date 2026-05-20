@@ -10,6 +10,7 @@ from typing import Optional
 import typer
 
 from astock_trading.market.adapters import MXScreenerAdapter
+from astock_trading.market.models import StockSnapshot
 from astock_trading.pipeline.context import build_context
 from astock_trading.platform.cli.common import json_or_text
 from astock_trading.platform.db import connect
@@ -47,7 +48,7 @@ def _candidate_rows(conn, tier: str = "all", limit: int = 100) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def _score_stock_list(ctx, stock_list: list[dict], run_id: str) -> list[dict]:
+def _score_stock_batch(ctx, stock_list: list[dict], run_id: str) -> dict:
     snapshots = asyncio.run(
         ctx.market_svc.collect_batch(stock_list, run_id, include_sector_context=True)
     )
@@ -61,7 +62,84 @@ def _score_stock_list(ctx, stock_list: list[dict], run_id: str) -> list[dict]:
     )
     scores = [event["payload"] for event in events]
     scores.sort(key=lambda item: item.get("total_score", 0), reverse=True)
-    return scores
+    return {"scores": scores, "snapshots": snapshots}
+
+
+def _score_stock_list(ctx, stock_list: list[dict], run_id: str) -> list[dict]:
+    result = _score_stock_batch(ctx, stock_list, run_id)
+    return result["scores"]
+
+
+SOURCE_QUALITY_DIMENSIONS = (
+    ("quote", "行情", "L1"),
+    ("technical", "技术指标", "L1"),
+    ("financial", "基本面", "L1"),
+    ("flow", "资金流", "L1"),
+    ("sentiment", "舆情", "L2"),
+    ("sector", "行业上下文", "L2"),
+)
+
+
+def _coverage_rate(available: int, total: int) -> float:
+    if total <= 0:
+        return 0.0
+    return round(available / total, 4)
+
+
+def _build_source_quality_summary(snapshots: list[StockSnapshot], scores: list[dict]) -> dict:
+    total = len(snapshots)
+    coverage = {}
+    warnings = []
+
+    for attr, label, layer in SOURCE_QUALITY_DIMENSIONS:
+        available = sum(1 for snapshot in snapshots if getattr(snapshot, attr, None) is not None)
+        row = {
+            "label": label,
+            "layer": layer,
+            "available": available,
+            "missing": max(total - available, 0),
+            "total": total,
+            "rate": _coverage_rate(available, total),
+        }
+        coverage[attr] = row
+
+        if total and layer == "L1" and available < total:
+            warnings.append(
+                f"逐票{label}覆盖率 {row['rate']:.1%}，可能影响评分和买入门禁。"
+            )
+
+    quality_counter = Counter(str(score.get("data_quality", "ok")) for score in scores)
+    missing_counter: Counter = Counter()
+    for score in scores:
+        missing_counter.update(str(item) for item in (score.get("data_missing_fields") or []))
+
+    if total == 0:
+        status = "warning"
+        warnings.append("本次没有可评分样本，无法评估逐票数据覆盖率。")
+    elif coverage["quote"]["available"] == 0 or coverage["technical"]["available"] == 0:
+        status = "failed"
+    elif warnings or quality_counter.get("degraded", 0) or quality_counter.get("error", 0):
+        status = "warning"
+    else:
+        status = "ok"
+
+    if quality_counter.get("degraded", 0) or quality_counter.get("error", 0):
+        warnings.append(
+            f"评分数据质量存在降级 {quality_counter.get('degraded', 0)} 条、错误 {quality_counter.get('error', 0)} 条。"
+        )
+
+    return {
+        "status": status,
+        "sample_size": total,
+        "score_count": len(scores),
+        "coverage": coverage,
+        "score_quality_counts": dict(sorted(quality_counter.items())),
+        "missing_fields": [
+            {"field": key, "count": count}
+            for key, count in sorted(missing_counter.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "warnings": warnings,
+    }
 
 
 def _watch_threshold(ctx, explicit_threshold: Optional[float]) -> float:
@@ -816,7 +894,13 @@ def _run_screener(
             if row.get("code") or row.get("代码")
         ][:score_limit]
         if not stock_list:
-            payload = {"query": q, "screened": len(raw_results), "scored": [], "added_to_watch": []}
+            payload = {
+                "query": q,
+                "screened": len(raw_results),
+                "scored": [],
+                "added_to_watch": [],
+                "source_quality": _build_source_quality_summary([], []),
+            }
             json_or_text(payload, as_json)
             return
 
@@ -829,7 +913,10 @@ def _run_screener(
                     stock_list.append({"code": code, "name": row.get("name") or ""})
                     seen.add(code)
 
-        scores = _score_stock_list(ctx, stock_list, run_id)
+        score_batch = _score_stock_batch(ctx, stock_list, run_id)
+        scores = score_batch["scores"]
+        snapshots = score_batch["snapshots"]
+        source_quality = _build_source_quality_summary(snapshots, scores)
         threshold = _watch_threshold(ctx, watch_threshold)
         if refresh_pool:
             pool_changes = _apply_candidate_pool_refresh(ctx, scores, run_id)
@@ -858,6 +945,7 @@ def _run_screener(
             "threshold": threshold,
             "scored": scores,
             "added_to_watch": added,
+            "source_quality": source_quality,
         }
         if pool_changes:
             payload["pool_changes"] = pool_changes
@@ -1008,9 +1096,18 @@ def screener_score(
     ctx = build_context()
     try:
         run_id = f"screener_score_{local_now_str('%H%M%S')}"
-        scores = _score_stock_list(ctx, stock_list, run_id)
+        score_batch = _score_stock_batch(ctx, stock_list, run_id)
+        scores = score_batch["scores"]
         ctx.obsidian.write_scoring_report(run_id, scores)
-        json_or_text({"run_id": run_id, "scores": scores, "count": len(scores)}, as_json)
+        json_or_text(
+            {
+                "run_id": run_id,
+                "scores": scores,
+                "count": len(scores),
+                "source_quality": _build_source_quality_summary(score_batch["snapshots"], scores),
+            },
+            as_json,
+        )
     finally:
         ctx.conn.close()
 

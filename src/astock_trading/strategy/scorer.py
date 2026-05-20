@@ -155,7 +155,13 @@ class Scorer:
     def _score_fundamental(self, s: StockSnapshot) -> DimensionScore:
         f = s.financial
         if f is None:
-            return DimensionScore("fundamental", 0, 3.0, "数据缺失", {"data_quality": "error"})
+            return DimensionScore(
+                "fundamental",
+                0,
+                3.0,
+                "数据缺失",
+                {"data_quality": "error", "missing_fields": ["基本面"]},
+            )
 
         missing: list[str] = []
         if f.roe is None:
@@ -432,10 +438,16 @@ class Scorer:
         self, s: StockSnapshot, fund_dim: DimensionScore
     ) -> tuple[DataQuality, list[str]]:
         dq = fund_dim.raw_data.get("data_quality", "ok")
-        missing = fund_dim.raw_data.get("missing_fields", [])
+        missing = list(fund_dim.raw_data.get("missing_fields", []))
+        if s.quote is None:
+            missing.append("行情")
+        if s.technical is None:
+            missing.append("技术指标")
+        if s.flow is None:
+            missing.append("资金流")
         if dq == "error":
             return DataQuality.ERROR, missing
-        if dq == "degraded":
+        if dq == "degraded" or missing:
             return DataQuality.DEGRADED, missing
         return DataQuality.OK, []
 

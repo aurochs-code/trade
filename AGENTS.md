@@ -57,6 +57,7 @@ Use JSON output for automation:
 - `atrade dashboard snapshot --json`
 - `atrade diagnose health --json`
 - `atrade diagnose strategy --json`
+- `atrade data-sources diagnose --json`
 - `atrade digest --json`
 - `atrade events query --json`
 - `atrade events evidence CODE --json`

@@ -22,6 +22,7 @@ from astock_trading.market.models import (
     StockSnapshot,
     TechnicalIndicators,
 )
+from astock_trading.market.source_router import SourceAttempt, SourceRouteOptions, SourceRouter
 from astock_trading.market.store import MarketStore
 from astock_trading.market.indicators import compute_technical_indicators
 from astock_trading.market.adapters import is_hk_code
@@ -83,11 +84,27 @@ def _fetch_sina_intraday(codes: list[str]) -> dict[str, Optional[StockQuote]]:
 _logger = logging.getLogger(__name__)
 
 _FINANCIAL_SCORING_FIELDS = ("roe", "revenue_growth", "operating_cash_flow")
+_DEFAULT_SOURCE_ROUTE_OPTIONS = {
+    "fund_flow": SourceRouteOptions(timeout_seconds=15.0, retries=0, max_failures=3, cooldown_seconds=300.0),
+    "signal": SourceRouteOptions(timeout_seconds=10.0, retries=0, max_failures=3, cooldown_seconds=300.0),
+}
 
 
 def _financial_from_payload(payload: dict) -> FinancialReport:
     allowed = {field.name for field in fields(FinancialReport)}
     return FinancialReport(**{key: value for key, value in payload.items() if key in allowed})
+
+
+def _provider_name(provider) -> str:
+    return provider.__class__.__name__
+
+
+def _provider_last_error(provider, symbol: str) -> dict | None:
+    getter = getattr(provider, "get_last_error", None)
+    if callable(getter):
+        error = getter(symbol)
+        return error if isinstance(error, dict) else None
+    return None
 
 
 def _jsonable_market_payload(value):
@@ -234,6 +251,8 @@ class MarketService:
         sentiment_providers: list = None,
         store: Optional[MarketStore] = None,
         concurrency: int = 5,
+        source_router: SourceRouter | None = None,
+        source_route_options: dict[str, SourceRouteOptions] | None = None,
     ):
         self._market = market_providers or []
         self._financial = financial_providers or []
@@ -241,6 +260,11 @@ class MarketService:
         self._sentiment = sentiment_providers or []
         self._store = store
         self._sem = asyncio.Semaphore(concurrency)
+        self._source_router = source_router or SourceRouter()
+        self._source_route_options = {
+            **_DEFAULT_SOURCE_ROUTE_OPTIONS,
+            **(source_route_options or {}),
+        }
 
     async def collect_snapshot(
         self,
@@ -256,7 +280,7 @@ class MarketService:
         async with self._sem:
             quote_task = self._get_quote(code)
             fin_task = self._get_financial(code)
-            flow_task = self._get_flow(code)
+            flow_task = self._get_flow(code, run_id=run_id)
             sent_task = self._get_sentiment(code, name)
 
             quote, fin, flow, sent = await asyncio.gather(
@@ -646,24 +670,96 @@ class MarketService:
             return merged
         return empty_fallback
 
-    async def _get_flow(self, code: str) -> Optional[FundFlow]:
+    def _record_provider_failure(
+        self,
+        provider,
+        *,
+        target_kind: str,
+        symbol: str,
+        status: str,
+        error_type: str,
+        error_message: str,
+        run_id: Optional[str] = None,
+        details: dict | None = None,
+    ) -> None:
+        if not self._store:
+            return
+        self._store.save_provider_failure(
+            source=_provider_name(provider),
+            target_kind=target_kind,
+            symbol=symbol,
+            status=status,
+            error_type=error_type,
+            error_message=error_message,
+            run_id=run_id,
+            details=details,
+        )
+
+    def _record_route_failures(
+        self,
+        attempts: list[SourceAttempt],
+        *,
+        target_kind: str,
+        symbol: str,
+        run_id: Optional[str] = None,
+    ) -> None:
+        for attempt in attempts:
+            if attempt.status == "ok":
+                continue
+            diagnostic = (
+                _provider_last_error(attempt.provider, symbol)
+                if attempt.status == "empty"
+                else {}
+            ) or {}
+            status = str(diagnostic.get("status") or attempt.status)
+            error_type = str(diagnostic.get("error_type") or attempt.error_type or "ProviderFailure")
+            error_message = str(
+                diagnostic.get("error_message")
+                or attempt.error_message
+                or f"{attempt.provider_name} 返回失败状态 {attempt.status}"
+            )
+            self._record_provider_failure(
+                attempt.provider,
+                target_kind=target_kind,
+                symbol=symbol,
+                status=status,
+                error_type=error_type,
+                error_message=error_message,
+                run_id=run_id,
+                details={
+                    "attempt": attempt.attempt,
+                    "route_status": attempt.status,
+                    "latency_ms": attempt.latency_ms,
+                    **({"provider_diagnostic": diagnostic} if diagnostic else {}),
+                },
+            )
+
+    async def _get_flow(self, code: str, run_id: Optional[str] = None) -> Optional[FundFlow]:
         """从 flow providers 获取资金流向，自动 fallback。"""
         # 不走缓存，直接从 provider 拉取；成功后保存观测供健康检查和审计使用。
-        for provider in self._flow:
-            try:
-                result = await provider.get_fund_flow(code)
-                if result is not None:
-                    if self._store:
-                        self._store.save_observation(
-                            source=provider.__class__.__name__,
-                            kind="fund_flow",
-                            symbol=code,
-                            payload=asdict(result),
-                        )
-                    return result
-            except Exception as e:
-                _logger.info(f"[flow] {code} provider failed: {e}")
-                continue
+        route = await self._source_router.route(
+            kind="fund_flow",
+            providers=self._flow,
+            call=lambda provider: provider.get_fund_flow(code),
+            is_success=lambda result: result is not None,
+            options=self._source_route_options["fund_flow"],
+        )
+        self._record_route_failures(
+            route.attempts,
+            target_kind="fund_flow",
+            symbol=code,
+            run_id=run_id,
+        )
+        if route.status == "ok":
+            if self._store:
+                self._store.save_observation(
+                    source=_provider_name(route.provider),
+                    kind="fund_flow",
+                    symbol=code,
+                    payload=asdict(route.value),
+                    run_id=run_id,
+                )
+            return route.value
         return None
 
     async def _get_sentiment(self, code: str, name: str) -> Optional[SentimentData]:
@@ -776,26 +872,36 @@ class MarketService:
         run_id: Optional[str] = None,
         **kwargs,
     ):
-        for provider in self._market:
-            method = getattr(provider, method_name, None)
-            if method is None:
-                continue
-            try:
-                data = await method(*args, **kwargs)
-                if data:
-                    if self._store:
-                        payload = data if isinstance(data, dict) else {"items": data}
-                        self._store.save_observation(
-                            source=provider.__class__.__name__,
-                            kind=kind,
-                            symbol=symbol,
-                            payload=payload,
-                            run_id=run_id,
-                        )
-                    return data
-            except Exception as e:
-                _logger.warning(f"[{method_name}] provider failed: {e}")
-                continue
+        providers = [
+            provider
+            for provider in self._market
+            if getattr(provider, method_name, None) is not None
+        ]
+        route = await self._source_router.route(
+            kind=kind,
+            providers=providers,
+            call=lambda provider: getattr(provider, method_name)(*args, **kwargs),
+            is_success=lambda data: bool(data),
+            options=self._source_route_options.get(kind, self._source_route_options["signal"]),
+        )
+        self._record_route_failures(
+            route.attempts,
+            target_kind=kind,
+            symbol=symbol,
+            run_id=run_id,
+        )
+        if route.status == "ok":
+            data = route.value
+            if self._store:
+                payload = data if isinstance(data, dict) else {"items": data}
+                self._store.save_observation(
+                    source=_provider_name(route.provider),
+                    kind=kind,
+                    symbol=symbol,
+                    payload=payload,
+                    run_id=run_id,
+                )
+            return data
         return default
 
     async def collect_hot_stocks(self, trade_date: str | None = None, run_id: Optional[str] = None) -> list[dict]:

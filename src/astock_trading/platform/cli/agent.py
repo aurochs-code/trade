@@ -26,6 +26,7 @@ def register_agent_context(app: typer.Typer) -> None:
                 "health": "atrade health --json",
                 "diagnose_health": "atrade diagnose health --json",
                 "diagnose_strategy": "atrade diagnose strategy --json",
+                "data_sources_diagnose": "atrade data-sources diagnose --json",
                 "events": "atrade events query --json",
                 "runs": "atrade runs list --json",
                 "portfolio": "atrade status --json",

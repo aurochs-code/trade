@@ -31,6 +31,25 @@ def _decode_json(value: Any) -> Any:
     return value
 
 
+def _jsonable_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _jsonable_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_jsonable_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_jsonable_value(item) for item in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if hasattr(value, "item") and value.__class__.__module__.startswith("numpy"):
+        return value.item()
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
 class MarketRepository:
     """Repository for market observations and bars."""
 
@@ -53,9 +72,47 @@ class MarketRepository:
             """INSERT OR REPLACE INTO market_observations
                (observation_id, source, kind, symbol, observed_at, run_id, payload_json)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (obs_id, source, kind, symbol, now, run_id, json.dumps(payload, ensure_ascii=False)),
+            (
+                obs_id,
+                source,
+                kind,
+                symbol,
+                now,
+                run_id,
+                json.dumps(_jsonable_value(payload), ensure_ascii=False),
+            ),
         )
         return obs_id
+
+    def save_provider_failure(
+        self,
+        source: str,
+        target_kind: str,
+        symbol: str,
+        status: str,
+        error_type: str,
+        error_message: str,
+        run_id: Optional[str] = None,
+        details: Optional[dict] = None,
+    ) -> str:
+        """记录 provider 失败，不计入目标数据源的成功观测。"""
+        payload = {
+            "source": source,
+            "target_kind": target_kind,
+            "symbol": symbol,
+            "status": status,
+            "error_type": error_type,
+            "error_message": error_message,
+        }
+        if details:
+            payload["details"] = details
+        return self.save_observation(
+            source=source,
+            kind="provider_failure",
+            symbol=symbol,
+            payload=payload,
+            run_id=run_id,
+        )
 
     def get_latest_observation(
         self,

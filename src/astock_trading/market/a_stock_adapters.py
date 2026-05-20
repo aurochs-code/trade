@@ -79,11 +79,16 @@ class BaiduFundFlowAdapter:
 
     def __init__(self, request_get=None):
         self._request_get = request_get
+        self._last_errors: dict[str, dict] = {}
 
     async def get_fund_flow(self, code: str, days: int = 5) -> Optional[FundFlow]:
         if is_hk_code(code):
             return None
+        self._last_errors.pop(code, None)
         return await asyncio.to_thread(self._get_fund_flow_sync, code, days)
+
+    def get_last_error(self, code: str) -> dict | None:
+        return self._last_errors.get(code)
 
     def _get(self, url: str, headers: dict, timeout: int = 10):
         if self._request_get is not None:
@@ -126,7 +131,13 @@ class BaiduFundFlowAdapter:
         )
         try:
             d = self._get(url, headers=_BAIDU_PAE_HEADERS, timeout=10).json()
-            if str(d.get("ResultCode", -1)) != "0":
+            result_code = str(d.get("ResultCode", -1))
+            if result_code != "0":
+                self._last_errors[code] = {
+                    "status": "provider_error",
+                    "error_type": "ResultCode",
+                    "error_message": f"ResultCode={result_code}",
+                }
                 return []
             result = d.get("Result") or {}
             return [{
@@ -140,7 +151,12 @@ class BaiduFundFlowAdapter:
                 "mainIn": item.get("extMainIn", ""),
             } for item in result.get("list", [])]
         except Exception as e:
-            _logger.warning(f"[BaiduFundFlow] {code} 历史资金流获取失败: {e}")
+            self._last_errors[code] = {
+                "status": "parse_error" if "Expecting value" in str(e) else "provider_error",
+                "error_type": e.__class__.__name__,
+                "error_message": str(e),
+            }
+            _logger.debug(f"[BaiduFundFlow] {code} 历史资金流获取失败: {e}")
             return []
 
     def get_fund_flow_realtime_sync(self, code: str, trade_date: str) -> list[dict]:
@@ -171,7 +187,7 @@ class BaiduFundFlowAdapter:
                     })
             return rows
         except Exception as e:
-            _logger.warning(f"[BaiduFundFlow] {code} 实时资金流获取失败: {e}")
+            _logger.debug(f"[BaiduFundFlow] {code} 实时资金流获取失败: {e}")
             return []
 
 
@@ -605,7 +621,7 @@ class AStockSignalAdapter:
                 })
             return rows
         except Exception as e:
-            _logger.warning(f"[AStockSignal] 东财行业对比获取失败: {e}")
+            _logger.debug(f"[AStockSignal] 东财行业对比获取失败: {e}")
             return []
 
     def _get_industry_comparison_sina(self) -> list[dict]:
@@ -630,7 +646,7 @@ class AStockSignalAdapter:
                 })
             return rows
         except Exception as e:
-            _logger.warning(f"[AStockSignal] 新浪行业对比获取失败: {e}")
+            _logger.debug(f"[AStockSignal] 新浪行业对比获取失败: {e}")
             return []
 
     def _get_industry_comparison_ths(self, top_n: int = 20) -> dict:
@@ -652,7 +668,7 @@ class AStockSignalAdapter:
                 })
             return {"top": rows[:top_n], "bottom": rows[-top_n:], "total": len(rows)}
         except Exception as e:
-            _logger.warning(f"[AStockSignal] 行业对比获取失败: {e}")
+            _logger.debug(f"[AStockSignal] 行业对比获取失败: {e}")
             return {"top": [], "bottom": [], "total": 0}
 
     async def get_announcements(self, code: str, limit: int = 20) -> list[dict]:

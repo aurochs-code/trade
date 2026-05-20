@@ -98,6 +98,257 @@ def test_evaluate_data_source_health_tracks_financial_observations(tmp_path):
         conn.close()
 
 
+def test_evaluate_data_source_health_includes_recent_provider_failures(tmp_path):
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "hot_stocks", "2026-05-15", {"items": [1]})
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_observation("baidu", "fund_flow", "000858", {"net_inflow_1d": 1})
+        store.save_provider_failure(
+            source="BaiduFundFlowAdapter",
+            target_kind="fund_flow",
+            symbol="603215",
+            status="parse_error",
+            error_type="JSONDecodeError",
+            error_message="Expecting value",
+            run_id="run_flow_failure",
+            details={
+                "provider_diagnostic": {
+                    "subsource_errors": [
+                        {"subsource": "eastmoney_fund_flow", "status": "em_fund_flow_failed"}
+                    ]
+                }
+            },
+        )
+
+        result = evaluate_data_source_health(conn, now=now)
+
+        failures = result["provider_failures"]
+        assert failures["total_recent"] == 1
+        assert failures["unresolved_recent"] == 1
+        assert failures["resolved_recent"] == 0
+        assert failures["by_source"] == {"BaiduFundFlowAdapter": 1}
+        assert failures["by_target_kind"] == {"fund_flow": 1}
+        assert failures["by_unresolved_source"] == {"BaiduFundFlowAdapter": 1}
+        assert failures["recent"][0]["source"] == "BaiduFundFlowAdapter"
+        assert failures["recent"][0]["target_kind"] == "fund_flow"
+        assert failures["recent"][0]["status"] == "parse_error"
+        assert failures["recent"][0]["symbol"] == "603215"
+        assert failures["recent"][0]["details"]["provider_diagnostic"]["subsource_errors"] == [
+            {"subsource": "eastmoney_fund_flow", "status": "em_fund_flow_failed"}
+        ]
+        assert failures["recent"][0]["resolved_by_fallback"] is False
+        assert failures["unresolved"][0]["symbol"] == "603215"
+    finally:
+        conn.close()
+
+
+def test_evaluate_data_source_health_marks_provider_failure_resolved_by_fallback(tmp_path):
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "hot_stocks", "2026-05-15", {"items": [1]})
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_observation("baidu", "fund_flow", "000858", {"net_inflow_1d": 1})
+        store.save_provider_failure(
+            source="BaiduFundFlowAdapter",
+            target_kind="fund_flow",
+            symbol="603215",
+            status="parse_error",
+            error_type="JSONDecodeError",
+            error_message="Expecting value",
+            run_id="run_flow_fallback",
+        )
+        store.save_observation(
+            "AkShareFlowAdapter",
+            "fund_flow",
+            "603215",
+            {"net_inflow_1d": 1, "main_force_ratio": 0.2},
+            run_id="run_flow_fallback",
+        )
+        failure_time = (now - timedelta(minutes=2)).isoformat()
+        success_time = (now - timedelta(minutes=1)).isoformat()
+        conn.execute(
+            "UPDATE market_observations SET observed_at = ? WHERE kind = 'provider_failure'",
+            (failure_time,),
+        )
+        conn.execute(
+            """UPDATE market_observations
+               SET observed_at = ?
+               WHERE kind = 'fund_flow' AND symbol = '603215'""",
+            (success_time,),
+        )
+
+        result = evaluate_data_source_health(conn, now=now)
+
+        failures = result["provider_failures"]
+        assert failures["total_recent"] == 1
+        assert failures["unresolved_recent"] == 0
+        assert failures["resolved_recent"] == 1
+        assert failures["by_unresolved_source"] == {}
+        assert failures["unresolved"] == []
+        assert failures["recent"][0]["resolved_by_fallback"] is True
+        assert failures["recent"][0]["resolved_source"] == "AkShareFlowAdapter"
+        assert failures["recent"][0]["resolved_observed_at"] == success_time
+    finally:
+        conn.close()
+
+
+def test_evaluate_data_source_health_resolves_legacy_success_without_run_id(tmp_path):
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "hot_stocks", "2026-05-15", {"items": [1]})
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_observation("baidu", "fund_flow", "000858", {"net_inflow_1d": 1})
+        store.save_provider_failure(
+            source="BaiduFundFlowAdapter",
+            target_kind="fund_flow",
+            symbol="603215",
+            status="parse_error",
+            error_type="JSONDecodeError",
+            error_message="Expecting value",
+            run_id="run_legacy_fallback",
+        )
+        store.save_observation(
+            "AkShareFlowAdapter",
+            "fund_flow",
+            "603215",
+            {"net_inflow_1d": 1, "main_force_ratio": 0.2},
+        )
+        failure_time = (now - timedelta(minutes=2)).isoformat()
+        success_time = (now - timedelta(minutes=1)).isoformat()
+        conn.execute(
+            "UPDATE market_observations SET observed_at = ? WHERE kind = 'provider_failure'",
+            (failure_time,),
+        )
+        conn.execute(
+            """UPDATE market_observations
+               SET observed_at = ?, run_id = NULL
+               WHERE kind = 'fund_flow' AND symbol = '603215'""",
+            (success_time,),
+        )
+
+        result = evaluate_data_source_health(conn, now=now)
+
+        failures = result["provider_failures"]
+        assert failures["unresolved_recent"] == 0
+        assert failures["resolved_recent"] == 1
+        assert failures["recent"][0]["resolved_by_fallback"] is True
+        assert failures["recent"][0]["resolved_source"] == "AkShareFlowAdapter"
+    finally:
+        conn.close()
+
+
+def test_evaluate_data_source_health_resolves_later_success_from_same_provider(tmp_path):
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "hot_stocks", "2026-05-15", {"items": [1]})
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_observation("baidu", "fund_flow", "000858", {"net_inflow_1d": 1})
+        store.save_provider_failure(
+            source="AkShareFlowAdapter",
+            target_kind="fund_flow",
+            symbol="603215",
+            status="provider_error",
+            error_type="TypeError",
+            error_message="Object of type int64 is not JSON serializable",
+            run_id="run_same_provider_recovered",
+        )
+        store.save_observation(
+            "AkShareFlowAdapter",
+            "fund_flow",
+            "603215",
+            {"net_inflow_1d": 1, "main_force_ratio": 0.2},
+        )
+        failure_time = (now - timedelta(minutes=2)).isoformat()
+        success_time = (now - timedelta(minutes=1)).isoformat()
+        conn.execute(
+            "UPDATE market_observations SET observed_at = ? WHERE kind = 'provider_failure'",
+            (failure_time,),
+        )
+        conn.execute(
+            """UPDATE market_observations
+               SET observed_at = ?, run_id = NULL
+               WHERE kind = 'fund_flow' AND symbol = '603215'""",
+            (success_time,),
+        )
+
+        result = evaluate_data_source_health(conn, now=now)
+
+        failures = result["provider_failures"]
+        assert failures["unresolved_recent"] == 0
+        assert failures["resolved_recent"] == 1
+        assert failures["recent"][0]["resolved_by_fallback"] is True
+        assert failures["recent"][0]["resolved_source"] == "AkShareFlowAdapter"
+    finally:
+        conn.close()
+
+
+def test_evaluate_data_source_health_resolves_later_success_from_new_run(tmp_path):
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "hot_stocks", "2026-05-15", {"items": [1]})
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_observation("baidu", "fund_flow", "000858", {"net_inflow_1d": 1})
+        store.save_provider_failure(
+            source="AkShareFlowAdapter",
+            target_kind="fund_flow",
+            symbol="603215",
+            status="timeout",
+            error_type="TimeoutError",
+            error_message="provider 超时",
+            run_id="run_before_fix",
+        )
+        store.save_observation(
+            "AkShareFlowAdapter",
+            "fund_flow",
+            "603215",
+            {"net_inflow_1d": 1, "main_force_ratio": 0.2},
+            run_id="run_after_fix",
+        )
+        failure_time = (now - timedelta(minutes=2)).isoformat()
+        success_time = (now - timedelta(minutes=1)).isoformat()
+        conn.execute(
+            "UPDATE market_observations SET observed_at = ? WHERE kind = 'provider_failure'",
+            (failure_time,),
+        )
+        conn.execute(
+            """UPDATE market_observations
+               SET observed_at = ?
+               WHERE kind = 'fund_flow' AND symbol = '603215'""",
+            (success_time,),
+        )
+
+        result = evaluate_data_source_health(conn, now=now)
+
+        failures = result["provider_failures"]
+        assert failures["unresolved_recent"] == 0
+        assert failures["resolved_recent"] == 1
+        assert failures["recent"][0]["resolved_by_fallback"] is True
+        assert failures["recent"][0]["resolved_source"] == "AkShareFlowAdapter"
+    finally:
+        conn.close()
+
+
 def test_evaluate_data_source_health_warns_on_stale_candidate_pool(tmp_path):
     db_path = tmp_path / "test.db"
     init_db(db_path)

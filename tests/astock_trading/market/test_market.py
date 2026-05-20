@@ -1,7 +1,13 @@
 """Tests for market/store.py and market/service.py"""
 
 import asyncio
+import json
+import logging
 import subprocess
+import sys
+from types import SimpleNamespace
+import warnings
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -17,6 +23,7 @@ from astock_trading.market.models import (
 )
 from astock_trading.market.store import MarketStore
 from astock_trading.market.service import MarketService
+from astock_trading.market.source_router import SourceRouteOptions
 from astock_trading.platform.db import init_db, connect
 
 
@@ -65,6 +72,26 @@ class TestMarketStore:
     def test_no_observation(self, store):
         result = store.get_latest_observation("999999", "quote")
         assert result is None
+
+    def test_save_provider_failure_observation(self, store):
+        observation_id = store.save_provider_failure(
+            source="BaiduFundFlowAdapter",
+            target_kind="fund_flow",
+            symbol="000858",
+            status="parse_error",
+            error_type="JSONDecodeError",
+            error_message="Expecting value",
+            run_id="run_provider_failure",
+        )
+
+        result = store.get_latest_observation("000858", "provider_failure")
+
+        assert observation_id
+        assert result["source"] == "BaiduFundFlowAdapter"
+        assert result["target_kind"] == "fund_flow"
+        assert result["status"] == "parse_error"
+        assert result["error_type"] == "JSONDecodeError"
+        assert result["error_message"] == "Expecting value"
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +205,26 @@ class MockFlowProvider:
         return self._data.get(code)
 
 
+class SlowFlowProvider:
+    def __init__(self, flow):
+        self._flow = flow
+        self.calls = 0
+
+    async def get_fund_flow(self, code, days=5):
+        self.calls += 1
+        await asyncio.sleep(1)
+        return self._flow
+
+
+class TrackingFailingFlowProvider:
+    def __init__(self):
+        self.calls = 0
+
+    async def get_fund_flow(self, code, days=5):
+        self.calls += 1
+        raise ConnectionError("mock fail")
+
+
 class MockSentimentProvider:
     async def search_news(self, query):
         return SentimentData(score=2.0, detail="mock")
@@ -220,6 +267,113 @@ class TestMarketService:
         assert cached["net_inflow_1d"] == 100.0
         assert cached["main_force_ratio"] == 1.2
 
+    def test_get_flow_saves_success_observation_run_id(self, store):
+        flow = FundFlow(net_inflow_1d=100.0, main_force_ratio=1.2)
+        svc = MarketService(flow_providers=[MockFlowProvider({"000858": flow})], store=store)
+
+        asyncio.get_event_loop().run_until_complete(
+            svc._get_flow("000858", run_id="run_flow_success")
+        )
+
+        row = store._conn.execute(
+            """SELECT run_id
+               FROM market_observations
+               WHERE symbol = ? AND kind = ?
+               ORDER BY observed_at DESC
+               LIMIT 1""",
+            ("000858", "fund_flow"),
+        ).fetchone()
+        assert row["run_id"] == "run_flow_success"
+
+    def test_get_flow_records_provider_failure(self, store):
+        svc = MarketService(flow_providers=[FailingProvider()], store=store)
+
+        result = asyncio.get_event_loop().run_until_complete(svc._get_flow("000858"))
+
+        failure = store.get_latest_observation("000858", "provider_failure")
+        assert result is None
+        assert failure["source"] == "FailingProvider"
+        assert failure["target_kind"] == "fund_flow"
+        assert failure["status"] == "provider_error"
+        assert failure["error_type"] == "ConnectionError"
+        assert "mock fail" in failure["error_message"]
+
+    def test_get_flow_times_out_slow_provider_and_falls_back(self, store):
+        slow = SlowFlowProvider(FundFlow(net_inflow_1d=1.0))
+        flow = FundFlow(net_inflow_1d=100.0, main_force_ratio=1.2)
+        svc = MarketService(
+            flow_providers=[slow, MockFlowProvider({"000858": flow})],
+            store=store,
+            source_route_options={
+                "fund_flow": SourceRouteOptions(timeout_seconds=0.01),
+            },
+        )
+
+        result = asyncio.get_event_loop().run_until_complete(
+            svc._get_flow("000858", run_id="run_flow_timeout")
+        )
+
+        failure = store.get_latest_observation("000858", "provider_failure")
+        cached = store.get_latest_observation("000858", "fund_flow")
+        assert result == flow
+        assert slow.calls == 1
+        assert failure["source"] == "SlowFlowProvider"
+        assert failure["status"] == "timeout"
+        assert failure["error_type"] == "TimeoutError"
+        assert failure["details"]["attempt"] == 1
+        assert cached["net_inflow_1d"] == 100.0
+
+    def test_get_flow_skips_circuit_open_provider(self, store):
+        bad = TrackingFailingFlowProvider()
+        flow = FundFlow(net_inflow_1d=100.0)
+        svc = MarketService(
+            flow_providers=[bad, MockFlowProvider({"000858": flow})],
+            store=store,
+            source_route_options={
+                "fund_flow": SourceRouteOptions(
+                    timeout_seconds=0.1,
+                    max_failures=1,
+                    cooldown_seconds=60,
+                ),
+            },
+        )
+
+        first = asyncio.get_event_loop().run_until_complete(
+            svc._get_flow("000858", run_id="run_flow_first")
+        )
+        second = asyncio.get_event_loop().run_until_complete(
+            svc._get_flow("000858", run_id="run_flow_second")
+        )
+
+        circuit_row = store._conn.execute(
+            """SELECT payload_json
+               FROM market_observations
+               WHERE kind = 'provider_failure' AND run_id = ?
+               ORDER BY observed_at DESC
+               LIMIT 1""",
+            ("run_flow_second",),
+        ).fetchone()
+        circuit = json.loads(circuit_row["payload_json"])
+        assert first == flow
+        assert second == flow
+        assert bad.calls == 1
+        assert circuit["source"] == "TrackingFailingFlowProvider"
+        assert circuit["status"] == "circuit_open"
+        assert circuit["error_type"] == "CircuitOpen"
+
+    def test_get_flow_serializes_numpy_scalars(self, store):
+        flow = FundFlow(net_inflow_1d=np.int64(100), main_force_ratio=np.float64(1.2))
+        svc = MarketService(flow_providers=[MockFlowProvider({"000858": flow})], store=store)
+
+        result = asyncio.get_event_loop().run_until_complete(svc._get_flow("000858"))
+
+        cached = store.get_latest_observation("000858", "fund_flow")
+        failure = store.get_latest_observation("000858", "provider_failure")
+        assert result == flow
+        assert cached["net_inflow_1d"] == 100
+        assert cached["main_force_ratio"] == 1.2
+        assert failure is None
+
     def test_collect_signal_data_saves_observation(self, store):
         class SignalProvider:
             async def get_concept_blocks(self, code):
@@ -234,6 +388,25 @@ class TestMarketService:
         cached = store.get_latest_observation("000858", "concept_blocks")
         assert result["concept_tags"] == ["白酒"]
         assert cached["concept_tags"] == ["白酒"]
+
+    def test_collect_signal_records_provider_failure(self, store):
+        class FailingSignalProvider:
+            async def get_industry_comparison(self, top_n):
+                raise RuntimeError("industry source unavailable")
+
+        svc = MarketService(market_providers=[FailingSignalProvider()], store=store)
+
+        result = asyncio.get_event_loop().run_until_complete(
+            svc.collect_industry_comparison(5, run_id="run_industry_failure")
+        )
+
+        failure = store.get_latest_observation("cn_a", "provider_failure")
+        assert result == {"top": [], "bottom": [], "total": 0}
+        assert failure["source"] == "FailingSignalProvider"
+        assert failure["target_kind"] == "industry_comparison"
+        assert failure["status"] == "provider_error"
+        assert failure["error_type"] == "RuntimeError"
+        assert "industry source unavailable" in failure["error_message"]
 
     def test_collect_xueqiu_hot_stocks_saves_observation(self, store):
         class XueqiuProvider:
@@ -468,6 +641,94 @@ class TestMarketService:
         assert snap.quote is not None
         assert snap.quote.price == 15.0
         assert snap.financial is not None
+
+    def test_akshare_flow_tick_suppresses_download_warning(self, monkeypatch):
+        from astock_trading.market.akshare_adapters import AkShareFlowAdapter
+
+        def fake_tick(symbol):
+            warnings.warn("正在下载数据，请稍等", UserWarning)
+            return pd.DataFrame({
+                "性质": ["买盘", "卖盘"],
+                "成交金额": [100.0, 20.0],
+            })
+
+        monkeypatch.setitem(
+            sys.modules,
+            "akshare",
+            SimpleNamespace(stock_zh_a_tick_tx_js=fake_tick),
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = AkShareFlowAdapter()._get_flow_from_tx_tick("000001")
+
+        assert result is not None
+        assert result.net_inflow_1d == 80.0
+        assert not any("正在下载数据" in str(item.message) for item in caught)
+
+    def test_akshare_flow_records_internal_subsource_errors(self, monkeypatch, store):
+        from astock_trading.market.akshare_adapters import AkShareFlowAdapter
+
+        class BrokenAkshare:
+            def stock_individual_fund_flow(self, stock, market):
+                raise RuntimeError("eastmoney fund flow unavailable")
+
+            def stock_zh_a_tick_tx_js(self, symbol):
+                raise ValueError("tencent tick unavailable")
+
+        adapter = AkShareFlowAdapter()
+        monkeypatch.setitem(sys.modules, "akshare", BrokenAkshare())
+        svc = MarketService(flow_providers=[adapter], store=store)
+
+        result = asyncio.get_event_loop().run_until_complete(
+            svc._get_flow("000001", run_id="run_akshare_subsource_failure")
+        )
+
+        failure = store.get_latest_observation("000001", "provider_failure")
+        diagnostic = failure["details"]["provider_diagnostic"]
+        assert result is None
+        assert failure["source"] == "AkShareFlowAdapter"
+        assert failure["target_kind"] == "fund_flow"
+        assert failure["status"] == "provider_error"
+        assert diagnostic["error_type"] == "AkShareFlowSubsourcesFailed"
+        assert [item["status"] for item in diagnostic["subsource_errors"]] == [
+            "em_fund_flow_failed",
+            "tx_tick_failed",
+        ]
+        assert diagnostic["subsource_errors"][0]["subsource"] == "eastmoney_fund_flow"
+        assert diagnostic["subsource_errors"][1]["subsource"] == "tencent_tick"
+
+    def test_baidu_fund_flow_parse_error_does_not_warn(self, caplog):
+        from astock_trading.market.a_stock_adapters import BaiduFundFlowAdapter
+
+        class Response:
+            def json(self):
+                raise json.JSONDecodeError("Expecting value", "", 0)
+
+        adapter = BaiduFundFlowAdapter(request_get=lambda *args, **kwargs: Response())
+
+        with caplog.at_level(logging.WARNING):
+            rows = adapter._fund_flow_history("000001")
+
+        assert rows == []
+        assert adapter.get_last_error("000001")["status"] == "parse_error"
+        assert not caplog.records
+
+    def test_astock_signal_industry_fallback_does_not_warn(self, caplog):
+        from astock_trading.market.a_stock_adapters import AStockSignalAdapter
+
+        class BrokenAkshare:
+            def stock_board_industry_name_em(self):
+                raise RuntimeError("eastmoney unavailable")
+
+        adapter = AStockSignalAdapter()
+        adapter._akshare = lambda: BrokenAkshare()
+
+        with caplog.at_level(logging.WARNING):
+            rows = adapter._get_industry_comparison_em()
+
+        assert rows == []
+        assert not caplog.records
 
     def test_all_providers_fail(self, store):
         """All providers fail → snapshot with None fields."""

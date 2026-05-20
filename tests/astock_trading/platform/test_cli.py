@@ -25,9 +25,76 @@ def test_screener_limit_defaults_to_configured_market_scan_limit():
     assert _scan_limit({}, None) == 30
 
 
+def test_source_quality_summary_reports_per_stock_coverage():
+    import astock_trading.platform.cli.screener as screener_cli
+    from astock_trading.market.models import (
+        FinancialReport,
+        FundFlow,
+        SectorContext,
+        SentimentData,
+        StockQuote,
+        StockSnapshot,
+        TechnicalIndicators,
+    )
+
+    quote = StockQuote(
+        code="002138",
+        name="双环传动",
+        price=35.0,
+        open=34.0,
+        high=36.0,
+        low=33.0,
+        close=35.0,
+        volume=100000,
+        amount=3500000.0,
+        change_pct=2.1,
+    )
+    full_snapshot = StockSnapshot(
+        code="002138",
+        name="双环传动",
+        quote=quote,
+        technical=TechnicalIndicators(above_ma20=True),
+        financial=FinancialReport(roe=12.0, revenue_growth=18.0, operating_cash_flow=1.0),
+        flow=FundFlow(net_inflow_1d=500000.0),
+        sentiment=SentimentData(score=1.8),
+        sector=SectorContext(industry_name="汽车零部件", confirmed=True),
+    )
+    missing_flow = StockSnapshot(
+        code="603215",
+        name="比依股份",
+        quote=quote,
+        technical=TechnicalIndicators(),
+        financial=FinancialReport(roe=8.0, revenue_growth=5.0, operating_cash_flow=1.0),
+    )
+
+    summary = screener_cli._build_source_quality_summary(
+        [full_snapshot, missing_flow],
+        [
+            {"code": "002138", "data_quality": "ok", "data_missing_fields": []},
+            {"code": "603215", "data_quality": "degraded", "data_missing_fields": ["资金流"]},
+        ],
+    )
+
+    assert summary["status"] == "warning"
+    assert summary["sample_size"] == 2
+    assert summary["coverage"]["quote"]["available"] == 2
+    assert summary["coverage"]["flow"] == {
+        "label": "资金流",
+        "layer": "L1",
+        "available": 1,
+        "missing": 1,
+        "total": 2,
+        "rate": 0.5,
+    }
+    assert summary["score_quality_counts"] == {"degraded": 1, "ok": 1}
+    assert summary["missing_fields"][0] == {"field": "资金流", "count": 1}
+    assert any("逐票资金流覆盖率" in item for item in summary["warnings"])
+
+
 def test_screener_run_archives_history_snapshot(monkeypatch, tmp_path):
     from astock_trading.platform.cli import app
     import astock_trading.platform.cli.screener as screener_cli
+    from astock_trading.market.models import StockQuote, StockSnapshot, TechnicalIndicators
     from astock_trading.platform.db import connect, init_db
     from astock_trading.platform.events import EventStore
     from astock_trading.reporting.projectors import ProjectionUpdater
@@ -49,7 +116,7 @@ def test_screener_run_archives_history_snapshot(monkeypatch, tmp_path):
     async def fake_search_stocks(self, query):
         return [{"code": "002138", "name": "双环传动"}]
 
-    def fake_score_stock_list(ctx, stock_list, run_id):
+    def fake_score_stock_batch(ctx, stock_list, run_id):
         ctx.event_store.append(
             "strategy:002138",
             "strategy",
@@ -63,15 +130,37 @@ def test_screener_run_archives_history_snapshot(monkeypatch, tmp_path):
             },
             metadata={"run_id": run_id},
         )
-        return [
-            {
-                "code": "002138",
-                "name": "双环传动",
-                "total_score": 5.8,
-                "entry_signal": False,
-                "data_quality": "ok",
-            }
-        ]
+        quote = StockQuote(
+            code="002138",
+            name="双环传动",
+            price=35.0,
+            open=34.0,
+            high=36.0,
+            low=33.0,
+            close=35.0,
+            volume=100000,
+            amount=3500000.0,
+            change_pct=2.1,
+        )
+        return {
+            "scores": [
+                {
+                    "code": "002138",
+                    "name": "双环传动",
+                    "total_score": 5.8,
+                    "entry_signal": False,
+                    "data_quality": "ok",
+                }
+            ],
+            "snapshots": [
+                StockSnapshot(
+                    code="002138",
+                    name="双环传动",
+                    quote=quote,
+                    technical=TechnicalIndicators(above_ma20=True),
+                )
+            ],
+        }
 
     db_path = tmp_path / "runtime.db"
     init_db(db_path)
@@ -91,7 +180,7 @@ def test_screener_run_archives_history_snapshot(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(screener_cli, "build_context", lambda: ctx)
     monkeypatch.setattr(screener_cli.MXScreenerAdapter, "search_stocks", fake_search_stocks)
-    monkeypatch.setattr(screener_cli, "_score_stock_list", fake_score_stock_list)
+    monkeypatch.setattr(screener_cli, "_score_stock_batch", fake_score_stock_batch)
 
     try:
         result = CliRunner().invoke(
@@ -102,6 +191,9 @@ def test_screener_run_archives_history_snapshot(monkeypatch, tmp_path):
         assert result.exit_code == 0
         payload = json.loads(result.stdout)
         assert payload["history_group_id"].endswith(payload["run_id"])
+        assert payload["source_quality"]["sample_size"] == 1
+        assert payload["source_quality"]["coverage"]["quote"]["available"] == 1
+        assert payload["source_quality"]["coverage"]["flow"]["missing"] == 1
         rows = raw_conn.execute(
             "SELECT phase, snapshot_type FROM signal_history_snapshots WHERE history_group_id = ?",
             (payload["history_group_id"],),
@@ -425,6 +517,44 @@ def test_data_sources_status_help_via_bin_trade():
 
     assert "--max-age-hours" in result.stdout
     assert "--json" in result.stdout
+
+
+def test_data_sources_diagnose_help_via_bin_trade():
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "data-sources", "diagnose", "--help"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "诊断数据源" in result.stdout
+    assert "--max-age-hours" in result.stdout
+    assert "--json" in result.stdout
+
+
+def test_data_sources_diagnose_json_via_bin_trade(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "data-sources", "diagnose", "--json"],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["diagnostic"] == "data_sources"
+    assert payload["status"] in {"ok", "warning", "failed"}
+    assert "health" in payload
+    assert "provider_failures" in payload
+    assert "latest_screener_source_quality" in payload
 
 
 def test_review_trades_help_via_bin_trade():
@@ -1538,6 +1668,217 @@ def test_hermes_digest_suggest_explain_json_via_bin_trade(tmp_path):
     assert explain_payload["code"] == "002138"
     assert explain_payload["latest_decision"]["action"] == "BUY"
     assert "买入意向" in explain_payload["summary"]
+
+
+def test_hermes_suggest_pauses_new_trade_judgment_when_l1_coverage_degraded(tmp_path):
+    from astock_trading.market.store import MarketStore
+    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.events import EventStore
+    from astock_trading.platform.history_mirror import archive_signal_history
+
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+    db_path = tmp_path / "runtime.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "hot_stocks", "2026-05-20", {"items": [1]})
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_observation("AkShareFlowAdapter", "fund_flow", "002138", {"items": [1]})
+        store.save_observation(
+            "market_service",
+            "snapshot",
+            "002138",
+            {
+                "code": "002138",
+                "name": "双环传动",
+                "completeness": {
+                    "has_quote": True,
+                    "has_technical": True,
+                    "has_financial": True,
+                    "has_flow": False,
+                    "has_sentiment": True,
+                    "has_sector": True,
+                },
+            },
+            run_id="screener_l1_degraded",
+        )
+        archive_signal_history(
+            conn,
+            snapshot_date="2026-05-20",
+            history_group_id="hist_l1_degraded",
+            run_id="screener_l1_degraded",
+            phase="screener",
+            candidates=[
+                {
+                    "code": "002138",
+                    "name": "双环传动",
+                    "total_score": 7.8,
+                    "data_quality": "degraded",
+                    "data_missing_fields": ["资金流"],
+                }
+            ],
+            decisions=[
+                {
+                    "code": "002138",
+                    "name": "双环传动",
+                    "action": "BUY",
+                    "score": 7.8,
+                }
+            ],
+        )
+        EventStore(conn).append(
+            stream="decision:002138",
+            stream_type="strategy",
+            event_type="decision.suggested",
+            payload={"code": "002138", "name": "双环传动", "action": "BUY", "score": 7.8},
+            metadata={"run_id": "screener_l1_degraded"},
+        )
+    finally:
+        conn.close()
+
+    result = subprocess.run(
+        [str(cli), "suggest", "--json"],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "needs_health_check"
+    assert payload["recommendation"] == "先修运行/数据问题，暂停新增交易判断。"
+    assert payload["next_action"]["command"] == "atrade data-sources diagnose --json"
+    assert payload["data_source_blockers"][0]["reason"] == "latest_screener_l1_coverage_degraded"
+    assert payload["execution_allowed"] is False
+
+
+def test_hermes_suggest_reports_empty_pool_as_no_qualified_candidates(tmp_path):
+    from astock_trading.market.store import MarketStore
+    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.events import EventStore
+    from astock_trading.platform.history_mirror import archive_signal_history
+
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+    db_path = tmp_path / "runtime.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "hot_stocks", "2026-05-20", {"items": [1]})
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_observation("AkShareFlowAdapter", "fund_flow", "002138", {"items": [1]})
+        store.save_observation(
+            "market_service",
+            "snapshot",
+            "002138",
+            {
+                "code": "002138",
+                "name": "双环传动",
+                "completeness": {
+                    "has_quote": True,
+                    "has_technical": True,
+                    "has_financial": True,
+                    "has_flow": True,
+                    "has_sentiment": True,
+                    "has_sector": True,
+                },
+            },
+            run_id="screener_no_qualified",
+        )
+        archive_signal_history(
+            conn,
+            snapshot_date="2026-05-20",
+            history_group_id="hist_no_qualified",
+            run_id="screener_no_qualified",
+            phase="screener",
+            candidates=[
+                {
+                    "code": "002138",
+                    "name": "双环传动",
+                    "total_score": 4.1,
+                    "data_quality": "ok",
+                    "data_missing_fields": [],
+                    "entry_signal": False,
+                }
+            ],
+        )
+        EventStore(conn).append(
+            stream="score:002138",
+            stream_type="strategy",
+            event_type="score.calculated",
+            payload={
+                "code": "002138",
+                "name": "双环传动",
+                "total_score": 4.1,
+                "data_quality": "ok",
+                "entry_signal": False,
+            },
+            metadata={"run_id": "screener_no_qualified"},
+        )
+    finally:
+        conn.close()
+
+    result = subprocess.run(
+        [str(cli), "suggest", "--json"],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "wait_no_qualified_candidates"
+    assert payload["recommendation"] == "核心数据源可用，候选池为空；继续观察，不降低买入线。"
+    assert payload["next_action"]["type"] == "observe_no_qualified_candidates"
+    assert "暂无合格候选" in payload["next_action"]["label"]
+    assert "不是行情没数据" in payload["next_action"]["reason"]
+
+
+def test_hermes_digest_localizes_clear_action(tmp_path):
+    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.events import EventStore
+
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+    db_path = tmp_path / "runtime.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        EventStore(conn).append(
+            stream="decision:603215",
+            stream_type="strategy",
+            event_type="decision.suggested",
+            payload={
+                "code": "603215",
+                "name": "比依股份",
+                "action": "CLEAR",
+                "score": 4.4,
+                "confidence": 4.4,
+                "notes": ["评分过低"],
+            },
+            metadata={"run_id": "scoring_cli"},
+        )
+    finally:
+        conn.close()
+
+    result = subprocess.run(
+        [str(cli), "digest", "--json"],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["latest_decision"]["action"] == "CLEAR"
+    assert payload["latest_decision"]["action_label"] == "观望"
+    assert "603215 观望" in payload["summary"]
 
 
 def test_sqlite_to_mysql_migration_dry_run_json_via_bin_trade(tmp_path):

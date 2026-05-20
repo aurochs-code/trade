@@ -127,7 +127,10 @@ atrade db check --json
 
 - 核心源失败：关键 pipeline 应跳过或失败，并留下 run artifact
 - 辅助源降级：pipeline 可以继续，但要在 CLI/报告中清楚提示
-- 真实场景验证时优先看 `atrade data-sources status --json`、`atrade diagnose health --json`、`atrade health --json`
+- 逐票 L1 覆盖不足：pipeline 可以完成，但 `atrade suggest --json` /
+  `atrade propose-plan --json` 应返回 `data_source_blockers` 并暂停新增交易判断
+- 候选池为空且核心源健康：应表述为“暂无合格候选”，继续观察，不降低买入线
+- 真实场景验证时优先看 `atrade data-sources diagnose --json`、`atrade data-sources status --json`、`atrade diagnose health --json`、`atrade health --json`
 
 ## 人工确认边界
 
@@ -151,7 +154,10 @@ atrade db check --json
 - 命令面、JSON 输出、MCP：`src/astock_trading/platform/cli/`、`src/astock_trading/platform/mcp_server.py`
 - 服务组装：`src/astock_trading/platform/service_factory.py`
 - pipeline：`src/astock_trading/platform/pipeline_runner.py`、`src/astock_trading/pipeline/`
-- 数据源健康：`src/astock_trading/market/health.py`、`src/astock_trading/platform/pipeline_policy.py`
+- 数据源健康、覆盖率诊断和 provider 路由：`src/astock_trading/market/health.py`、
+  `src/astock_trading/platform/data_source_diagnostics.py`、
+  `src/astock_trading/market/source_router.py`、`src/astock_trading/platform/pipeline_policy.py`
+- 数据源稳定性重构：`docs/architecture/DATA_SOURCE_STABILITY_REFACTOR.md`
 - 选股和评分：`src/astock_trading/platform/cli/screener.py`、`src/astock_trading/strategy/`
 - P5 参数校准：`src/astock_trading/pipeline/param_calibration.py`、`atrade calibrate --json`
 - P6 自适应风控建议：`src/astock_trading/pipeline/adaptive_risk.py`、`atrade risk adaptive --json`

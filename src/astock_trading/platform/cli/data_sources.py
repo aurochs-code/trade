@@ -3,16 +3,29 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+from collections import Counter
+from datetime import datetime
+import json
+from typing import Any, Optional
 
 import typer
 
+from astock_trading.platform import data_source_diagnostics
 from astock_trading.platform.cli.common import json_or_text
 from astock_trading.platform.db import connect
 from astock_trading.platform.time import local_today_str
 
 
 data_sources_app = typer.Typer(name="data-sources", help="数据源健康")
+
+SOURCE_QUALITY_DIMENSIONS = (
+    ("quote", "行情", "L1", "has_quote"),
+    ("technical", "技术指标", "L1", "has_technical"),
+    ("financial", "基本面", "L1", "has_financial"),
+    ("flow", "资金流", "L1", "has_flow"),
+    ("sentiment", "舆情", "L2", "has_sentiment"),
+    ("sector", "行业上下文", "L2", "has_sector"),
+)
 
 
 def _format_metric(value: object, fmt: str, fallback: str = "n/a") -> str:
@@ -22,6 +35,126 @@ def _format_metric(value: object, fmt: str, fallback: str = "n/a") -> str:
         return format(value, fmt)
     except (TypeError, ValueError):
         return fallback
+
+
+def _decode_payload(value: Any) -> Any:
+    if value is None:
+        return {}
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+
+
+def _coverage_rate(available: int, total: int) -> float:
+    if total <= 0:
+        return 0.0
+    return round(available / total, 4)
+
+
+def _snapshot_has(payload: dict, attr: str, completeness_key: str) -> bool:
+    completeness = payload.get("completeness")
+    if isinstance(completeness, dict) and completeness_key in completeness:
+        return bool(completeness.get(completeness_key))
+    return payload.get(attr) is not None
+
+
+def _source_quality_from_payloads(snapshot_payloads: list[dict], scores: list[dict]) -> dict:
+    total = len(snapshot_payloads)
+    coverage = {}
+    warnings = []
+
+    for attr, label, layer, completeness_key in SOURCE_QUALITY_DIMENSIONS:
+        available = sum(
+            1
+            for snapshot in snapshot_payloads
+            if _snapshot_has(snapshot, attr, completeness_key)
+        )
+        row = {
+            "label": label,
+            "layer": layer,
+            "available": available,
+            "missing": max(total - available, 0),
+            "total": total,
+            "rate": _coverage_rate(available, total),
+        }
+        coverage[attr] = row
+        if total and layer == "L1" and available < total:
+            warnings.append(
+                f"最近筛选逐票{label}覆盖率 {row['rate']:.1%}，可能影响评分和买入门禁。"
+            )
+
+    quality_counter = Counter(str(score.get("data_quality", "ok")) for score in scores)
+    missing_counter: Counter = Counter()
+    for score in scores:
+        fields = score.get("data_missing_fields") or []
+        if isinstance(fields, str):
+            fields = [fields]
+        missing_counter.update(str(item) for item in fields)
+
+    if total == 0:
+        status = "warning"
+        warnings.append("最近筛选没有可回放的逐票快照，无法评估覆盖率。")
+    elif coverage["quote"]["available"] == 0 or coverage["technical"]["available"] == 0:
+        status = "failed"
+    elif warnings or quality_counter.get("degraded", 0) or quality_counter.get("error", 0):
+        status = "warning"
+    else:
+        status = "ok"
+
+    if quality_counter.get("degraded", 0) or quality_counter.get("error", 0):
+        warnings.append(
+            f"评分数据质量存在降级 {quality_counter.get('degraded', 0)} 条、错误 {quality_counter.get('error', 0)} 条。"
+        )
+
+    return {
+        "status": status,
+        "sample_size": total,
+        "score_count": len(scores),
+        "coverage": coverage,
+        "score_quality_counts": dict(sorted(quality_counter.items())),
+        "missing_fields": [
+            {"field": key, "count": count}
+            for key, count in sorted(missing_counter.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "warnings": warnings,
+    }
+
+
+def _empty_screener_source_quality() -> dict:
+    return {
+        "status": "empty",
+        "run_id": "",
+        "history_group_id": "",
+        "phase": "",
+        "created_at": "",
+        "sample_size": 0,
+        "score_count": 0,
+        "coverage": {},
+        "score_quality_counts": {},
+        "missing_fields": [],
+        "warnings": ["尚无可用于覆盖率回放的筛选镜像。"],
+    }
+
+
+def _latest_screener_source_quality(conn) -> dict:
+    return data_source_diagnostics._latest_screener_source_quality(conn)
+
+
+def build_data_source_diagnosis(
+    conn,
+    *,
+    now: datetime | None = None,
+    max_age_hours: Optional[int] = None,
+) -> dict:
+    """汇总全局门禁、provider 失败和最近筛选逐票覆盖率。"""
+    return data_source_diagnostics.build_data_source_diagnosis(
+        conn,
+        now=now,
+        max_age_hours=max_age_hours,
+    )
 
 
 @data_sources_app.command("status")
@@ -47,6 +180,28 @@ def data_sources_status(
                 f"age={_format_metric(item['age_hours'], '.2f')}h "
                 f"count={item['payload_count']} source={item['source'] or '-'}"
             )
+    finally:
+        conn.close()
+
+
+@data_sources_app.command("diagnose")
+def data_sources_diagnose(
+    max_age_hours: Optional[int] = typer.Option(None, "--max-age-hours", help="覆盖所有数据源最大年龄"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """诊断数据源门禁、provider 失败和最近筛选覆盖率。"""
+    conn = connect()
+    try:
+        result = build_data_source_diagnosis(conn, max_age_hours=max_age_hours)
+        if as_json:
+            json_or_text(result, True)
+            return
+
+        typer.echo(f"Data-source diagnosis: {result['status']}")
+        for finding in result["findings"]:
+            typer.echo(f"  - {finding}")
+        if not result["findings"]:
+            typer.echo("  - 未发现阻断性数据源问题")
     finally:
         conn.close()
 

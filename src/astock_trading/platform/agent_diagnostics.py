@@ -9,6 +9,11 @@ from typing import Any
 
 from astock_trading.market.health import evaluate_data_source_health
 from astock_trading.platform.config import ConfigRegistry
+from astock_trading.platform.data_source_diagnostics import (
+    build_data_source_diagnosis,
+    data_source_blocker_summary,
+    data_source_blockers_for_new_trades,
+)
 from astock_trading.platform.time import utc_now
 
 
@@ -119,6 +124,12 @@ def diagnose_health(conn: Any) -> dict:
         missing = ", ".join(data_sources.get("optional_missing", []))
         findings.append(f"optional data sources degraded: {missing}")
         recommendations.append("continue read-only analysis, but avoid expanding execution confidence")
+
+    provider_failures = data_sources.get("provider_failures", {}) or {}
+    unresolved_provider_failures = int(provider_failures.get("unresolved_recent", 0) or 0)
+    if unresolved_provider_failures:
+        findings.append(f"{unresolved_provider_failures} 个 provider 失败未被 fallback 补齐")
+        recommendations.append("查看 data_sources.provider_failures.unresolved，先修未补齐的数据源再扩大交易判断")
 
     if candidate_pool["total"] == 0:
         if not data_sources.get("required_missing"):
@@ -334,6 +345,8 @@ def explain_run(conn: Any, run_id: str) -> dict:
 def propose_agent_trade_plan(conn: Any) -> dict:
     """Create a non-executing Agent trade plan from current diagnostics."""
     diagnostics = diagnose_health(conn)
+    data_source_diagnosis = build_data_source_diagnosis(conn)
+    data_source_blockers = data_source_blockers_for_new_trades(data_source_diagnosis)
     actions: list[dict] = []
 
     data_sources = diagnostics["inputs"]["data_sources"]
@@ -343,6 +356,17 @@ def propose_agent_trade_plan(conn: Any) -> dict:
             "type": "refresh_data_sources",
             "priority": "high",
             "reason": "required market data sources are unavailable",
+        })
+    non_required_data_blockers = [
+        item
+        for item in data_source_blockers
+        if item.get("reason") != "required_data_sources_unavailable"
+    ]
+    if non_required_data_blockers:
+        actions.append({
+            "type": "inspect_data_sources",
+            "priority": "high",
+            "reason": data_source_blocker_summary(non_required_data_blockers),
         })
     if pool["total"] == 0 or pool["stale"]:
         actions.append({
@@ -368,6 +392,8 @@ def propose_agent_trade_plan(conn: Any) -> dict:
         "plan_type": "agent_trade_plan",
         "execution_allowed": False,
         "diagnostics": diagnostics,
+        "data_source_diagnosis": data_source_diagnosis,
+        "data_source_blockers": data_source_blockers,
         "actions": actions,
         "guardrails": [
             "do not place real-money orders",

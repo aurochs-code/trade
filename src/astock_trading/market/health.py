@@ -7,6 +7,7 @@ market/health.py — 数据源健康聚合。
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -34,6 +35,10 @@ DEFAULT_EXPECTATIONS = (
 )
 
 DEFAULT_CANDIDATE_POOL_MAX_AGE_HOURS = 24
+_SUCCESS_KIND_ALIASES = {
+    "fund_flow": ("fund_flow", "flow"),
+    "flow": ("fund_flow", "flow"),
+}
 
 
 def _parse_dt(value: str) -> datetime:
@@ -122,12 +127,117 @@ def _candidate_pool_health(
     }
 
 
+def _recent_provider_failures(
+    conn,
+    *,
+    now: datetime,
+    max_age_hours: int = 24,
+    limit: int = 20,
+) -> dict:
+    rows = conn.execute(
+        """SELECT source, symbol, observed_at, run_id, payload_json
+           FROM market_observations
+           WHERE kind = 'provider_failure'
+           ORDER BY observed_at DESC
+           LIMIT ?""",
+        (limit,),
+    ).fetchall()
+
+    recent = []
+    unresolved = []
+    source_counter: Counter = Counter()
+    unresolved_source_counter: Counter = Counter()
+    target_kind_counter: Counter = Counter()
+    for row in rows:
+        observed = _parse_dt(row["observed_at"])
+        age_hours = (now - observed).total_seconds() / 3600
+        if age_hours > max_age_hours:
+            continue
+        try:
+            payload = json.loads(row["payload_json"])
+        except json.JSONDecodeError:
+            payload = {}
+
+        source = str(payload.get("source") or row["source"])
+        target_kind = str(payload.get("target_kind") or "")
+        symbol = str(payload.get("symbol") or row["symbol"])
+        resolved = _provider_failure_resolution(
+            conn,
+            target_kind=target_kind,
+            symbol=symbol,
+            observed_at=row["observed_at"],
+        )
+        item = {
+            "source": source,
+            "target_kind": target_kind,
+            "symbol": symbol,
+            "status": str(payload.get("status") or "provider_error"),
+            "error_type": str(payload.get("error_type") or ""),
+            "error_message": str(payload.get("error_message") or ""),
+            "observed_at": row["observed_at"],
+            "age_hours": round(age_hours, 2),
+            "run_id": row["run_id"] or "",
+            "resolved_by_fallback": resolved is not None,
+            "resolved_source": resolved["source"] if resolved else "",
+            "resolved_observed_at": resolved["observed_at"] if resolved else "",
+        }
+        details = payload.get("details")
+        if isinstance(details, dict):
+            item["details"] = details
+        recent.append(item)
+        source_counter.update([source])
+        if target_kind:
+            target_kind_counter.update([target_kind])
+        if not resolved:
+            unresolved.append(item)
+            unresolved_source_counter.update([source])
+
+    return {
+        "total_recent": len(recent),
+        "unresolved_recent": len(unresolved),
+        "resolved_recent": len(recent) - len(unresolved),
+        "max_age_hours": max_age_hours,
+        "by_source": dict(sorted(source_counter.items())),
+        "by_unresolved_source": dict(sorted(unresolved_source_counter.items())),
+        "by_target_kind": dict(sorted(target_kind_counter.items())),
+        "recent": recent,
+        "unresolved": unresolved,
+    }
+
+
+def _provider_failure_resolution(
+    conn,
+    *,
+    target_kind: str,
+    symbol: str,
+    observed_at: str,
+) -> Optional[dict]:
+    if not target_kind or not symbol:
+        return None
+    success_kinds = _SUCCESS_KIND_ALIASES.get(target_kind, (target_kind,))
+    placeholders = ",".join("?" for _ in success_kinds)
+    params: list[object] = [*success_kinds, symbol, observed_at]
+    row = conn.execute(
+        f"""SELECT source, observed_at
+            FROM market_observations
+            WHERE kind IN ({placeholders})
+              AND symbol = ?
+              AND observed_at >= ?
+            ORDER BY observed_at ASC
+            LIMIT 1""",
+        tuple(params),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def evaluate_data_source_health(
     conn,
     *,
     now: Optional[datetime] = None,
     max_age_hours: Optional[int] = None,
     candidate_pool_max_age_hours: Optional[int] = None,
+    provider_failure_max_age_hours: int = 24,
+    provider_failure_limit: int = 20,
     expectations: tuple[DataSourceExpectation, ...] = DEFAULT_EXPECTATIONS,
 ) -> dict:
     """汇总数据源健康状态。
@@ -204,4 +314,10 @@ def evaluate_data_source_health(
         "checks": checks,
         "required_missing": required_missing,
         "optional_missing": optional_missing,
+        "provider_failures": _recent_provider_failures(
+            conn,
+            now=now,
+            max_age_hours=provider_failure_max_age_hours,
+            limit=provider_failure_limit,
+        ),
     }

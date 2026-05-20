@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from astock_trading.platform.agent_diagnostics import candidate_pool_summary
+from astock_trading.platform.data_source_diagnostics import (
+    build_data_source_diagnosis,
+    data_source_blocker_summary,
+    data_source_blockers_for_new_trades,
+)
 from astock_trading.platform.events import EventStore
 from astock_trading.platform.time import local_today_str
 
@@ -11,6 +17,7 @@ ACTION_LABELS = {
     "BUY": "买入意向",
     "SELL": "卖出意向",
     "WATCH": "观察",
+    "CLEAR": "观望",
     "NO_TRADE": "不操作",
 }
 
@@ -64,6 +71,9 @@ def build_suggestion(conn: Any) -> dict[str, Any]:
     failed_runs = digest["failed_runs"]
     latest_decision = digest.get("latest_decision") or {}
     latest_score = digest.get("latest_score") or {}
+    data_source_diagnosis = build_data_source_diagnosis(conn)
+    candidate_pool = candidate_pool_summary(conn)
+    data_source_blockers = data_source_blockers_for_new_trades(data_source_diagnosis)
 
     if pending:
         action = {
@@ -85,6 +95,26 @@ def build_suggestion(conn: Any) -> dict[str, Any]:
         }
         recommendation = "先修运行/数据问题，暂停新增交易判断。"
         status = "needs_health_check"
+    elif data_source_blockers:
+        action = {
+            "type": "inspect_data_sources",
+            "label": "检查数据覆盖",
+            "command": "atrade data-sources diagnose --json",
+            "reason": data_source_blocker_summary(data_source_blockers),
+            "safe_to_auto_apply": True,
+        }
+        recommendation = "先修运行/数据问题，暂停新增交易判断。"
+        status = "needs_health_check"
+    elif _is_no_qualified_candidate_state(candidate_pool, data_source_diagnosis, latest_score):
+        action = {
+            "type": "observe_no_qualified_candidates",
+            "label": "暂无合格候选",
+            "command": "atrade screener explain --json",
+            "reason": "核心数据源可用，但候选池为空，应视为筛选后暂无合格候选，不是行情没数据。",
+            "safe_to_auto_apply": True,
+        }
+        recommendation = "核心数据源可用，候选池为空；继续观察，不降低买入线。"
+        status = "wait_no_qualified_candidates"
     elif latest_decision.get("action") == "BUY":
         code = latest_decision.get("code", "")
         action = {
@@ -125,6 +155,11 @@ def build_suggestion(conn: Any) -> dict[str, Any]:
         "execution_allowed": False,
         "next_action": action,
         "digest": digest,
+        "data_source_blockers": data_source_blockers,
+        "diagnostics": {
+            "data_sources": data_source_diagnosis,
+            "candidate_pool": candidate_pool,
+        },
         "guardrails": {
             "manual_confirmation_required": True,
             "no_broker_api": True,
@@ -180,6 +215,21 @@ def build_explanation(conn: Any, code: str) -> dict[str, Any]:
         },
         "execution_allowed": False,
     }
+
+
+def _is_no_qualified_candidate_state(
+    candidate_pool: dict[str, Any],
+    data_source_diagnosis: dict[str, Any],
+    latest_score: dict[str, Any],
+) -> bool:
+    if int(candidate_pool.get("total", 0) or 0) != 0:
+        return False
+    health = data_source_diagnosis.get("health", {}) or {}
+    if health.get("required_missing"):
+        return False
+    source_quality = data_source_diagnosis.get("latest_screener_source_quality", {}) or {}
+    has_screener_evidence = source_quality.get("status") not in {"", "empty", None}
+    return bool(latest_score or has_screener_evidence)
 
 
 def _pending_manual_trades(store: EventStore) -> list[dict[str, Any]]:
