@@ -107,7 +107,119 @@ def _num(v, default=None):
         return default
 
 
-def _parse_mx_table(data: Dict) -> Dict[str, Any]:
+def _expected_mx_entity_code(code: str | None) -> str | None:
+    """把外部代码转换成 MX 表里的标准实体代码，如 601127.SH / 09927.HK。"""
+    raw = str(code or "").strip().upper()
+    if not raw:
+        return None
+
+    explicit_market = None
+    if raw.startswith(("SH", "SZ", "BJ", "HK")) and len(raw) > 2:
+        explicit_market = raw[:2]
+        raw = raw[2:]
+    if "." in raw:
+        raw, suffix = raw.split(".", 1)
+        suffix = suffix.strip().upper()
+        if suffix in {"SH", "SZ", "BJ", "HK"}:
+            explicit_market = suffix
+
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if not digits:
+        return None
+
+    if explicit_market:
+        return f"{digits}.{explicit_market}"
+    if len(digits) == 5 and digits.startswith("0"):
+        return f"{digits}.HK"
+    if len(digits) == 6:
+        if digits.startswith(("6", "9")):
+            return f"{digits}.SH"
+        if digits.startswith(("4", "8")):
+            return f"{digits}.BJ"
+        return f"{digits}.SZ"
+    return None
+
+
+def _entity_code_from_tag(tag: Any) -> str | None:
+    if not isinstance(tag, dict):
+        return None
+
+    direct = tag.get("entityCode") or tag.get("code") or tag.get("unifiedCode")
+    if direct:
+        direct_text = str(direct).strip().upper()
+        if "." in direct_text:
+            return direct_text
+
+    secu_code = tag.get("secuCode") or tag.get("securityCode") or tag.get("stockCode")
+    market = tag.get("marketChar") or tag.get("market") or tag.get("marketType")
+    if secu_code and market:
+        market_text = str(market).strip().upper().replace(".", "")
+        if market_text in {"SH", "SZ", "BJ", "HK"}:
+            return f"{str(secu_code).strip().upper()}.{market_text}"
+
+    return None
+
+
+def _select_mx_row_index(dto: Dict[str, Any], target_code: str | None) -> int | None:
+    """从 MX 多实体表中选择与请求代码匹配的列；不确定时保持旧行为取第 0 列。"""
+    expected = _expected_mx_entity_code(target_code)
+    if not expected:
+        return 0
+
+    entity_codes = dto.get("entityCodes") or []
+    if isinstance(entity_codes, list):
+        normalized_codes = [str(item).strip().upper() for item in entity_codes]
+        if expected in normalized_codes:
+            return normalized_codes.index(expected)
+
+    entity_tags = dto.get("entityTagDTOList") or []
+    if isinstance(entity_tags, list):
+        for idx, tag in enumerate(entity_tags):
+            if _entity_code_from_tag(tag) == expected:
+                return idx
+
+    raw_table = dto.get("rawTable", {})
+    head_names = raw_table.get("headName", []) if isinstance(raw_table, dict) else []
+    if isinstance(head_names, list):
+        for idx, head in enumerate(head_names):
+            head_text = str(head).strip().upper()
+            if expected in head_text:
+                return idx
+
+    primary_entity = _entity_code_from_tag(dto.get("entityTagDTO"))
+    if primary_entity == expected:
+        return 0
+
+    # 如果请求 A 股而当前 DTO 明确是港股，不能回退到第 0 列，否则会把
+    # 09927.HK 价格写到 601127 这类 A 股代码上。
+    if expected.endswith((".SH", ".SZ", ".BJ")):
+        if primary_entity and primary_entity.endswith(".HK"):
+            return None
+        primary_tag = dto.get("entityTagDTO")
+        if isinstance(primary_tag, dict):
+            tag_text = " ".join(
+                str(primary_tag.get(key, ""))
+                for key in ("className", "entityTypeName", "marketChar", "market")
+            )
+            tag_upper = tag_text.upper()
+            if "港股" in tag_text or "H股" in tag_text or ".HK" in tag_upper or " HK" in f" {tag_upper} ":
+                return None
+
+    return 0
+
+
+def _value_at(raw_table: Dict[str, Any], field: str, row_index: int) -> Any:
+    vals = raw_table.get(field, [])
+    if not isinstance(vals, list) or not vals:
+        return None
+    if row_index < len(vals):
+        return vals[row_index]
+    if row_index == 0:
+        return vals[0]
+    return None
+
+
+def _parse_mx_table(data: Dict, target_code: str | None = None) -> Dict[str, Any]:
     """
     解析 MX finskillshub 返回的 dataTableDTOList。
 
@@ -115,7 +227,8 @@ def _parse_mx_table(data: Dict) -> Dict[str, Any]:
     这是因为 MX 的 nameMap 每次查询返回的 field ID 不固定（如上证指数用 f2，
     深证成指用 326865），但 field ID 的语义是稳定的。
 
-    返回 {"字段名": 最新值}，最新值 = rawTable[field_id][0]（最新交易日）。
+    返回 {"字段名": 最新值}。单实体日线表默认取 rawTable[field_id][0]；
+    多实体实时表会先按 target_code 选择对应列，避免 A/H 同名标的串价。
     涨跌幅（326865/f3 等）需要 ×100 转为百分比。
     """
     # 固定 field ID → (标准字段名, 是否需要 ×100 转为 %)
@@ -136,14 +249,16 @@ def _parse_mx_table(data: Dict) -> Dict[str, Any]:
     for dto in dto_list:
         name_map = dto.get("nameMap", {})
         raw_table = dto.get("rawTable", {})
+        row_index = _select_mx_row_index(dto, target_code)
+        if row_index is None:
+            continue
         result: Dict[str, Any] = {}
 
         # Step 1：用固定 field ID 读取已知字段（不依赖 nameMap）
         for fid, (std_name, multiply) in _FID_MAP.items():
-            vals = raw_table.get(fid, [])
-            if not isinstance(vals, list) or not vals:
+            val = _value_at(raw_table, fid, row_index)
+            if val is None:
                 continue
-            val = vals[0]
             if isinstance(val, str):
                 val = val.strip().replace("%", "").replace(",", "").replace("元", "")
                 if val in ("-", ""):
@@ -168,7 +283,9 @@ def _parse_mx_table(data: Dict) -> Dict[str, Any]:
                 vals = raw_table.get(fk, [])
                 if not isinstance(vals, list) or not vals:
                     continue
-                val = vals[0]
+                val = _value_at(raw_table, fk, row_index)
+                if val is None:
+                    continue
                 if isinstance(val, str):
                     val = val.strip().replace("%", "").replace(",", "").replace("元", "")
                     if val in ("-", ""):
@@ -183,8 +300,11 @@ def _parse_mx_table(data: Dict) -> Dict[str, Any]:
 
         if result:
             ts_list = raw_table.get("headName", [])
-            if ts_list:
-                result["_ts"] = ts_list[0]
+            if isinstance(ts_list, list) and ts_list:
+                if row_index < len(ts_list):
+                    result["_ts"] = ts_list[row_index]
+                elif row_index == 0:
+                    result["_ts"] = ts_list[0]
             return result
 
     return {}
@@ -209,7 +329,7 @@ def get_realtime_mx(codes: List[str]) -> Dict[str, Dict[str, Any]]:
         if not data:
             continue
 
-        p = _parse_mx_table(data)
+        p = _parse_mx_table(data, target_code=code)
         if not p:
             continue
 
