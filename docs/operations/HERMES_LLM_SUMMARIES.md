@@ -25,7 +25,19 @@ atrade llm-context --mode close
 atrade llm-context --mode weekly
 ```
 
-Hermes 只保留 `~/.hermes/scripts/` 里的包装脚本，不进入交易系统 checkout，不设置 `--workdir`，不加载项目目录作为 agent 工作区。脚本只调用稳定 CLI：`atrade llm-context`、`hermes -z`、`atrade notify llm-summary-card`。
+当前生产 A 股推送由 `trading` profile 承担，调度事实以
+`~/.hermes/profiles/trading/cron/jobs.json` 为准；default profile 里的同名 A 股任务
+如果处于 `paused`，通常是为了避免双跑和重复推送，不要直接 resume。
+
+包装脚本有两类位置：
+
+- default profile / 全局脚本：`~/.hermes/scripts/`
+- trading profile 生产脚本：`~/.hermes/profiles/trading/scripts/`
+
+生产排障时优先检查 `trading` profile 的脚本副本。脚本不进入交易系统 checkout，
+不设置 `--workdir`，不加载项目目录作为 agent 工作区；只调用稳定 CLI：
+`atrade llm-context`、`hermes -z` 或 `hermes --profile trading -z`、
+`atrade notify llm-summary-card`。
 
 `atrade llm-context` 的 Markdown 输出会附带统一术语表，并把常见内部字段转成中文展示：
 
@@ -44,7 +56,10 @@ Hermes LLM 最终发到 Discord 的正文不要裸露内部字段名、枚举值
 
 `atrade llm-context --mode morning|close` 的 Markdown 输出会附带固定 Discord Markdown 卡片模板。Hermes LLM 最终回复必须保留模板标题和章节顺序，不输出原始 JSON、代码块、内部字段名或 JSON 路径。脚本再用 `atrade notify llm-summary-card` 把该 Markdown 转成 Discord Rich Embed。
 
-LLM 最终回复必须在每个判断段落附带 `evidence_id: ...`。证据编号来自 `atrade llm-context` 输出的“证据编号清单”；没有证据编号的段落只能写“暂无可用数据”。`atrade notify llm-summary-card` 默认会在发送前校验，缺少 `evidence_id` 时返回失败并拒绝发送，避免把 AI 总结当成事实源。
+LLM 最终回复必须在每个判断段落附带证据编号。证据编号来自
+`atrade llm-context` 输出的“证据编号清单”；没有证据编号的段落只能写
+`证据编号：暂无可用数据`。`atrade notify llm-summary-card` 默认会在发送前校验，
+真正缺少证据编号时返回失败并拒绝发送，避免把 AI 总结当成事实源。
 
 盘前卡片固定顺序：
 
@@ -234,6 +249,15 @@ cron:
   script_timeout_seconds: 900
 ```
 
+如果脚本位于 `~/.hermes/profiles/trading/scripts/`，内部 Hermes 调用应显式使用
+`--profile trading`，例如：
+
+```bash
+"$HOME/.hermes/hermes-agent/venv/bin/hermes" --profile trading --ignore-rules -z "$(cat "$tmp_prompt")"
+```
+
+这样 dry-run 和真实 cron 都会使用同一个 trading profile、同一套 bot/token/日志。
+
 ## 创建 Hermes LLM cron
 
 Hermes cron 原生 `deliver=discord` 只会发送普通文本，不会发送 Discord Rich Embed。盘前/收盘任务因此使用 `--no-agent` 脚本模式：脚本内部调用 `hermes -z` 生成摘要，再调用 `atrade notify llm-summary-card` 发 Rich Embed；脚本成功时输出 `[SILENT]`，阻止 cron 再发普通文本。
@@ -248,6 +272,24 @@ hermes cron create "20 9 * * 1-5" \
 ```
 
 收盘复盘使用同一个创建方式，只替换 schedule、name、prompt 和 script。周复盘补充仍可保持原来的 LLM 文本摘要；如果也要 Rich Embed，再补一个 weekly wrapper。
+
+## 故障排查清单
+
+遇到 `Script exited with code 1` 时，不要只看 `jobs.json` 的粗略状态，按边界拆开：
+
+1. 先确认生产任务来自 `~/.hermes/profiles/trading/cron/jobs.json`，不是 paused 的 default profile。
+2. 打开 `~/.hermes/profiles/trading/cron/output/<job_id>/...md` 看 cron 层状态。
+3. 查交易系统日志：`~/Documents/a-stock-trading/logs/cron/a_stock_llm_<mode>_*.log`。
+4. 逐层复现：`atrade llm-context --mode morning|close` → `hermes --profile trading -z` →
+   `atrade notify llm-summary-card --dry-run --json`。
+5. 如果 `notify llm-summary-card` 返回 `missing_sections`，检查对应章节是否缺少
+   `证据编号：...`；没有匹配证据时必须写 `证据编号：暂无可用数据`。
+6. 同步修复全局脚本和 `trading` profile 脚本副本，避免只修一个位置导致下次 cron
+   仍跑旧版本。
+
+同类脚本风险也要一起扫：在 macOS Bash 3.2 + `set -u` 下，不要依赖空数组展开
+`"${NOTIFY_ARGS[@]}"`；通知脚本应使用显式 dry-run 分支，确保空参数时也不会触发
+`unbound variable`。
 
 ## 直接告警仍然保留
 
