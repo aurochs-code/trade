@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import warnings
 from pathlib import Path
 
 
@@ -15,11 +16,31 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 
+def _ensure_event_loop() -> None:
+    global _SESSION_LOOP
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            loop = asyncio.get_event_loop()
+        if not loop.is_closed():
+            _SESSION_LOOP = loop
+            return
+    except RuntimeError:
+        pass
+
+    if _SESSION_LOOP is None or _SESSION_LOOP.is_closed():
+        _SESSION_LOOP = asyncio.new_event_loop()
+    asyncio.set_event_loop(_SESSION_LOOP)
+
+
 def pytest_sessionstart(session):
     del session
-    global _SESSION_LOOP
-    _SESSION_LOOP = asyncio.new_event_loop()
-    asyncio.set_event_loop(_SESSION_LOOP)
+    _ensure_event_loop()
+
+
+def pytest_runtest_setup(item):
+    del item
+    _ensure_event_loop()
 
 
 def pytest_sessionfinish(session, exitstatus):

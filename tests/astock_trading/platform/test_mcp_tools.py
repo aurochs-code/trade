@@ -139,6 +139,15 @@ class TestMCPTools:
         assert result["execution_allowed"] is False
         assert "actions" in result
 
+    def test_trade_opportunity_card_never_executes(self, setup_mcp):
+        result = json.loads(setup_mcp.trade_opportunity_card())
+
+        assert result["command"] == "opportunity"
+        assert result["execution_allowed"] is False
+        assert result["manual_confirmation_required"] is True
+        assert "summary" in result
+        assert "counts" in result
+
     def test_trade_run_pipeline_blocks_failed_data_sources(self, setup_mcp, monkeypatch):
         srv = setup_mcp
         import astock_trading.market.health as market_health

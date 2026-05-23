@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import redirect_stderr
+import io
 import logging
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -44,6 +46,15 @@ def _patch_py_mini_racer_destructor() -> None:
 
 
 _patch_py_mini_racer_destructor()
+
+
+def _quiet_akshare_call(func, *args, **kwargs):
+    """运行已知会向 stderr 打进度条的 AkShare 调用，保持 CLI JSON 输出干净。"""
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="正在下载数据，请稍等")
+        with redirect_stderr(io.StringIO()):
+            return func(*args, **kwargs)
+
 
 class AkShareMarketAdapter:
     """AkShare 行情 adapter（仅 A 股）。"""
@@ -101,7 +112,7 @@ class AkShareMarketAdapter:
         """拉东财行业板块（stock_board_industry_name_em）。"""
         try:
             import akshare as ak
-            df = ak.stock_board_industry_name_em()
+            df = _quiet_akshare_call(ak.stock_board_industry_name_em)
             if df is None or df.empty:
                 return None
             rename = {
@@ -143,7 +154,7 @@ class AkShareMarketAdapter:
         try:
             import akshare as ak
 
-            df = ak.stock_sector_spot(indicator="行业")
+            df = _quiet_akshare_call(ak.stock_sector_spot, indicator="行业")
             if df is None or df.empty:
                 return None
 
@@ -240,7 +251,7 @@ class AkShareMarketAdapter:
             if not a_codes:
                 return {}
 
-            df = ak.stock_zh_a_spot_em()
+            df = _quiet_akshare_call(ak.stock_zh_a_spot_em)
             if df is not None and not df.empty:
                 code_set = set(a_codes)
                 result = {}
@@ -286,7 +297,7 @@ class AkShareMarketAdapter:
 
                 # 标准化新浪格式
                 symbol = f"sh{code}" if code.startswith(("6", "9")) else f"sz{code}"
-                df = ak.stock_intraday_sina(symbol=symbol, date=today)
+                df = _quiet_akshare_call(ak.stock_intraday_sina, symbol=symbol, date=today)
                 if df is None or df.empty:
                     continue
 
@@ -333,7 +344,7 @@ class AkShareMarketAdapter:
             else:
                 symbol = f"sz{code}"
 
-            df = ak.stock_zh_a_daily(symbol=symbol, adjust="qfq")
+            df = _quiet_akshare_call(ak.stock_zh_a_daily, symbol=symbol, adjust="qfq")
             if df is None or df.empty:
                 return None
 
@@ -359,7 +370,7 @@ class AkShareMarketAdapter:
 
             end = datetime.today().strftime("%Y%m%d")
             start = (datetime.today() - timedelta(days=count * 4)).strftime("%Y%m%d")
-            df = ak.stock_zh_a_hist_tx(symbol=symbol, start_date=start, end_date=end)
+            df = _quiet_akshare_call(ak.stock_zh_a_hist_tx, symbol=symbol, start_date=start, end_date=end)
             if df is None or df.empty:
                 return None
 
@@ -390,42 +401,120 @@ class AkShareFinancialAdapter:
         return await asyncio.to_thread(self._get_financial_sync, code)
 
     def _get_financial_sync(self, code: str) -> Optional[FinancialReport]:
-        try:
-            if is_hk_code(code):
-                return None
-            import akshare as ak
-            df = ak.stock_financial_analysis_indicator(symbol=code, start_year="2024")
-            if df is None or df.empty:
-                return None
-
-            def _latest(col_name_pattern: str) -> Optional[float]:
-                col = next((c for c in df.columns if col_name_pattern in str(c)), None)
-                if not col:
-                    return None
-                vals = df[col].dropna().head(4).tolist()
-                return round(float(vals[0]), 2) if vals else None
-
-            roe = _latest("净资产收益率")  # 取加权净资产收益率更准确
-            if roe is None:
-                roe = _latest("总资产净利润率")
-
-            # 营收增长：主营业务收入增长率（最新一期）
-            rev_growth = _latest("主营业务收入增长率")
-
-            # 现金流：每股经营性现金流
-            cash_flow = _latest("每股经营性现金流")
-
-            # 也尝试总资产净利润率作为备选
-            if roe is None:
-                roe = _latest("总资产净利润率")
-
-            return FinancialReport(
-                roe=roe,
-                revenue_growth=rev_growth,
-                operating_cash_flow=cash_flow,
-            )
-        except Exception:
+        if is_hk_code(code):
             return None
+        try:
+            import akshare as ak
+            df = _quiet_akshare_call(ak.stock_financial_analysis_indicator, symbol=code, start_year="2024")
+            report = self._from_analysis_indicator(df)
+        except Exception:
+            report = None
+        if _has_financial_scoring_fields(report):
+            return report
+
+        try:
+            import akshare as ak
+            fallback = self._from_ths_summary(_quiet_akshare_call(ak.stock_financial_abstract_ths, symbol=code))
+        except Exception:
+            fallback = None
+        return _merge_financial_report(report, fallback)
+
+    def _from_analysis_indicator(self, df) -> Optional[FinancialReport]:
+        if df is None or df.empty:
+            return None
+
+        def _latest(col_name_pattern: str) -> Optional[float]:
+            col = next((c for c in df.columns if col_name_pattern in str(c)), None)
+            if not col:
+                return None
+            vals = df[col].dropna().head(4).tolist()
+            return _parse_financial_number(vals[0]) if vals else None
+
+        roe = _latest("净资产收益率")  # 取加权净资产收益率更准确
+        if roe is None:
+            roe = _latest("总资产净利润率")
+
+        return FinancialReport(
+            roe=roe,
+            revenue_growth=_latest("主营业务收入增长率"),
+            operating_cash_flow=_latest("每股经营性现金流"),
+        )
+
+    def _from_ths_summary(self, df) -> Optional[FinancialReport]:
+        if df is None or df.empty or "报告期" not in df.columns:
+            return None
+
+        rows = df.sort_values("报告期", ascending=False).to_dict("records")
+        for row in rows:
+            report = FinancialReport(
+                roe=(
+                    _parse_financial_number(row.get("净资产收益率"))
+                    or _parse_financial_number(row.get("净资产收益率-摊薄"))
+                ),
+                revenue_growth=_parse_financial_number(row.get("营业总收入同比增长率")),
+                operating_cash_flow=_parse_financial_number(row.get("每股经营现金流")),
+            )
+            if _has_financial_scoring_fields(report):
+                return report
+        return None
+
+
+def _has_financial_scoring_fields(report: Optional[FinancialReport]) -> bool:
+    return bool(
+        report
+        and report.roe is not None
+        and report.revenue_growth is not None
+        and report.operating_cash_flow is not None
+    )
+
+
+def _merge_financial_report(
+    base: Optional[FinancialReport],
+    fallback: Optional[FinancialReport],
+) -> Optional[FinancialReport]:
+    if base is None:
+        return fallback
+    if fallback is None:
+        return base
+    return FinancialReport(
+        roe=base.roe if base.roe is not None else fallback.roe,
+        revenue_growth=(
+            base.revenue_growth
+            if base.revenue_growth is not None
+            else fallback.revenue_growth
+        ),
+        net_profit_growth=(
+            base.net_profit_growth
+            if base.net_profit_growth is not None
+            else fallback.net_profit_growth
+        ),
+        operating_cash_flow=(
+            base.operating_cash_flow
+            if base.operating_cash_flow is not None
+            else fallback.operating_cash_flow
+        ),
+        pe_ttm=base.pe_ttm if base.pe_ttm is not None else fallback.pe_ttm,
+        pb=base.pb if base.pb is not None else fallback.pb,
+        debt_ratio=base.debt_ratio if base.debt_ratio is not None else fallback.debt_ratio,
+    )
+
+
+def _parse_financial_number(value: object) -> Optional[float]:
+    if value is None or value is False:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "false", "--"}:
+        return None
+    text = text.replace("%", "").replace(",", "")
+    try:
+        return round(float(text), 2)
+    except ValueError:
+        return None
 
 
 class AkShareFlowAdapter:
@@ -469,7 +558,7 @@ class AkShareFlowAdapter:
         try:
             import akshare as ak
             market = "sh" if code.startswith(("6", "9")) else "sz"
-            df = ak.stock_individual_fund_flow(stock=code, market=market)
+            df = _quiet_akshare_call(ak.stock_individual_fund_flow, stock=code, market=market)
             if df is None or df.empty:
                 self._append_subsource_error(
                     subsource_errors,
@@ -526,9 +615,7 @@ class AkShareFlowAdapter:
             else:
                 symbol = f"sz{code}"
 
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", message="正在下载数据，请稍等")
-                df = ak.stock_zh_a_tick_tx_js(symbol=symbol)
+            df = _quiet_akshare_call(ak.stock_zh_a_tick_tx_js, symbol=symbol)
             if df is None or df.empty:
                 self._append_subsource_error(
                     subsource_errors,
@@ -721,17 +808,27 @@ class MXMarketAdapter:
             _logger.warning(f"[MXMarket] get_kline 不支持 period={period}，仅支持 daily")
             return None
 
-        import akshare as ak
-
-        # 先试 MX
         mx_df = self._get_kline_from_mx(code, count)
+        if mx_df is not None and not mx_df.empty and self._has_usable_volume(mx_df):
+            return mx_df
+
+        ak_df = self._get_kline_from_akshare(code, count)
+        if ak_df is not None and not ak_df.empty:
+            return ak_df
+
+        # AkShare 失败时仍保留 MX 价格序列，避免均线/RSI 完全不可用。
         if mx_df is not None and not mx_df.empty:
             return mx_df
 
-        # MX 失败 → AkShare 东财
+        return None
+
+    def _get_kline_from_akshare(self, code: str, count: int) -> Optional[pd.DataFrame]:
+        """从 AkShare 东财日线获取带成交量的 K 线，用于补齐 MX 缺失的量能字段。"""
         try:
+            import akshare as ak
+
             symbol = f"sh{code}" if code.startswith(("6", "9")) else f"sz{code}"
-            df = ak.stock_zh_a_daily(symbol=symbol, adjust="qfq")
+            df = _quiet_akshare_call(ak.stock_zh_a_daily, symbol=symbol, adjust="qfq")
             if df is None or df.empty:
                 return None
             df = df.sort_values("date").tail(count * 2).reset_index(drop=True)
@@ -739,6 +836,14 @@ class MXMarketAdapter:
             return df
         except Exception:
             return None
+
+    @staticmethod
+    def _has_usable_volume(df: pd.DataFrame) -> bool:
+        """判断成交量是否是真实字段；全 0 通常代表上游没有提供量能数据。"""
+        if df is None or df.empty or "volume" not in df.columns:
+            return False
+        volume = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
+        return bool((volume > 0).any())
 
     def _get_kline_from_mx(self, code: str, count: int) -> Optional[pd.DataFrame]:
         """调用 MX finskillshub query 接口拉日K线。"""
@@ -870,7 +975,7 @@ class MXMarketAdapter:
         def _compute_ma(symbol: str) -> tuple[float, float, bool, int]:
             """计算 MA20、MA60、above_ma20、below_ma60_days。"""
             try:
-                df = ak.stock_zh_index_daily(symbol=symbol)
+                df = _quiet_akshare_call(ak.stock_zh_index_daily, symbol=symbol)
                 df = df.sort_values("date")
                 close = df["close"].astype(float)
                 ma20_val = close.rolling(20).mean().iloc[-1] if len(close) >= 20 else 0
@@ -931,7 +1036,7 @@ class MXMarketAdapter:
             # Phase 1: 并行拉取所有指数日线数据
             def _fetch_daily(code):
                 try:
-                    return code, ak.stock_zh_index_daily(symbol=code)
+                    return code, _quiet_akshare_call(ak.stock_zh_index_daily, symbol=code)
                 except Exception:
                     return code, None
 

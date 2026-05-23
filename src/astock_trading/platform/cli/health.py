@@ -16,6 +16,7 @@ from astock_trading.platform.config import ConfigRegistry
 from astock_trading.platform.database import MissingDatabaseUrl
 from astock_trading.platform.db import connect, get_schema_version, init_db
 from astock_trading.platform.paths import resolve_config_dir, resolve_path_from_config
+from astock_trading.platform.pipeline_policy import filter_unrecovered_failed_runs
 from astock_trading.platform.runs import RunJournal
 from astock_trading.platform.time import MARKET_TZ, utc_now
 
@@ -150,7 +151,14 @@ def register_health_commands(app: typer.Typer) -> None:
         conn = connect()
         try:
             journal = RunJournal(conn)
-            failed = journal.get_failed_runs(days=3)
+            failed_raw = journal.get_failed_runs(days=3)
+            successful_runs = journal.list_runs(status="completed", limit=200)
+            failed = filter_unrecovered_failed_runs(failed_raw, successful_runs)
+            unrecovered_ids = {item.get("run_id") for item in failed}
+            recovered_failed = [
+                item for item in failed_raw
+                if item.get("run_id") not in unrecovered_ids
+            ]
             active_running_rows = conn.execute(
                 "SELECT run_id, run_type, started_at FROM run_log "
                 "WHERE status = 'running' AND started_at >= ? "
@@ -181,6 +189,7 @@ def register_health_commands(app: typer.Typer) -> None:
                 "runs": {
                     "latest": latest_runs,
                     "failed_3d": [dict(r) for r in failed[:10]],
+                    "recovered_failed_3d": [dict(r) for r in recovered_failed[:10]],
                     "running": [dict(r) for r in active_running_rows],
                     "stale_running": stale_running[:20],
                 },
@@ -197,6 +206,7 @@ def register_health_commands(app: typer.Typer) -> None:
             typer.echo(f"Health: {result['status']}")
             typer.echo(f"DB: {result['db']['path']}")
             typer.echo(f"Failed runs in 3d: {len(result['runs']['failed_3d'])}")
+            typer.echo(f"Recovered failed runs in 3d: {len(result['runs']['recovered_failed_3d'])}")
             typer.echo(f"Running runs: {len(result['runs']['running'])}")
             typer.echo(f"Stale running runs: {len(result['runs']['stale_running'])}")
             typer.echo(f"Recent data observations: {len(result['data_sources']['recent_observations'])}")

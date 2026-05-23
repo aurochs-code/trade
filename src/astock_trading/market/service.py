@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, fields, is_dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import logging
 from typing import Optional
+
+import pandas as pd
 
 from astock_trading.market.models import (
     FinancialReport,
@@ -25,8 +27,9 @@ from astock_trading.market.models import (
 from astock_trading.market.source_router import SourceAttempt, SourceRouteOptions, SourceRouter
 from astock_trading.market.store import MarketStore
 from astock_trading.market.indicators import compute_technical_indicators
+from astock_trading.market.akshare_adapters import _quiet_akshare_call
 from astock_trading.market.adapters import is_hk_code
-from astock_trading.strategy.models import MarketState
+from astock_trading.strategy.models import MarketSignal, MarketState
 
 def _fetch_sina_intraday(codes: list[str]) -> dict[str, Optional[StockQuote]]:
     """
@@ -43,7 +46,7 @@ def _fetch_sina_intraday(codes: list[str]) -> dict[str, Optional[StockQuote]]:
     for code in codes:
         try:
             symbol = f"sh{code}" if code.startswith(("6", "9")) else f"sz{code}"
-            df = ak.stock_intraday_sina(symbol=symbol, date=today)
+            df = _quiet_akshare_call(ak.stock_intraday_sina, symbol=symbol, date=today)
             if df is None or df.empty:
                 continue
 
@@ -53,7 +56,7 @@ def _fetch_sina_intraday(codes: list[str]) -> dict[str, Optional[StockQuote]]:
             # prev_price 是分时前一笔价格，不能当昨收价用
             # 正确做法：用日K线获取昨收价来计算涨跌幅
             try:
-                daily = ak.stock_zh_a_daily(symbol=symbol, adjust="qfq")
+                daily = _quiet_akshare_call(ak.stock_zh_a_daily, symbol=symbol, adjust="qfq")
                 prev_close = float(daily["close"].iloc[-2]) if len(daily) >= 2 else price
             except Exception:
                 prev_close = price  # fallback
@@ -84,6 +87,8 @@ def _fetch_sina_intraday(codes: list[str]) -> dict[str, Optional[StockQuote]]:
 _logger = logging.getLogger(__name__)
 
 _FINANCIAL_SCORING_FIELDS = ("roe", "revenue_growth", "operating_cash_flow")
+_PROJECTION_MARKET_STATE_MAX_AGE_SECONDS = 3 * 24 * 60 * 60
+_QUOTE_KLINE_MAX_DIVERGENCE_PCT = 40.0
 _DEFAULT_SOURCE_ROUTE_OPTIONS = {
     "fund_flow": SourceRouteOptions(timeout_seconds=15.0, retries=0, max_failures=3, cooldown_seconds=300.0),
     "signal": SourceRouteOptions(timeout_seconds=10.0, retries=0, max_failures=3, cooldown_seconds=300.0),
@@ -173,6 +178,99 @@ def _to_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _price_divergence_pct(price: float, reference: float) -> float:
+    return abs(price / reference - 1) * 100 if reference > 0 else 0.0
+
+
+def _latest_kline_close(kline) -> float | None:
+    if kline is None or getattr(kline, "empty", True):
+        return None
+    row = kline.iloc[-1]
+    for key in ("close", "收盘"):
+        try:
+            value = row.get(key)
+        except AttributeError:
+            value = None
+        close = _to_float(value, default=None)
+        if close is not None and close > 0:
+            return close
+    return None
+
+
+def _positive_float(value) -> bool:
+    number = _to_float(value, default=None)
+    return number is not None and number > 0
+
+
+def _kline_has_usable_volume(kline) -> bool:
+    """判断 K 线是否包含真实成交量；全 0 通常表示该 provider 未提供量能。"""
+    if kline is None or getattr(kline, "empty", True):
+        return False
+    volume_col = "volume" if "volume" in kline.columns else "成交量" if "成交量" in kline.columns else None
+    if volume_col is not None:
+        volume = pd.to_numeric(kline[volume_col], errors="coerce").fillna(0)
+        if bool((volume > 0).any()):
+            return True
+    amount_col = "amount" if "amount" in kline.columns else "成交额" if "成交额" in kline.columns else None
+    close_col = "close" if "close" in kline.columns else "收盘" if "收盘" in kline.columns else None
+    if amount_col is None or close_col is None:
+        return False
+    amount = pd.to_numeric(kline[amount_col], errors="coerce").fillna(0)
+    close = pd.to_numeric(kline[close_col], errors="coerce").fillna(0)
+    estimated_volume = (amount / close.mask(close <= 0)).fillna(0)
+    return bool((estimated_volume > 0).any())
+
+
+def _has_valid_market_index_data(index_data: dict[str, dict]) -> bool:
+    for data in index_data.values():
+        if not isinstance(data, dict) or "error" in data:
+            continue
+
+        above_ma20 = data.get("above_ma20")
+        ma20_missing = "ma20" in data and not _positive_float(data.get("ma20"))
+        if isinstance(above_ma20, bool) and not ma20_missing:
+            return True
+
+        if "price" in data and not _positive_float(data.get("price")):
+            continue
+        if _to_float(data.get("change_pct"), default=None) is not None:
+            return True
+
+    return False
+
+
+def _recent_projection_timestamp(value) -> bool:
+    if not value:
+        return False
+    try:
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+    return 0 <= age <= _PROJECTION_MARKET_STATE_MAX_AGE_SECONDS
+
+
+def _row_value(row, key: str):
+    try:
+        return row[key]
+    except (KeyError, TypeError, IndexError):
+        getter = getattr(row, "get", None)
+        return getter(key) if callable(getter) else None
+
+
+def _projection_fallback_market_state(state: MarketState, live_index_data: dict[str, dict]) -> MarketState:
+    detail = dict(state.detail or {})
+    timer_reason = detail.get("reason")
+    if timer_reason:
+        detail["timer_reason"] = timer_reason
+    detail["reason"] = "指数数据源无有效数据，使用最近市场投影"
+    detail["fallback_source"] = "projection_market_state"
+    detail["live_indices"] = live_index_data
+    return replace(state, detail=detail)
+
+
 def _to_int_or_none(value) -> Optional[int]:
     try:
         if value is None or value == "":
@@ -259,7 +357,8 @@ class MarketService:
         self._flow = flow_providers or []
         self._sentiment = sentiment_providers or []
         self._store = store
-        self._sem = asyncio.Semaphore(concurrency)
+        self._concurrency = max(1, int(concurrency or 1))
+        self._sem = asyncio.Semaphore(self._concurrency)
         self._source_router = source_router or SourceRouter()
         self._source_route_options = {
             **_DEFAULT_SOURCE_ROUTE_OPTIONS,
@@ -333,6 +432,8 @@ class MarketService:
         codes: list[dict],
         run_id: Optional[str] = None,
         include_sector_context: bool = False,
+        per_snapshot_timeout_seconds: float | None = None,
+        sector_context_timeout_seconds: float | None = None,
     ) -> list[StockSnapshot]:
         """
         批量抓取（受 semaphore 限流）。
@@ -340,26 +441,54 @@ class MarketService:
         Args:
             codes: [{"code": "002138", "name": "双环传动"}, ...]
             include_sector_context: 是否补充行业排名和相对强度上下文。
+            per_snapshot_timeout_seconds: 单票完整快照总超时；超时后返回空快照继续整批。
+            sector_context_timeout_seconds: 行业/概念上下文总超时；超时后保留原快照。
         """
-        tasks = [
-            self.collect_snapshot(item["code"], item.get("name", ""), run_id)
-            for item in codes
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        async def _collect(item: dict) -> StockSnapshot:
+            coro = self.collect_snapshot(item["code"], item.get("name", ""), run_id)
+            if per_snapshot_timeout_seconds and per_snapshot_timeout_seconds > 0:
+                return await asyncio.wait_for(coro, timeout=per_snapshot_timeout_seconds)
+            return await coro
 
         snapshots = []
-        for i, r in enumerate(results):
-            if isinstance(r, Exception):
-                _logger.error(f"[batch] {codes[i]['code']} failed: {r}")
+        batch_size = self._concurrency if per_snapshot_timeout_seconds else len(codes)
+        for offset in range(0, len(codes), batch_size):
+            chunk = codes[offset: offset + batch_size]
+            tasks = [_collect(item) for item in chunk]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for i, r in enumerate(results):
+                item = chunk[i]
+                if not isinstance(r, Exception):
+                    snapshots.append(r)
+                    continue
+                if isinstance(r, TimeoutError):
+                    _logger.debug(
+                        "[batch] %s snapshot timeout after %.1fs",
+                        item["code"],
+                        per_snapshot_timeout_seconds or 0,
+                    )
+                else:
+                    _logger.error(f"[batch] {item['code']} failed: {r}")
                 snapshots.append(StockSnapshot(
-                    code=codes[i]["code"],
-                    name=codes[i].get("name", codes[i]["code"]),
+                    code=item["code"],
+                    name=item.get("name", item["code"]),
                 ))
-            else:
-                snapshots.append(r)
 
         if include_sector_context:
-            snapshots = await self._attach_sector_context(snapshots, run_id)
+            try:
+                sector_coro = self._attach_sector_context(snapshots, run_id)
+                if sector_context_timeout_seconds and sector_context_timeout_seconds > 0:
+                    snapshots = await asyncio.wait_for(
+                        sector_coro,
+                        timeout=sector_context_timeout_seconds,
+                    )
+                else:
+                    snapshots = await sector_coro
+            except TimeoutError:
+                _logger.debug(
+                    "[batch] sector context timeout after %.1fs",
+                    sector_context_timeout_seconds or 0,
+                )
 
         return snapshots
 
@@ -439,7 +568,7 @@ class MarketService:
             # 方案B：回退到 AkShare 全量快照（仅当没有注入 provider 时才用）
             try:
                 import akshare as ak
-                df = ak.stock_zh_a_spot_em()
+                df = _quiet_akshare_call(ak.stock_zh_a_spot_em)
                 code_set = set(missing)
                 for _, row in df.iterrows():
                     code = str(row.get("代码", "")).strip()
@@ -572,7 +701,19 @@ class MarketService:
                 _logger.warning(f"[market_state] provider failed: {e}")
                 continue
 
-        state = compute_market_signal(index_data)
+        if _has_valid_market_index_data(index_data):
+            state = compute_market_signal(index_data)
+        else:
+            projection_index_data = self._cached_projection_market_index_data()
+            if projection_index_data:
+                state = _projection_fallback_market_state(
+                    compute_market_signal(projection_index_data),
+                    live_index_data=index_data,
+                )
+                index_data = projection_index_data
+            else:
+                cached_state = self._cached_market_state()
+                state = cached_state or compute_market_signal(index_data)
 
         if self._store and run_id:
             self._store.save_observation(
@@ -587,6 +728,70 @@ class MarketService:
             )
 
         return state, index_data
+
+    def _cached_projection_market_index_data(self) -> dict[str, dict]:
+        conn = getattr(self._store, "_conn", None)
+        if conn is None:
+            return {}
+
+        try:
+            rows = conn.execute(
+                """SELECT index_symbol, name, `signal`, price_cents, change_pct, ma20_pct, ma60_pct, updated_at
+                   FROM projection_market_state
+                   ORDER BY updated_at DESC, index_symbol
+                   LIMIT 20"""
+            ).fetchall()
+        except Exception:
+            return {}
+
+        index_data: dict[str, dict] = {}
+        for row in rows:
+            updated_at = _row_value(row, "updated_at")
+            if not _recent_projection_timestamp(updated_at):
+                continue
+            name = str(_row_value(row, "name") or _row_value(row, "index_symbol") or "")
+            if not name:
+                continue
+            price_cents = _to_float(_row_value(row, "price_cents"), default=None)
+            ma20_pct = _to_float(_row_value(row, "ma20_pct"), default=None)
+            payload = {
+                "symbol": _row_value(row, "index_symbol"),
+                "price": round(price_cents / 100, 4) if price_cents is not None else None,
+                "change_pct": _to_float(_row_value(row, "change_pct"), default=None),
+                "ma20_pct": ma20_pct,
+                "ma60_pct": _to_float(_row_value(row, "ma60_pct"), default=None),
+                "updated_at": updated_at,
+                "source": "projection_market_state",
+            }
+            if ma20_pct is not None:
+                payload["above_ma20"] = ma20_pct >= 0
+            signal = str(_row_value(row, "signal") or "")
+            if signal:
+                payload["signal"] = signal
+            index_data[name] = payload
+
+        return index_data if _has_valid_market_index_data(index_data) else {}
+
+    def _cached_market_state(self) -> Optional[MarketState]:
+        if not self._store:
+            return None
+        payload = self._store.get_cached("market", "market_state")
+        if not payload:
+            return None
+        try:
+            signal = MarketSignal(str(payload.get("signal", "")))
+            multiplier = float(payload.get("multiplier", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return None
+        return MarketState(
+            signal=signal,
+            multiplier=multiplier,
+            detail={
+                "reason": "指数数据源无有效数据，沿用最近市场信号",
+                "fallback_signal": signal.value,
+                "indices": {},
+            },
+        )
 
     async def collect_market_stats(self) -> dict:
         """获取全市场升降家数统计。"""
@@ -610,13 +815,23 @@ class MarketService:
         if self._store:
             cached = self._store.get_cached(code, "quote")
             if cached:
-                return StockQuote(**cached)
+                quote = StockQuote(**cached)
+                if await self._quote_matches_recent_kline(code, quote):
+                    return quote
+                _logger.info("[quote] %s cached quote rejected by kline sanity check", code)
 
         for provider in self._market:
             try:
                 quotes = await provider.get_realtime([code])
-                if code in quotes:
-                    return quotes[code]
+                quote = quotes.get(code) if isinstance(quotes, dict) else None
+                if quote is not None:
+                    if await self._quote_matches_recent_kline(code, quote):
+                        return quote
+                    _logger.info(
+                        "[quote] %s provider %s quote rejected by kline sanity check",
+                        code,
+                        provider.__class__.__name__,
+                    )
             except Exception as e:
                 _logger.info(f"[quote] {code} provider failed: {e}")
                 continue
@@ -631,6 +846,34 @@ class MarketService:
                 _logger.info(f"[quote] {code} provider kline fallback failed: {e}")
                 continue
         return None
+
+    async def _quote_matches_recent_kline(self, code: str, quote: StockQuote) -> bool:
+        """用同票日 K 收盘价过滤明显串价的实时 quote。"""
+        price = _to_float(getattr(quote, "price", None), default=None)
+        if price is None or price <= 0:
+            return False
+
+        for provider in self._iter_kline_providers(code):
+            try:
+                kline = await provider.get_kline(code, "daily", 5)
+            except Exception as e:
+                _logger.info(f"[quote] {code} kline sanity provider failed: {e}")
+                continue
+            close = _latest_kline_close(kline)
+            if close is None:
+                continue
+            divergence = _price_divergence_pct(price, close)
+            if divergence > _QUOTE_KLINE_MAX_DIVERGENCE_PCT:
+                _logger.warning(
+                    "[quote] %s price %.4f differs from kline close %.4f by %.2f%%; rejected",
+                    code,
+                    price,
+                    close,
+                    divergence,
+                )
+                return False
+            return True
+        return True
 
     async def _get_financial(self, code: str) -> Optional[object]:
         """从 financial providers 获取财务数据，按字段合并多个来源。"""
@@ -781,15 +1024,21 @@ class MarketService:
 
     async def _get_technical(self, code: str, quote: Optional[StockQuote]) -> Optional[TechnicalIndicators]:
         """从 K 线计算技术指标。"""
+        price_only_fallback: Optional[TechnicalIndicators] = None
         for provider in self._iter_kline_providers(code):
             try:
                 kline = await provider.get_kline(code, "daily", 120)
                 if kline is not None and not kline.empty:
-                    return compute_technical_indicators(kline, quote)
+                    technical = compute_technical_indicators(kline, quote)
+                    if _kline_has_usable_volume(kline):
+                        return technical
+                    if price_only_fallback is None:
+                        price_only_fallback = technical
+                    continue
             except Exception as e:
                 _logger.info(f"[technical] {code} provider kline failed: {e}")
                 continue
-        return None
+        return price_only_fallback
 
     def _iter_kline_providers(self, code: str):
         """为指定代码挑选合适的 K 线 provider。"""

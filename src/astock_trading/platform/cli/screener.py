@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
+import json
+import os
+import signal
+import subprocess
+import sys
 from collections import Counter
 from datetime import timedelta
 from typing import Optional
 
 import typer
 
-from astock_trading.market.adapters import MXScreenerAdapter
 from astock_trading.market.models import StockSnapshot
 from astock_trading.pipeline.context import build_context
+from astock_trading.platform.candidate_evidence import enrich_candidate_rows_with_latest_scores
 from astock_trading.platform.cli.common import json_or_text
 from astock_trading.platform.db import connect
 from astock_trading.platform.events import EventStore
@@ -21,6 +28,37 @@ from astock_trading.reporting.projectors import ProjectionUpdater
 
 
 screener_app = typer.Typer(name="screener", help="选股、评分和候选池管理")
+DEFAULT_SNAPSHOT_TIMEOUT_SECONDS = 20.0
+DEFAULT_SCREENER_QUERY_TIMEOUT_SECONDS = 30.0
+DEFAULT_SCREENER_SCORING_TIMEOUT_SECONDS = 90.0
+
+
+class ScreenerSearchTimeout(Exception):
+    """选股粗筛源超时。"""
+
+    def __init__(self, query: str, timeout_seconds: float):
+        super().__init__(f"screener search timeout after {timeout_seconds:.1f}s: {query}")
+        self.query = query
+        self.timeout_seconds = timeout_seconds
+
+
+class ScreenerSearchFailed(Exception):
+    """选股粗筛子进程失败。"""
+
+    def __init__(self, query: str, *, returncode: int, stderr_tail: str):
+        super().__init__(f"screener search failed with code {returncode}: {query}")
+        self.query = query
+        self.returncode = returncode
+        self.stderr_tail = stderr_tail
+
+
+class ScreenerScoringTimeout(Exception):
+    """逐票评分或行情采集超时。"""
+
+    def __init__(self, query: str, timeout_seconds: float):
+        super().__init__(f"screener scoring timeout after {timeout_seconds:.1f}s: {query}")
+        self.query = query
+        self.timeout_seconds = timeout_seconds
 
 
 def _split_codes(codes: str) -> list[str]:
@@ -45,12 +83,25 @@ def _candidate_rows(conn, tier: str = "all", limit: int = 100) -> list[dict]:
                LIMIT ?""",
             (tier, limit),
         ).fetchall()
-    return [dict(row) for row in rows]
+    result = [dict(row) for row in rows]
+    enrich_candidate_rows_with_latest_scores(conn, result)
+    return result
 
 
 def _score_stock_batch(ctx, stock_list: list[dict], run_id: str) -> dict:
+    cfg = ctx.cfg.get("screening", {})
+    snapshot_timeout = float(
+        cfg.get("snapshot_timeout_seconds") or DEFAULT_SNAPSHOT_TIMEOUT_SECONDS
+    )
+    sector_context_timeout = float(cfg.get("sector_context_timeout_seconds") or 15.0)
     snapshots = asyncio.run(
-        ctx.market_svc.collect_batch(stock_list, run_id, include_sector_context=True)
+        ctx.market_svc.collect_batch(
+            stock_list,
+            run_id,
+            include_sector_context=True,
+            per_snapshot_timeout_seconds=snapshot_timeout,
+            sector_context_timeout_seconds=sector_context_timeout,
+        )
     )
     market_state, index_data = asyncio.run(ctx.market_svc.collect_market_state(run_id))
     if index_data:
@@ -148,28 +199,467 @@ def _watch_threshold(ctx, explicit_threshold: Optional[float]) -> float:
     pool_cfg = ctx.cfg.get("pool_management", {})
     scoring_cfg = ctx.cfg.get("scoring", {})
     return float(
-        pool_cfg.get("promote_min_score")
+        pool_cfg.get("watch_min_score")
+        or scoring_cfg.get("thresholds", {}).get("watch")
+        or pool_cfg.get("promote_min_score")
         or scoring_cfg.get("thresholds", {}).get("buy")
-        or 5.5
+        or 5.0
     )
+
+
+def _screening_report_thresholds(ctx, watch_threshold: float) -> dict[str, float]:
+    thresholds = ctx.cfg.get("scoring", {}).get("thresholds", {})
+    return {
+        "buy": float(thresholds.get("buy") or max(watch_threshold, 5.5)),
+        "watch": float(thresholds.get("watch") or watch_threshold),
+    }
 
 
 def _pool_thresholds(ctx) -> dict[str, float]:
     pool_cfg = ctx.cfg.get("pool_management", {})
     scoring_cfg = ctx.cfg.get("scoring", {})
     thresholds = scoring_cfg.get("thresholds", {})
+    watch = float(pool_cfg.get("watch_min_score") or thresholds.get("watch") or 5.0)
+    reject = float(pool_cfg.get("remove_max_score") or thresholds.get("reject") or 4.0)
     return {
         "promote": float(pool_cfg.get("promote_min_score") or thresholds.get("buy") or 5.5),
-        "watch": float(pool_cfg.get("watch_min_score") or thresholds.get("watch") or 5.0),
-        "reject": float(pool_cfg.get("remove_max_score") or thresholds.get("reject") or 4.0),
+        "watch": watch,
+        "radar": float(pool_cfg.get("radar_min_score") or pool_cfg.get("near_watch_min_score") or max(reject, watch - 0.5)),
+        "reject": reject,
         "promote_streak_days": int(pool_cfg.get("promote_streak_days") or 1),
+        "entry_signal_promote_streak_days": int(
+            pool_cfg.get("entry_signal_promote_streak_days")
+            or pool_cfg.get("promote_streak_days")
+            or 1
+        ),
     }
 
 
-def _scan_limit(cfg: dict, explicit_limit: Optional[int]) -> int:
+DEFAULT_REFRESH_SCAN_LIMIT = 80
+
+
+def _scan_limit(cfg: dict, explicit_limit: Optional[int], *, refresh_pool: bool = False) -> int:
     if explicit_limit is not None:
-        return explicit_limit
-    return int(cfg.get("market_scan_limit") or 30)
+        return max(1, int(explicit_limit))
+    market_limit = int(cfg.get("market_scan_limit") or 30)
+    if not refresh_pool:
+        return market_limit
+    refresh_limit = int(cfg.get("refresh_scan_limit") or DEFAULT_REFRESH_SCAN_LIMIT)
+    return max(1, min(market_limit, refresh_limit))
+
+
+def _screener_query_timeout(cfg: dict) -> float:
+    return float(
+        cfg.get("screener_query_timeout_seconds")
+        or DEFAULT_SCREENER_QUERY_TIMEOUT_SECONDS
+    )
+
+
+def _screener_scoring_timeout(cfg: dict) -> float:
+    return float(
+        cfg.get("screener_scoring_timeout_seconds")
+        or DEFAULT_SCREENER_SCORING_TIMEOUT_SECONDS
+    )
+
+
+def _score_stock_batch_with_timeout(
+    ctx,
+    stock_list: list[dict],
+    run_id: str,
+    *,
+    query: str,
+    timeout_seconds: float,
+) -> dict:
+    if timeout_seconds <= 0:
+        return _score_stock_batch(ctx, stock_list, run_id)
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def _handle_timeout(signum, frame):  # noqa: ARG001
+        raise ScreenerScoringTimeout(query, timeout_seconds)
+
+    signal.signal(signal.SIGALRM, _handle_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return _score_stock_batch(ctx, stock_list, run_id)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def _exit_after_scoring_timeout(status_code: int) -> None:
+    """真实 CLI 超时后强制退出，避免 native provider 资源清理继续卡住进程。"""
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        raise typer.Exit(status_code)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(status_code)
+
+
+def _search_screener_results(query: str, timeout_seconds: float) -> list[dict]:
+    """用独立 Python 子进程隔离粗筛源，避免 native crash 拖垮 CLI。"""
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "astock_trading.platform.cli.screener_search_worker",
+                query,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=max(float(timeout_seconds), 0.1),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ScreenerSearchTimeout(query, timeout_seconds) from exc
+    if result.returncode != 0:
+        raise ScreenerSearchFailed(
+            query,
+            returncode=result.returncode,
+            stderr_tail=(result.stderr or "")[-1200:],
+        )
+    try:
+        rows = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise ScreenerSearchFailed(
+            query,
+            returncode=result.returncode,
+            stderr_tail=f"粗筛子进程返回非 JSON 输出: {(result.stdout or '')[-400:]}",
+        ) from exc
+    return rows if isinstance(rows, list) else []
+
+
+def _screener_search_timeout_payload(
+    *,
+    command: str,
+    query: str,
+    timeout_seconds: float,
+) -> dict:
+    return {
+        "command": command,
+        "status": "failed",
+        "reason": "screener_search_timeout",
+        "query": query,
+        "timeout_seconds": timeout_seconds,
+        "execution_allowed": False,
+        "writes_state": False,
+        "summary": "选股粗筛源超时，候选池未刷新；先诊断数据源或调小刷新范围。",
+        "next_action": {
+            "type": "diagnose_data_sources",
+            "label": "诊断数据源",
+            "command": "atrade data-sources diagnose --json",
+            "safe_to_auto_apply": True,
+        },
+    }
+
+
+def _screener_search_failed_payload(
+    *,
+    command: str,
+    query: str,
+    exc: ScreenerSearchFailed,
+) -> dict:
+    return {
+        "command": command,
+        "status": "failed",
+        "reason": "screener_search_failed",
+        "query": query,
+        "execution_allowed": False,
+        "writes_state": False,
+        "summary": "选股粗筛源执行失败，候选池未刷新；先诊断数据源或改用缓存/热点召回证据。",
+        "diagnostic": {
+            "returncode": exc.returncode,
+            "stderr_tail": exc.stderr_tail,
+        },
+        "next_action": {
+            "type": "diagnose_data_sources",
+            "label": "诊断数据源",
+            "command": "atrade data-sources diagnose --json",
+            "safe_to_auto_apply": True,
+        },
+    }
+
+
+def _screener_scoring_timeout_payload(
+    *,
+    command: str,
+    query: str,
+    timeout_seconds: float,
+) -> dict:
+    return {
+        "command": command,
+        "status": "failed",
+        "reason": "screener_scoring_timeout",
+        "query": query,
+        "timeout_seconds": timeout_seconds,
+        "execution_allowed": False,
+        "candidate_pool_refreshed": False,
+        "may_have_partial_score_events": True,
+        "summary": "逐票评分或行情采集超时，候选池未刷新；先诊断数据源或调小 --limit。",
+        "next_action": {
+            "type": "diagnose_data_sources",
+            "label": "诊断数据源",
+            "command": "atrade data-sources diagnose --json",
+            "safe_to_auto_apply": True,
+        },
+    }
+
+
+HOT_RECALL_KINDS = (
+    "cross_platform_hot_stocks",
+    "xueqiu_hot_stocks",
+    "hot_stocks",
+)
+DEFAULT_HOT_RECALL_LIMIT = 20
+DEFAULT_RECENT_SIGNAL_RECALL_LIMIT = 20
+DEFAULT_RECENT_SIGNAL_RECALL_EVENT_LIMIT = 500
+
+
+def _hot_recall_candidates(conn, *, limit: int = DEFAULT_HOT_RECALL_LIMIT) -> list[dict]:
+    """从最近热点观测里提取额外召回股票，只用于打分和观察，不直接买入。"""
+    rows = conn.execute(
+        f"""SELECT kind, payload_json, observed_at
+            FROM market_observations
+            WHERE kind IN ({",".join("?" for _ in HOT_RECALL_KINDS)})
+            ORDER BY observed_at DESC
+            LIMIT 30""",
+        HOT_RECALL_KINDS,
+    ).fetchall()
+    latest_by_kind: dict[str, dict] = {}
+    for row in rows:
+        kind = row["kind"]
+        if kind in latest_by_kind:
+            continue
+        try:
+            payload = json.loads(row["payload_json"]) if isinstance(row["payload_json"], str) else row["payload_json"]
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        latest_by_kind[kind] = {"kind": kind, "payload": payload or {}}
+
+    seen: set[str] = set()
+    candidates: list[dict] = []
+    for kind in HOT_RECALL_KINDS:
+        payload = latest_by_kind.get(kind, {}).get("payload", {})
+        for item in _hot_recall_items(payload):
+            code = _normalize_a_share_code(item.get("code") or item.get("代码") or item.get("symbol") or "")
+            name = str(item.get("name") or item.get("名称") or item.get("secName") or code).strip()
+            if not code or code in seen or _is_st_stock_name(name):
+                continue
+            candidates.append({"code": code, "name": name, "recall_source": kind})
+            seen.add(code)
+            if len(candidates) >= limit:
+                return candidates
+    return candidates
+
+
+def _recent_signal_recall_candidates(
+    conn,
+    *,
+    min_score: float,
+    watch_score: float,
+    limit: int = DEFAULT_RECENT_SIGNAL_RECALL_LIMIT,
+    event_limit: int = DEFAULT_RECENT_SIGNAL_RECALL_EVENT_LIMIT,
+) -> list[dict]:
+    """把近期临界评分和入场信号重新召回到刷新评分，不直接入池或买入。"""
+    if limit <= 0:
+        return []
+    try:
+        rows = conn.execute(
+            """SELECT payload_json, occurred_at, stream_version
+               FROM event_log
+               WHERE event_type = 'score.calculated'
+               ORDER BY occurred_at DESC, stream_version DESC
+               LIMIT ?""",
+            (max(int(event_limit), int(limit)),),
+        ).fetchall()
+    except Exception:
+        return []
+
+    seen: set[str] = set()
+    candidates: list[dict] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        code = _normalize_a_share_code(payload.get("code") or "")
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        if bool(payload.get("veto_triggered")):
+            continue
+        if str(payload.get("data_quality") or "ok").lower() == "error":
+            continue
+
+        score = _score_value(payload)
+        entry_signal = _truthy(payload.get("entry_signal"))
+        if entry_signal and score >= min_score:
+            recall_source = "recent_entry_signal"
+        elif score >= watch_score:
+            recall_source = "recent_signal_score"
+        else:
+            continue
+
+        candidates.append({
+            "code": code,
+            "name": str(payload.get("name") or code),
+            "recall_source": recall_source,
+            "score": score,
+            "entry_signal": entry_signal,
+        })
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
+def _hot_recall_items(payload: object) -> list[dict]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("stocks", "items", "data", "result"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _is_st_stock_name(name: str) -> bool:
+    normalized = name.upper().replace("＊", "*")
+    return "ST" in normalized
+
+
+def _normalize_a_share_code(value: object) -> str:
+    code = str(value or "").strip().upper()
+    if not code:
+        return ""
+    if len(code) == 6 and code.isdigit():
+        return code
+    if len(code) == 8 and code[:2] in {"SH", "SZ", "BJ"} and code[2:].isdigit():
+        return code[2:]
+    if len(code) == 9 and code[:6].isdigit() and code[6:] in {".SH", ".SZ", ".BJ"}:
+        return code[:6]
+    return ""
+
+
+def _append_candidate_with_budget(
+    selected: list[dict],
+    seen: set[str],
+    candidate: dict,
+    *,
+    source: str,
+    source_counts: Counter,
+    score_limit: int,
+) -> bool:
+    if len(selected) >= score_limit:
+        return False
+    code = str(candidate.get("code") or "").strip()
+    if not code or code in seen:
+        return False
+    selected.append({"code": code, "name": candidate.get("name") or ""})
+    seen.add(code)
+    source_counts[source] += 1
+    return True
+
+
+def _refresh_source_budgets(
+    score_limit: int,
+    *,
+    hot_count: int,
+    recent_signal_count: int = 0,
+    existing_count: int,
+) -> dict[str, int]:
+    if score_limit <= 0:
+        return {"mx": 0, "hot_stocks": 0, "recent_signals": 0, "existing_pool": 0}
+
+    existing_budget = 0
+    if existing_count:
+        existing_budget = min(existing_count, max(1, 3 if score_limit >= 5 else score_limit // 2))
+
+    recent_signal_budget = 0
+    if recent_signal_count and score_limit >= 3:
+        recent_signal_budget = min(recent_signal_count, max(1, score_limit // 5))
+
+    hot_budget = 0
+    if hot_count and score_limit >= 3:
+        hot_budget = min(hot_count, max(1, score_limit // 5))
+
+    reserved = min(score_limit, recent_signal_budget + hot_budget + existing_budget)
+    return {
+        "mx": max(score_limit - reserved, 0),
+        "hot_stocks": hot_budget,
+        "recent_signals": recent_signal_budget,
+        "existing_pool": existing_budget,
+    }
+
+
+def _build_scoring_candidates(
+    raw_candidates: list[dict],
+    hot_candidates: list[dict],
+    recent_signal_candidates: list[dict],
+    existing_candidates: list[dict],
+    *,
+    score_limit: int,
+    refresh_pool: bool,
+) -> dict:
+    source_counts: Counter = Counter()
+    selected: list[dict] = []
+    seen: set[str] = set()
+
+    if not refresh_pool:
+        for candidate in raw_candidates:
+            _append_candidate_with_budget(
+                selected,
+                seen,
+                candidate,
+                source="mx",
+                source_counts=source_counts,
+                score_limit=score_limit,
+            )
+        return {"stock_list": selected, "source_counts": dict(source_counts)}
+
+    buckets = {
+        "mx": raw_candidates,
+        "hot_stocks": hot_candidates,
+        "recent_signals": recent_signal_candidates,
+        "existing_pool": existing_candidates,
+    }
+    budgets = _refresh_source_budgets(
+        score_limit,
+        hot_count=len(hot_candidates),
+        recent_signal_count=len(recent_signal_candidates),
+        existing_count=len(existing_candidates),
+    )
+    source_order = ("existing_pool", "recent_signals", "hot_stocks", "mx")
+    for source in source_order:
+        for candidate in buckets[source]:
+            if source_counts[source] >= budgets[source]:
+                break
+            _append_candidate_with_budget(
+                selected,
+                seen,
+                candidate,
+                source=source,
+                source_counts=source_counts,
+                score_limit=score_limit,
+            )
+
+    for source in source_order:
+        for candidate in buckets[source]:
+            _append_candidate_with_budget(
+                selected,
+                seen,
+                candidate,
+                source=source,
+                source_counts=source_counts,
+                score_limit=score_limit,
+            )
+
+    return {"stock_list": selected, "source_counts": dict(source_counts)}
 
 
 CORE_ROUTE_BLOCKER = "requires_entry_strategy_route"
@@ -185,6 +675,11 @@ MARKET_SIGNAL_CN = {
     "YELLOW": "震荡",
     "RED": "转弱",
     "CLEAR": "观望",
+}
+POOL_TIER_CN = {
+    "core": "核心",
+    "watch": "观察",
+    "radar": "强势观察",
 }
 DATA_QUALITY_CN = {
     "ok": "正常",
@@ -210,6 +705,94 @@ def _label(mapping: dict[str, str], value: object) -> str:
 
 def _score_value(payload: dict) -> float:
     return float(payload.get("total_score", payload.get("total", payload.get("score", 0))) or 0)
+
+
+def _latest_scores_by_code(scores: list[dict]) -> list[dict]:
+    latest: dict[str, dict] = {}
+    anonymous: list[dict] = []
+    for score in scores:
+        code = str(score.get("code") or "")
+        if not code:
+            anonymous.append(score)
+            continue
+        latest[code] = score
+    return [*latest.values(), *anonymous]
+
+
+def _candidate_pool_score(row: dict) -> float:
+    return float(row.get("score", row.get("total_score", row.get("total", 0))) or 0)
+
+
+def _current_candidate_pool_summary(current_candidates: list[dict]) -> dict:
+    counts = {"core": 0, "watch": 0, "radar": 0}
+    items = []
+    tier_order = {"core": 0, "watch": 1, "radar": 2}
+    for row in sorted(
+        current_candidates,
+        key=lambda item: (
+            tier_order.get(str(item.get("pool_tier") or ""), 99),
+            -_candidate_pool_score(item),
+            str(item.get("code") or ""),
+        ),
+    ):
+        tier = str(row.get("pool_tier") or "")
+        if tier in counts:
+            counts[tier] += 1
+        items.append({
+            "code": row.get("code", ""),
+            "name": row.get("name", ""),
+            "pool_tier": tier,
+            "pool_tier_label": _label(POOL_TIER_CN, tier),
+            "score": _candidate_pool_score(row),
+            "entry_signal": _truthy(row.get("entry_signal")),
+            "data_quality": row.get("data_quality") or "ok",
+            "last_scored_at": row.get("last_scored_at", ""),
+            "note": row.get("note", ""),
+        })
+    return {"counts": counts, "items": items}
+
+
+def _merge_scores_with_current_candidates(
+    scores: list[dict],
+    current_candidates: list[dict],
+) -> list[dict]:
+    merged_by_code: dict[str, dict] = {}
+    anonymous: list[dict] = []
+    for score in scores:
+        code = str(score.get("code") or "")
+        if not code:
+            anonymous.append(score)
+            continue
+        merged_by_code[code] = dict(score)
+
+    for candidate in current_candidates:
+        code = str(candidate.get("code") or "")
+        if not code:
+            continue
+        existing = merged_by_code.get(code, {})
+        tier = str(candidate.get("pool_tier") or "")
+        entry_signal = candidate.get("entry_signal")
+        if entry_signal is None:
+            entry_signal = existing.get("entry_signal", False)
+        data_quality = candidate.get("data_quality") or existing.get("data_quality") or "ok"
+        merged_by_code[code] = {
+            **existing,
+            "code": code,
+            "name": candidate.get("name") or existing.get("name", ""),
+            "total_score": _candidate_pool_score(candidate),
+            "data_quality": data_quality,
+            "entry_signal": _truthy(entry_signal),
+            "veto_triggered": bool(existing.get("veto_triggered", False)),
+            "hard_veto_signals": existing.get("hard_veto_signals") or [],
+            "data_missing_fields": existing.get("data_missing_fields") or [],
+            "score_source": "current_candidate_pool",
+            "pool_tier": tier,
+            "pool_tier_label": _label(POOL_TIER_CN, tier),
+            "last_scored_at": candidate.get("last_scored_at", ""),
+            "note": candidate.get("note", ""),
+        }
+
+    return [*merged_by_code.values(), *anonymous]
 
 
 def _truthy(value: object) -> bool:
@@ -275,7 +858,7 @@ def _near_miss_blockers(score: dict, buy_threshold: float) -> list[str]:
 def _candidate_follow_up_item(score: dict, buy_threshold: float) -> dict:
     quality = str(score.get("data_quality", "ok"))
     hard_veto = [str(item) for item in (score.get("hard_veto_signals") or [])]
-    return {
+    item = {
         "code": score.get("code", ""),
         "name": score.get("name", ""),
         "score": _score_value(score),
@@ -287,6 +870,36 @@ def _candidate_follow_up_item(score: dict, buy_threshold: float) -> dict:
         "hard_veto_labels": [_label(BLOCKER_CN, item) for item in hard_veto],
         "missing_fields": [str(item) for item in (score.get("data_missing_fields") or [])],
         "blockers": _near_miss_blockers(score, buy_threshold),
+    }
+    if score.get("score_source"):
+        item["score_source"] = score.get("score_source")
+    if score.get("pool_tier"):
+        item["pool_tier"] = score.get("pool_tier")
+        item["pool_tier_label"] = score.get("pool_tier_label") or _label(
+            POOL_TIER_CN,
+            score.get("pool_tier"),
+        )
+    for key in ("score_event_id", "scored_at"):
+        if score.get(key):
+            item[key] = score.get(key)
+    if _historical_entry_signal_recall_hint(score):
+        item["recall_hint"] = _historical_entry_signal_recall_hint(score)
+    return item
+
+
+def _historical_entry_signal_recall_hint(score: dict) -> dict | None:
+    if score.get("score_source") != "score_event":
+        return None
+    if not _truthy(score.get("entry_signal")):
+        return None
+    if score.get("pool_tier"):
+        return None
+    return {
+        "type": "recent_entry_signal_recall",
+        "label": "历史入场信号需重新评分入池",
+        "command": "atrade screener refresh --json",
+        "safe_to_auto_apply": True,
+        "reason": "该票来自历史评分事件，不在当前候选池；先通过刷新召回重新评分，不直接当成当前可模拟候选。",
     }
 
 
@@ -329,8 +942,16 @@ def _follow_up_candidates(
     )
 
 
-def _next_actions(follow_up: dict) -> list[dict]:
+def _next_actions(follow_up: dict, current_candidate_pool: dict | None = None) -> list[dict]:
     actions = []
+    current_items = (current_candidate_pool or {}).get("items") or []
+    if any(item.get("pool_tier") == "core" and _truthy(item.get("entry_signal")) for item in current_items):
+        actions.append({
+            "type": "paper_auto_readiness",
+            "label": "复核模拟盘承接",
+            "command": "atrade paper auto-readiness --json",
+        })
+
     watch_candidates = follow_up.get("watch_candidates") or []
     near_watch_candidates = follow_up.get("near_watch_candidates") or []
     blocked_high_scores = follow_up.get("blocked_high_scores") or []
@@ -344,6 +965,14 @@ def _next_actions(follow_up: dict) -> list[dict]:
             "command": f"atrade stock analyze {code} --json",
         })
     if near_watch_candidates:
+        recall_hint = near_watch_candidates[0].get("recall_hint") or {}
+        if recall_hint:
+            actions.append({
+                "type": "refresh_recent_signal_recall",
+                "label": "刷新历史入场信号候选",
+                "command": str(recall_hint.get("command") or "atrade screener refresh --json"),
+                "safe_to_auto_apply": bool(recall_hint.get("safe_to_auto_apply", True)),
+            })
         code = near_watch_candidates[0].get("code", "")
         actions.append({
             "type": "near_watch_review",
@@ -383,7 +1012,13 @@ def _build_screener_explanation(
     near_miss_margin: float = 1.0,
     near_miss_limit: int = 20,
     follow_up_limit: int = 10,
+    current_candidates: list[dict] | None = None,
 ) -> dict:
+    raw_score_count = len(scores)
+    scores = _latest_scores_by_code(scores)
+    current_candidates = current_candidates or []
+    actionable_scores = _merge_scores_with_current_candidates(scores, current_candidates)
+    current_candidate_pool = _current_candidate_pool_summary(current_candidates)
     buy_threshold = float(thresholds.get("buy") or 6.0)
     watch_threshold = float(thresholds.get("watch") or 5.0)
     reject_threshold = float(thresholds.get("reject") or 4.0)
@@ -425,23 +1060,30 @@ def _build_screener_explanation(
         decision_veto_counter.update(str(item) for item in (decision.get("veto_reasons") or []))
 
     near_misses = []
-    for score in sorted(scores, key=_score_value, reverse=True):
+    for score in sorted(actionable_scores, key=_score_value, reverse=True):
         total = _score_value(score)
         if len(near_misses) >= near_miss_limit:
             break
         if total < near_buy_floor or total >= buy_threshold or bool(score.get("veto_triggered")):
             continue
-        near_misses.append({
+        item = {
             "code": score.get("code", ""),
             "name": score.get("name", ""),
             "score": total,
             "data_quality": score.get("data_quality", "ok"),
             "entry_signal": _truthy(score.get("entry_signal")),
             "blockers": _near_miss_blockers(score, buy_threshold),
-        })
+        }
+        for key in ("score_source", "pool_tier", "pool_tier_label", "score_event_id", "scored_at"):
+            if score.get(key):
+                item[key] = score[key]
+        if _historical_entry_signal_recall_hint(score):
+            item["recall_hint"] = _historical_entry_signal_recall_hint(score)
+        near_misses.append(item)
 
-    top_scores = [
-        {
+    top_scores = []
+    for score in sorted(actionable_scores, key=_score_value, reverse=True)[:10]:
+        item = {
             "code": score.get("code", ""),
             "name": score.get("name", ""),
             "score": _score_value(score),
@@ -450,10 +1092,14 @@ def _build_screener_explanation(
             "veto_triggered": bool(score.get("veto_triggered")),
             "hard_veto_signals": score.get("hard_veto_signals") or [],
         }
-        for score in sorted(scores, key=_score_value, reverse=True)[:10]
-    ]
+        for key in ("score_source", "pool_tier", "pool_tier_label", "score_event_id", "scored_at"):
+            if score.get(key):
+                item[key] = score[key]
+        if _historical_entry_signal_recall_hint(score):
+            item["recall_hint"] = _historical_entry_signal_recall_hint(score)
+        top_scores.append(item)
     follow_up, follow_up_counts = _follow_up_candidates(
-        scores,
+        actionable_scores,
         buy_threshold=buy_threshold,
         watch_threshold=watch_threshold,
         reject_threshold=reject_threshold,
@@ -461,7 +1107,24 @@ def _build_screener_explanation(
     )
 
     recommendations = []
-    if not scores:
+    core_entry_candidates = [
+        item for item in current_candidate_pool["items"]
+        if item["pool_tier"] == "core" and item["entry_signal"]
+    ]
+    core_count = int(current_candidate_pool["counts"].get("core") or 0)
+
+    if core_entry_candidates:
+        top = core_entry_candidates[0]
+        summary = (
+            f"当前候选池已有 {len(core_entry_candidates)} 个核心候选带入场信号；"
+            f"最高为 {top['name'] or top['code']}({top['code']}) {top['score']:.1f} 分，"
+            "下一步应检查模拟盘窗口、profile 和风控预检。"
+        )
+        recommendations.append("使用 atrade paper auto-readiness --json 复核模拟承接阻断项")
+    elif core_count > 0:
+        summary = f"当前候选池已有 {core_count} 个核心候选；继续复核入场信号、数据质量和风控门禁。"
+        recommendations.append("逐只查看核心候选的入场信号和风控门禁")
+    elif not scores and not current_candidates:
         summary = "最近没有评分事件；先运行 screener run 或 refresh，再判断是否真没有候选。"
         recommendations.append("先执行 atrade screener refresh --json 生成新的评分证据")
     elif bucket_counts["buy_ready_raw"] == 0 and not near_misses:
@@ -481,13 +1144,15 @@ def _build_screener_explanation(
 
     return {
         "diagnostic": "screener_explain",
-        "status": "ok" if scores else "warning",
+        "status": "ok" if scores or current_candidates else "warning",
         "summary": summary,
         "scope": {
             "since": since,
             "run_id": run_id,
-            "score_events": len(scores),
+            "score_events": raw_score_count,
+            "unique_scores": len(scores),
             "decision_events": len(decisions),
+            "current_candidate_pool": len(current_candidates),
         },
         "thresholds": {
             "buy": buy_threshold,
@@ -512,12 +1177,26 @@ def _build_screener_explanation(
             ],
         },
         "near_misses": near_misses,
+        "current_candidate_pool": current_candidate_pool,
         "follow_up": follow_up,
         "follow_up_counts": follow_up_counts,
         "top_scores": top_scores,
-        "next_actions": _next_actions(follow_up),
+        "next_actions": _next_actions(follow_up, current_candidate_pool),
         "recommendations": recommendations,
     }
+
+
+def _score_event_payloads(events: list[dict]) -> list[dict]:
+    payloads: list[dict] = []
+    for event in events:
+        payload = dict(event.get("payload") or {})
+        payload.setdefault("score_source", "score_event")
+        if event.get("event_id"):
+            payload.setdefault("score_event_id", event.get("event_id"))
+        if event.get("occurred_at"):
+            payload.setdefault("scored_at", event.get("occurred_at"))
+        payloads.append(payload)
+    return payloads
 
 
 def _first_follow_up(explanation: dict, group: str) -> dict:
@@ -549,6 +1228,10 @@ def _iteration_action(
     }
 
 
+def _plan_has_command(plan: list[dict], command: str) -> bool:
+    return any(item.get("command") == command for item in plan)
+
+
 def _build_screener_iteration_plan(explanation: dict, *, record: bool = True) -> dict:
     scope = explanation.get("scope") or {}
     score_events = int(scope.get("score_events") or 0)
@@ -578,11 +1261,28 @@ def _build_screener_iteration_plan(explanation: dict, *, record: bool = True) ->
     if near_watch:
         action = _first_next_action(explanation, "near_watch_review")
         command = action.get("command") or f"atrade stock analyze {near_watch.get('code', '')} --json"
+        recall_hint = near_watch.get("recall_hint") or {}
+        if recall_hint and not _plan_has_command(
+            plan,
+            str(recall_hint.get("command") or "atrade screener refresh --json"),
+        ):
+            plan.append(_iteration_action(
+                "recent_signal_recall_refresh",
+                "刷新历史入场信号候选",
+                str(recall_hint.get("command") or "atrade screener refresh --json"),
+                "历史评分曾出现入场信号，但不在当前候选池；先重新评分入池，再判断是否进入观察或核心。",
+                safe_to_auto_apply=bool(recall_hint.get("safe_to_auto_apply", True)),
+            ))
+        rationale = (
+            "该票来自历史评分事件，刷新后如果仍接近观察线再单票复核。"
+            if recall_hint
+            else "分数接近观察线但还缺少入场信号或买入强度，只能复核和等待确认。"
+        )
         plan.append(_iteration_action(
             "near_watch_review",
             "复核临界观察候选",
             command,
-            "分数接近观察线但还缺少入场信号或买入强度，只能复核和等待确认。",
+            rationale,
         ))
 
     blocked_high = _first_follow_up(explanation, "blocked_high_scores")
@@ -731,6 +1431,10 @@ def _core_promotion_blockers(score: dict) -> list[str]:
     return [CORE_ROUTE_BLOCKER]
 
 
+def _score_has_entry_strategy_route(score: dict) -> bool:
+    return not _core_promotion_blockers(score)
+
+
 def _pool_change(
     code: str,
     name: str,
@@ -751,6 +1455,7 @@ def _apply_candidate_pool_refresh(ctx, scores: list[dict], run_id: str) -> dict:
     existing = _pool_rows_by_code(ctx)
     promoted: list[dict] = []
     watched: list[dict] = []
+    radar: list[dict] = []
     rejected: list[dict] = []
     updated: list[dict] = []
     projection_entries: list[dict] = []
@@ -765,8 +1470,8 @@ def _apply_candidate_pool_refresh(ctx, scores: list[dict], run_id: str) -> dict:
         name = _score_name(score, current)
         old_tier = (current or {}).get("pool_tier")
 
-        if veto or total < thresholds["watch"]:
-            reason = "veto" if veto else f"score<{thresholds['watch']:.1f}"
+        if veto or total < thresholds["radar"]:
+            reason = "veto" if veto else f"score<{thresholds['radar']:.1f}"
             ctx.event_store.append(
                 stream=f"candidate:{code}",
                 stream_type="candidate",
@@ -784,6 +1489,46 @@ def _apply_candidate_pool_refresh(ctx, scores: list[dict], run_id: str) -> dict:
             rejected.append({"code": code, "name": name, "score": total, "reason": reason})
             continue
 
+        if total < thresholds["watch"]:
+            tier = "radar"
+            new_streak = 0
+            note = "screener_refresh:below_watch_retained"
+            reason = "below_watch_retained"
+            event_type = (
+                "pool.demoted"
+                if old_tier == "core"
+                else ("candidate.updated" if current else "candidate.added")
+            )
+            radar.append(_pool_change(code, name, total, old_tier, tier, reason=reason))
+            payload = {
+                "code": code,
+                "name": name,
+                "pool_tier": tier,
+                "score": total,
+                "note": note,
+                "reason": reason,
+                "from": old_tier,
+                "to": tier,
+            }
+            ctx.event_store.append(
+                stream=f"candidate:{code}" if event_type != "pool.demoted" else f"strategy:{code}",
+                stream_type="candidate" if event_type != "pool.demoted" else "strategy",
+                event_type=event_type,
+                payload=payload,
+                metadata={"source": "cli.screener.refresh", "run_id": run_id},
+            )
+            ctx.conn.execute("DELETE FROM projection_candidate_pool WHERE code = ?", (code,))
+            projection_entries.append({
+                "code": code,
+                "name": name,
+                "pool_tier": tier,
+                "score": total,
+                "added_at": (current or {}).get("added_at") or local_now_str("%Y-%m-%d"),
+                "streak_days": new_streak,
+                "note": note,
+            })
+            continue
+
         old_streak = int((current or {}).get("streak_days", 0) or 0)
         promotion_blockers = (
             _core_promotion_blockers(score)
@@ -793,10 +1538,13 @@ def _apply_candidate_pool_refresh(ctx, scores: list[dict], run_id: str) -> dict:
         promotion_blocker = promotion_blockers[0] if promotion_blockers else None
         if total >= thresholds["promote"]:
             new_streak = old_streak + 1 if old_streak >= 0 else 1
+            required_streak_days = thresholds["promote_streak_days"]
+            if not promotion_blockers and _score_has_entry_strategy_route(score):
+                required_streak_days = thresholds["entry_signal_promote_streak_days"]
             tier = (
                 "core"
                 if old_tier == "core"
-                or (new_streak >= thresholds["promote_streak_days"] and not promotion_blockers)
+                or (new_streak >= required_streak_days and not promotion_blockers)
                 else "watch"
             )
         else:
@@ -866,6 +1614,7 @@ def _apply_candidate_pool_refresh(ctx, scores: list[dict], run_id: str) -> dict:
         "thresholds": thresholds,
         "promoted": promoted,
         "watched": watched,
+        "radar": radar,
         "updated": updated,
         "rejected": rejected,
     }
@@ -885,46 +1634,128 @@ def _run_screener(
         q = query.strip() or cfg.get("mx_query", "")
         if not q:
             raise typer.BadParameter("screener run requires --query or strategy.screening.mx_query")
-        score_limit = _scan_limit(cfg, limit)
+        score_limit = _scan_limit(cfg, limit, refresh_pool=refresh_pool)
+        command_name = "screener refresh" if refresh_pool else "screener run"
+        search_timeout = _screener_query_timeout(cfg)
+        scoring_timeout = _screener_scoring_timeout(cfg)
 
-        raw_results = asyncio.run(MXScreenerAdapter().search_stocks(q))
-        stock_list = [
+        try:
+            raw_results = _search_screener_results(q, search_timeout)
+        except ScreenerSearchTimeout:
+            payload = _screener_search_timeout_payload(
+                command=command_name,
+                query=q,
+                timeout_seconds=search_timeout,
+            )
+            json_or_text(payload, as_json)
+            raise typer.Exit(1)
+        except ScreenerSearchFailed as exc:
+            payload = _screener_search_failed_payload(
+                command=command_name,
+                query=q,
+                exc=exc,
+            )
+            json_or_text(payload, as_json)
+            raise typer.Exit(1)
+        raw_candidates = [
             {"code": row.get("code") or row.get("代码", ""), "name": row.get("name") or row.get("名称", "")}
             for row in raw_results
             if row.get("code") or row.get("代码")
-        ][:score_limit]
+        ]
+        hot_recall = []
+        if refresh_pool and cfg.get("include_hot_recall", True):
+            hot_recall = _hot_recall_candidates(
+                ctx.conn,
+                limit=int(cfg.get("hot_recall_limit") or DEFAULT_HOT_RECALL_LIMIT),
+            )
+        recent_signal_recall = []
+        if refresh_pool and cfg.get("include_recent_signal_recall", True):
+            pool_thresholds = _pool_thresholds(ctx)
+            recent_signal_recall = _recent_signal_recall_candidates(
+                ctx.conn,
+                min_score=float(pool_thresholds["radar"]),
+                watch_score=float(pool_thresholds["watch"]),
+                limit=int(
+                    cfg.get("recent_signal_recall_limit")
+                    or DEFAULT_RECENT_SIGNAL_RECALL_LIMIT
+                ),
+                event_limit=int(
+                    cfg.get("recent_signal_recall_event_limit")
+                    or DEFAULT_RECENT_SIGNAL_RECALL_EVENT_LIMIT
+                ),
+            )
+        existing_candidates = []
+        if refresh_pool:
+            existing_candidates = [
+                {"code": row.get("code", ""), "name": row.get("name") or ""}
+                for row in _candidate_rows(ctx.conn, tier="all", limit=1000)
+            ]
+        scoring_candidates = _build_scoring_candidates(
+            raw_candidates,
+            hot_recall,
+            recent_signal_recall,
+            existing_candidates,
+            score_limit=score_limit,
+            refresh_pool=refresh_pool,
+        )
+        stock_list = scoring_candidates["stock_list"]
+        candidate_source_counts = scoring_candidates["source_counts"]
         if not stock_list:
             payload = {
                 "query": q,
                 "screened": len(raw_results),
+                "score_limit": score_limit,
                 "scored": [],
                 "added_to_watch": [],
+                "recall_candidates": {
+                    "hot_stocks": len(hot_recall),
+                    "recent_signals": len(recent_signal_recall),
+                },
+                "candidate_source_counts": candidate_source_counts,
                 "source_quality": _build_source_quality_summary([], []),
             }
             json_or_text(payload, as_json)
             return
 
         run_id = f"screener_{local_now_str('%H%M%S')}"
-        if refresh_pool:
-            seen = {item["code"] for item in stock_list}
-            for row in _candidate_rows(ctx.conn, tier="all", limit=1000):
-                code = row.get("code", "")
-                if code and code not in seen:
-                    stock_list.append({"code": code, "name": row.get("name") or ""})
-                    seen.add(code)
 
-        score_batch = _score_stock_batch(ctx, stock_list, run_id)
+        try:
+            score_batch = _score_stock_batch_with_timeout(
+                ctx,
+                stock_list,
+                run_id,
+                query=q,
+                timeout_seconds=scoring_timeout,
+            )
+        except ScreenerScoringTimeout:
+            payload = _screener_scoring_timeout_payload(
+                command=command_name,
+                query=q,
+                timeout_seconds=scoring_timeout,
+            )
+            json_or_text(payload, as_json)
+            ctx.conn.close()
+            _exit_after_scoring_timeout(1)
+            raise typer.Exit(1)
         scores = score_batch["scores"]
         snapshots = score_batch["snapshots"]
         source_quality = _build_source_quality_summary(snapshots, scores)
         threshold = _watch_threshold(ctx, watch_threshold)
+        report_thresholds = _screening_report_thresholds(ctx, threshold)
         if refresh_pool:
             pool_changes = _apply_candidate_pool_refresh(ctx, scores, run_id)
             added = [item for item in pool_changes["watched"] if item.get("from") is None]
         else:
             pool_changes = {}
             added = _add_watch_candidates(ctx, scores, threshold, run_id)
-        ctx.obsidian.write_screening_result(run_id, q, scores, added, buy_threshold=threshold)
+        ctx.obsidian.write_screening_result(
+            run_id,
+            q,
+            scores,
+            added,
+            buy_threshold=report_thresholds["buy"],
+            watch_threshold=report_thresholds["watch"],
+        )
         decision_events = ctx.event_store.query(
             event_type="decision.suggested",
             metadata_filter={"run_id": run_id},
@@ -942,9 +1773,16 @@ def _run_screener(
             "run_id": run_id,
             "history_group_id": history_group_id,
             "screened": len(raw_results),
+            "score_limit": score_limit,
             "threshold": threshold,
+            "report_thresholds": report_thresholds,
             "scored": scores,
             "added_to_watch": added,
+            "recall_candidates": {
+                "hot_stocks": len(hot_recall),
+                "recent_signals": len(recent_signal_recall),
+            },
+            "candidate_source_counts": candidate_source_counts,
             "source_quality": source_quality,
         }
         if pool_changes:
@@ -968,7 +1806,7 @@ def screener_run(
 @screener_app.command("refresh")
 def screener_refresh(
     query: str = typer.Option("", "--query", "-q", help="选股条件；空值使用配置默认条件"),
-    limit: Optional[int] = typer.Option(None, "--limit", help="最多评分数量；默认读取 strategy.screening.market_scan_limit"),
+    limit: Optional[int] = typer.Option(None, "--limit", help="最多评分数量；默认读取 strategy.screening.refresh_scan_limit"),
     watch_threshold: Optional[float] = typer.Option(None, "--watch-threshold", help="自动加入观察池的最低分；默认读取配置"),
     as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
 ):
@@ -1012,13 +1850,14 @@ def screener_explain(
         )
         thresholds = ctx.cfg.get("scoring", {}).get("thresholds", {})
         payload = _build_screener_explanation(
-            [event["payload"] for event in score_events],
+            _score_event_payloads(score_events),
             [event["payload"] for event in decision_events],
             thresholds=thresholds,
             since=since_value,
             run_id=run_id or None,
             near_miss_margin=near_miss_margin,
             follow_up_limit=follow_up_limit,
+            current_candidates=_candidate_rows(ctx.conn, limit=200),
         )
         json_or_text(payload, as_json)
     finally:
@@ -1062,13 +1901,14 @@ def screener_iterate(
         )
         thresholds = ctx.cfg.get("scoring", {}).get("thresholds", {})
         explanation = _build_screener_explanation(
-            [event["payload"] for event in score_events],
+            _score_event_payloads(score_events),
             [event["payload"] for event in decision_events],
             thresholds=thresholds,
             since=since_value,
             run_id=run_id or None,
             near_miss_margin=near_miss_margin,
             follow_up_limit=follow_up_limit,
+            current_candidates=_candidate_rows(ctx.conn, limit=200),
         )
         payload = _build_screener_iteration_plan(explanation, record=record)
         iteration_run_id = f"screener_iterate_{local_now_str('%H%M%S')}"

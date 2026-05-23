@@ -39,19 +39,61 @@ def _query_evidence_events(conn, code: str, limit: int = 100) -> list[dict]:
     return [EventStore._row_to_dict(row) for row in rows]
 
 
+def _query_events(
+    conn,
+    *,
+    event_type: str | None = None,
+    stream: str | None = None,
+    since: str | None = None,
+    limit: int = 50,
+    order: str = "desc",
+) -> list[dict]:
+    """通用事件查询默认按最新优先；排查时间线时可传 order=asc。"""
+    clauses = []
+    params: list[object] = []
+    if event_type:
+        clauses.append("event_type = ?")
+        params.append(event_type)
+    if stream:
+        clauses.append("stream = ?")
+        params.append(stream)
+    if since:
+        clauses.append("occurred_at >= ?")
+        params.append(since)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    direction = "ASC" if str(order).lower() == "asc" else "DESC"
+    rows = conn.execute(
+        f"""SELECT * FROM event_log
+            {where}
+            ORDER BY occurred_at {direction}, stream_version {direction}
+            LIMIT ?""",
+        (*params, max(int(limit or 1), 1)),
+    ).fetchall()
+    return [EventStore._row_to_dict(row) for row in rows]
+
+
 @events_app.command("query")
 def events_query(
     event_type: Optional[str] = typer.Option(None, "--type", help="事件类型"),
     stream: Optional[str] = typer.Option(None, help="stream 标识"),
     since: Optional[str] = typer.Option(None, help="起始时间 (ISO)"),
     limit: int = typer.Option(50, help="最大条数"),
+    order: str = typer.Option("desc", "--order", help="排序方向：desc 最新优先；asc 时间正序"),
     as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
 ):
     """查询事件"""
+    if order not in {"asc", "desc"}:
+        raise typer.BadParameter("--order must be asc or desc")
     conn = connect()
     try:
-        store = EventStore(conn)
-        events = store.query(stream=stream, event_type=event_type, since=since, limit=limit)
+        events = _query_events(
+            conn,
+            stream=stream,
+            event_type=event_type,
+            since=since,
+            limit=limit,
+            order=order,
+        )
         if as_json:
             json_or_text(events, True)
         else:

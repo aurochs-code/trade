@@ -10,14 +10,14 @@
 
 ## 当前快照
 
-截至本次整理后，Hermes active job 共 `18` 个，其中 A 股相关 `15` 个：
+截至本次整理后，Hermes `trading` profile active job 共 `19` 个，其中 A 股相关 `19` 个：
 
-- A 股确定性执行：`morning`、`noon`、`evening`、`scoring`、`weekly`、`auto_trade`、`screener refresh`、`propose-plan`、`daily inspection`
+- A 股确定性执行：`morning`、`noon`、`evening`、`scoring`、`weekly`、`auto_trade`、盘中轻量 `screener refresh`、收盘后 `screener refresh`、影子试运行记录复盘、`propose-plan`、`daily inspection`
 - A 股健康探针：只保留盘前 1 个；收盘后健康诊断已暂停
 - A 股盘中风控：合并为 1 个 Hermes cron，通过 `a_stock_intraday_monitor_window.sh` 判断交易时间窗
 - A 股舆情监控：合并为 1 个 Hermes cron，通过 `a_stock_sentiment_window.sh` 判断交易时间窗
 - A 股 LLM 摘要：盘前、收盘、周复盘 3 个任务
-- 非 A 股任务：英语早读、英语晚读、每周包更新检查 3 个任务
+- 当前 `trading` profile 只保留 A 股任务；非 A 股任务不在该 profile 内统计
 
 已暂停但未删除的旧任务：
 
@@ -47,7 +47,11 @@
 | `09:35-11:30` 每 5 分钟 | 盘中风控轮巡 | `no_agent` / origin | 检查持仓风险、止损/止盈和异常告警 |
 | `11:55` | 午间检查 | `no_agent` / local | 生成午盘状态、市场变化和风险提示 |
 | `13:00-14:55` 每 5 分钟 | 盘中风控轮巡 | `no_agent` / origin | 下午继续风险监控 |
-| `14:00` | 模拟盘自动交易 | `no_agent` / local | 只跑模拟盘，不真实下单 |
+| `13:40` | 盘中候选池轻量刷新 | `no_agent` / local | 小限额刷新当日候选证据，为 14:00 模拟盘自动交易提供当天候选池 |
+| `13:45` | 影子试运行记录 | `no_agent` / local | 把盘中候选写入 `paper.trial.recorded`，只做影子观察 |
+| `14:00` | 模拟盘自动交易 | `no_agent` / local | 只跑模拟盘，不真实下单；可重复运行，重复信号会去重 |
+| `14:12` | 盘中候选-模拟闭环 | `no_agent` / local | 再做一次更靠近买入窗口尾段的候选刷新，并立即跑模拟盘自动交易 |
+| `14:24` | 模拟盘买入兜底 | `no_agent` / local | 买入窗口结束前再承接一次当前交易日可用买入意向 |
 
 盘中风控当前由 1 个 Hermes cron 承担：`*/5 9-14 * * 1-5`。wrapper 会在 `09:35-11:30`、`13:00-14:55` 之外静默退出。
 
@@ -57,14 +61,45 @@
 
 | 时间 | 任务 | 类型 | 目标 |
 | --- | --- | --- | --- |
-| `15:10` | 候选池刷新 | `no_agent` / local | 刷新观察池和候选池 |
+| `15:10` | 候选池刷新 | `no_agent` / local | 刷新强势观察、观察池和核心候选池 |
 | `15:25` | 核心池评分 | `no_agent` / local | 对候选池和核心池重新评分 |
 | `15:30` | 交易计划生成 | `no_agent` / local | 生成只读交易计划，不执行 |
 | `15:35` | 收盘 pipeline | `no_agent` / local | 生成收盘报告、投影和基础复盘数据 |
+| `15:45` | 影子试运行记录复盘 | `no_agent` / local | 补录收盘候选并记录当日影子复盘 |
 | `15:50` | 每日巡检报告 | `no_agent` / local | 汇总系统健康、运行记录、人工确认和交易计划 |
 | `15:55` | LLM 收盘复盘 | 脚本内 LLM / Discord Rich Embed | 输出系统与数据质量、今日闭环、收盘热点、盘前与收盘对比、候选池变化和明日清单 |
 
 收盘后健康诊断与每日巡检、LLM 收盘复盘重叠，当前已暂停。
+
+建议在 `15:10` 候选池刷新后、`15:25` 核心池评分前补充一条 `15:18`
+机会变化提醒任务，执行 `atrade notify opportunity-watch --json`。它只对新强势观察、
+新观察、新核心候选做去重提醒，不下单，也不改变候选池。
+
+盘中 `13:40` 的轻量刷新使用 `a_stock_screener_refresh_intraday_silent.sh`，默认
+`ASTOCK_INTRADAY_REFRESH_LIMIT=10`。它复用候选池刷新脚本的锁，避免和手工刷新或
+收盘后刷新重叠；刷新完成后会触发机会变化提醒。这个任务用于修正“14:00 自动模拟
+交易早于 15:10 收盘候选池刷新”的时序错位。
+
+`14:12` 的盘中候选-模拟闭环使用 `a_stock_intraday_execution_cycle_silent.sh`，默认
+`ASTOCK_INTRADAY_EXECUTION_REFRESH_LIMIT=20`。它按顺序执行盘中候选刷新和
+`atrade run-pipeline auto_trade --json`，用于承接 14 点后才出现的强势候选/买入意向，
+避免信号生成在买入窗口后段、自动模拟只在 14:00 跑一次导致错过。当前仍遵守
+`auto_trade.dry_run` 配置；`dry_run=false` 时会提交 MX 模拟盘委托，实盘交易仍需要人工确认。
+排查前先看 `atrade paper auto-readiness --json`，确认当前是影子记录模式还是 MX 模拟盘委托模式。
+
+`14:24` 的模拟盘买入兜底使用 `a_stock_pipeline_auto_trade_silent.sh`，只再次执行
+`atrade run-pipeline auto_trade --json`，不刷新候选池。它用于承接 `14:12` 刷新后、
+买入窗口结束前才形成的当前交易日买入意向。脚本持有 `auto_trade.lock`，如果另一轮
+`auto_trade` 正在运行会静默跳过；买入侧本身还会按信号和股票去重，避免重复模拟买入。
+如果买入意向已经错过买入窗口，`atrade opportunity --json` 会把它放入过期待复核，
+不再压住新的观察候选或影子复盘；需要结案时手工运行
+`atrade manual-trades expire-stale --yes --json`。
+
+影子试运行记录复盘由 `a_stock_paper_trial_cycle_silent.sh` 执行，调度为
+`45 13,15 * * 1-5`。它先执行 `atrade paper trial-plan --record --json`，把观察候选、
+强势观察候选和核心候选写入 `paper.trial.recorded`；15:40 后再执行
+`atrade paper trial-review --min-age-days 0 --record --json` 记录当日影子复盘。该任务只写
+`paper.trial.*` 影子事件，不调用 `paper buy` / `paper sell`，也不自动晋级候选。
 
 ### 每周
 
@@ -94,8 +129,8 @@
 
 结果：
 
-- A 股相关 active job 从 `21` 个降到 `15` 个。
-- Hermes 全部 active job 从 `24` 个降到 `18` 个。
+- A 股相关 active job 为 `19` 个。
+- `trading` profile 当前 active job 为 `19` 个。
 - 关键告警仍然直接投递，常规状态由 LLM 摘要统一入口展示。
 
 ## 观察和回滚

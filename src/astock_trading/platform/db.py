@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable
 from typing import Optional
 
-from astock_trading.platform.database import Database
+from astock_trading.platform.database import Database, DatabaseSettings
 
 _BASE_SCHEMA_VERSION = 1
 _SCHEMA_VERSION = 4
@@ -242,6 +242,7 @@ CREATE INDEX IF NOT EXISTS idx_signal_history_group
 
 _DEFAULT_DB_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 _RUNTIME_DB: Database | None = None
+_RUNTIME_DB_URL: str | None = None
 
 
 def _default_db_path() -> Path:
@@ -249,9 +250,16 @@ def _default_db_path() -> Path:
 
 
 def _runtime_database() -> Database:
-    global _RUNTIME_DB
-    if _RUNTIME_DB is None:
-        _RUNTIME_DB = Database.from_env()
+    global _RUNTIME_DB, _RUNTIME_DB_URL
+    settings = DatabaseSettings.from_env()
+    if _RUNTIME_DB is None or _RUNTIME_DB_URL != settings.url:
+        if _RUNTIME_DB is not None:
+            try:
+                _RUNTIME_DB.engine.dispose()
+            except Exception:
+                pass
+        _RUNTIME_DB = Database(settings)
+        _RUNTIME_DB_URL = settings.url
     return _RUNTIME_DB
 
 

@@ -1075,6 +1075,339 @@ def format_propose_plan_embed(plan: dict) -> dict:
     )
 
 
+def format_opportunity_embed(opportunity: dict) -> dict:
+    """今日机会卡 → Discord embed dict。"""
+    counts = opportunity.get("counts", {}) or {}
+    buy_intents = opportunity.get("buy_intents", []) or []
+    stale_buy_intents = opportunity.get("stale_buy_intents", []) or []
+    watch_candidates = opportunity.get("watch_candidates", []) or []
+    radar_candidates = opportunity.get("radar_candidates", []) or []
+    positive_trials = opportunity.get("positive_trial_candidates", []) or []
+    blockers = opportunity.get("blockers", []) or []
+    approval_gate = opportunity.get("approval_gate", {}) or {}
+    after_approval_preview = opportunity.get("after_approval_preview", {}) or {}
+    next_window_plan = opportunity.get("next_window_plan", {}) or {}
+    next_action = opportunity.get("next_action", {}) or {}
+    evidence_actions = opportunity.get("evidence_actions", []) or []
+    execution_allowed = bool(opportunity.get("execution_allowed"))
+    status = str(opportunity.get("status", "unknown"))
+
+    if buy_intents:
+        color = COLORS["manual_confirmation"]
+    elif status == "needs_health_check":
+        color = COLORS["stop_alert"]
+    else:
+        color = COLORS["info"]
+
+    execution_text = "允许自动执行" if execution_allowed else "禁止自动执行"
+    count_text = "买入意向 {buy} / 核心候选 {core} / 观察候选 {watch} / 强势观察 {radar}".format(
+        buy=counts.get("buy_intents", 0),
+        core=counts.get("core_candidates", 0),
+        watch=counts.get("watch_candidates", 0),
+        radar=counts.get("radar_candidates", 0),
+    )
+    if counts.get("stale_buy_intents"):
+        count_text += f" / 过期待复核 {counts.get('stale_buy_intents', 0)}"
+
+    fields = [
+        _field("今日结论", str(opportunity.get("summary", "暂无机会结论")), inline=False),
+        _field("数量", count_text),
+        _field(
+            "执行边界",
+            f"{execution_text}\n真实交易：必须人工确认\n说明：不自动交易",
+        ),
+        _field("决策说明", str(opportunity.get("decision_brief", "只读复核")), inline=False),
+    ]
+
+    if buy_intents:
+        fields.append(_field(
+            "待人工确认",
+            "\n".join(_opportunity_buy_intent_lines(buy_intents[:5])),
+            inline=False,
+        ))
+    else:
+        fields.append(_field("买入意向", "暂无待人工确认的买入意向", inline=False))
+
+    if stale_buy_intents:
+        fields.append(_field(
+            "过期待复核",
+            "\n".join(_stale_buy_intent_lines(stale_buy_intents[:5])),
+            inline=False,
+        ))
+
+    if watch_candidates:
+        fields.append(_field(
+            _candidate_pool_field_name(counts),
+            "\n".join(_opportunity_candidate_lines(watch_candidates[:5])),
+            inline=False,
+        ))
+    else:
+        fields.append(_field("观察候选", "暂无观察候选；不降低买入线。", inline=False))
+
+    if radar_candidates:
+        fields.append(_field(
+            f"强势观察（{counts.get('radar_candidates', len(radar_candidates))}）",
+            "\n".join(_opportunity_candidate_lines(radar_candidates[:5])),
+            inline=False,
+        ))
+
+    if positive_trials:
+        fields.append(_field(
+            f"影子试运行（{counts.get('positive_trial_candidates', len(positive_trials))}）",
+            "\n".join(_positive_trial_lines(positive_trials[:5])),
+            inline=False,
+        ))
+
+    if blockers:
+        fields.append(_field(
+            "阻断原因",
+            "\n".join(f"- {_finding_cn(item)}" for item in blockers[:6]),
+            inline=False,
+        ))
+
+    if approval_gate.get("required"):
+        fields.append(_field(
+            "profile 审批",
+            "需人工确认：{label}\n复核命令：`{review_command}`\n写入命令：`{apply_command}`".format(
+                label=_label_cn(approval_gate.get("label", "人工确认写入运行 profile")),
+                review_command=approval_gate.get(
+                    "review_command",
+                    "atrade strategy profile-activation --target trend_swing --json",
+                ),
+                apply_command=approval_gate.get(
+                    "apply_command",
+                    "atrade strategy profile-activation --target trend_swing --apply-env --yes --json",
+                ),
+            ),
+            inline=False,
+        ))
+
+    if after_approval_preview.get("available"):
+        fields.append(_field(
+            "审批后预演",
+            _opportunity_after_approval_text(after_approval_preview),
+            inline=False,
+        ))
+
+    if next_window_plan.get("available") or next_window_plan.get("next_buy_window"):
+        fields.append(_field(
+            "下个买入窗口",
+            _opportunity_next_window_text(next_window_plan),
+            inline=False,
+        ))
+
+    if next_action:
+        fields.append(_field(
+            "下一步",
+            "{label}\n命令：`{command}`\n原因：{reason}".format(
+                label=_label_cn(next_action.get("label", "只读复核")),
+                command=next_action.get("command", "atrade opportunity --json"),
+                reason=_finding_cn(next_action.get("reason", "不自动交易。")),
+            ),
+            inline=False,
+        ))
+
+    if evidence_actions:
+        fields.append(_field(
+            "证据动作",
+            "\n".join(_opportunity_action_lines(evidence_actions[:3])),
+            inline=False,
+        ))
+
+    fields.append(_field(
+        "交易纪律",
+        "观察不等于买入意向；买入意向也必须人工确认。\n数据降级时，信心也要降级。",
+        inline=False,
+    ))
+
+    return _embed(
+        title=f"今日机会卡 — {opportunity.get('date', local_today_str())}",
+        color=color,
+        fields=fields,
+        footer="A-Stock Trading · opportunity",
+    )
+
+
+def _candidate_pool_field_name(counts: dict) -> str:
+    core_count = int(counts.get("core_candidates", 0) or 0)
+    watch_count = int(counts.get("watch_candidates", 0) or 0)
+    if core_count:
+        return f"候选池（核心 {core_count} / 观察 {watch_count}）"
+    return "观察候选"
+
+
+def _opportunity_next_window_text(plan: dict) -> str:
+    window = plan.get("next_buy_window", {}) or {}
+    signal = plan.get("current_signal", {}) or {}
+    next_action = plan.get("next_action", {}) or {}
+    carry_text = (
+        "会带到下个窗口"
+        if signal.get("carries_to_next_window")
+        else "不会跨日自动提交"
+    )
+    lines = [
+        f"{window.get('start', '待确认')} 至 {window.get('end', '待确认')}",
+    ]
+    if signal:
+        lines.append(
+            "{name}({code})：{carry_text}".format(
+                name=signal.get("name") or signal.get("code", ""),
+                code=signal.get("code", ""),
+                carry_text=carry_text,
+            )
+        )
+    if plan.get("next_window_requires_fresh_buy_signal"):
+        lines.append("下个交易日必须重新形成同日买入意向。")
+    if next_action:
+        lines.append(f"下一步：{_label_cn(next_action.get('label', '只读复核'))}")
+        lines.append(f"命令：`{next_action.get('command', 'atrade opportunity --json')}`")
+    return "\n".join(lines)
+
+
+def _opportunity_after_approval_text(preview: dict) -> str:
+    lines = [
+        str(preview.get("summary") or "人工批准后仍需重新运行只读预检确认。"),
+    ]
+    if preview.get("preview_command"):
+        lines.append(f"只读预演：`{preview['preview_command']}`")
+    if preview.get("post_approval_verify_command"):
+        lines.append(f"批准后预检：`{preview['post_approval_verify_command']}`")
+    if preview.get("schedule_verify_command"):
+        lines.append(f"调度核查：`{preview['schedule_verify_command']}`")
+    if preview.get("writes_environment") is False and preview.get("places_order") is False:
+        lines.append("边界：不写环境、不提交模拟盘订单。")
+    return "\n".join(lines)
+
+
+def _opportunity_action_lines(actions: list[dict]) -> list[str]:
+    lines = []
+    for action in actions:
+        label = _label_cn(action.get("label", "只读复核"))
+        command = action.get("command", "atrade opportunity --json")
+        reason = _finding_cn(action.get("reason", "不自动交易。"))
+        lines.append(f"{label}\n命令：`{command}`\n原因：{reason}")
+    return lines
+
+
+def format_opportunity_watch_embed(monitor: dict) -> dict:
+    """机会变化监控 → Discord embed dict。"""
+    labels = monitor.get("change_labels", []) or []
+    current = monitor.get("current_counts", {}) or {}
+    previous = monitor.get("previous_counts", {}) or {}
+    new_candidates = monitor.get("new_candidates", []) or []
+    opportunity = monitor.get("opportunity", {}) or {}
+    next_action = monitor.get("next_action", {}) or {}
+    execution_allowed = bool(monitor.get("execution_allowed"))
+    title_suffix = "、".join(labels[:2]) if labels else "候选池变化"
+    execution_text = "允许自动执行" if execution_allowed else "禁止自动执行"
+
+    fields = [
+        _field("触发原因", str(monitor.get("summary", "候选池发生变化")), inline=False),
+        _field(
+            "数量变化",
+            "总数 {prev_total} → {cur_total}\n核心 {prev_core} → {cur_core}\n观察 {prev_watch} → {cur_watch}\n强势观察 {prev_radar} → {cur_radar}".format(
+                prev_total=previous.get("all_candidates", 0),
+                cur_total=current.get("all_candidates", 0),
+                prev_core=previous.get("core_candidates", 0),
+                cur_core=current.get("core_candidates", 0),
+                prev_watch=previous.get("watch_candidates", 0),
+                cur_watch=current.get("watch_candidates", 0),
+                prev_radar=previous.get("radar_candidates", 0),
+                cur_radar=current.get("radar_candidates", 0),
+            ),
+        ),
+        _field(
+            "执行边界",
+            f"{execution_text}\n真实交易：必须人工确认\n说明：观察不等于买入意向",
+        ),
+    ]
+
+    if labels:
+        fields.append(_field("变化类型", "；".join(_label_cn(item) for item in labels), inline=False))
+
+    if new_candidates:
+        fields.append(_field(
+            "新增候选",
+            "\n".join(_opportunity_candidate_lines(new_candidates[:5])),
+            inline=False,
+        ))
+
+    if opportunity:
+        fields.append(_field(
+            "今日机会",
+            "\n".join(
+                line for line in (
+                    str(opportunity.get("summary", "")).strip(),
+                    str(opportunity.get("decision_brief", "")).strip(),
+                )
+                if line
+            ),
+            inline=False,
+        ))
+        approval_gate = opportunity.get("approval_gate", {}) or {}
+        if approval_gate.get("required"):
+            fields.append(_field(
+                "profile 审批",
+                "需人工确认：{label}\n复核命令：`{review_command}`\n写入命令：`{apply_command}`".format(
+                    label=_label_cn(approval_gate.get("label", "人工确认写入运行 profile")),
+                    review_command=approval_gate.get(
+                        "review_command",
+                        "atrade strategy profile-activation --target trend_swing --json",
+                    ),
+                    apply_command=approval_gate.get(
+                        "apply_command",
+                        "atrade strategy profile-activation --target trend_swing --apply-env --yes --json",
+                    ),
+                ),
+                inline=False,
+            ))
+        after_approval_preview = opportunity.get("after_approval_preview", {}) or {}
+        if after_approval_preview.get("available"):
+            fields.append(_field(
+                "审批后预演",
+                _opportunity_after_approval_text(after_approval_preview),
+                inline=False,
+            ))
+        next_window_plan = opportunity.get("next_window_plan", {}) or {}
+        if next_window_plan.get("available") or next_window_plan.get("next_buy_window"):
+            fields.append(_field(
+                "下个买入窗口",
+                _opportunity_next_window_text(next_window_plan),
+                inline=False,
+            ))
+        evidence_actions = opportunity.get("evidence_actions", []) or []
+        if evidence_actions:
+            fields.append(_field(
+                "证据动作",
+                "\n".join(_opportunity_action_lines(evidence_actions[:3])),
+                inline=False,
+            ))
+
+    if next_action:
+        fields.append(_field(
+            "下一步",
+            "{label}\n命令：`{command}`\n原因：{reason}".format(
+                label=_label_cn(next_action.get("label", "查看今日机会卡")),
+                command=next_action.get("command", "atrade opportunity --json"),
+                reason=_finding_cn(next_action.get("reason", "只读复核，不自动交易。")),
+            ),
+            inline=False,
+        ))
+
+    fields.append(_field(
+        "交易纪律",
+        "新增观察候选只代表进入复核清单；买入意向仍需独立证据和人工确认。",
+        inline=False,
+    ))
+
+    return _embed(
+        title=f"机会变化提醒 — {title_suffix} — {monitor.get('date', local_today_str())}",
+        color=COLORS["info"],
+        fields=fields,
+        footer="A-Stock Trading · opportunity_watch",
+    )
+
+
 def format_daily_inspection_embed(summary: dict) -> dict:
     """每日巡检摘要 → Discord embed dict。"""
     failed_commands = summary.get("failed_commands", []) or []
@@ -1082,6 +1415,7 @@ def format_daily_inspection_embed(summary: dict) -> dict:
     optional_missing = summary.get("optional_missing", []) or []
     pool = summary.get("candidate_pool", {}) or {}
     plan_actions = summary.get("plan_actions", []) or []
+    opportunity_counts = summary.get("opportunity_counts", {}) or {}
 
     has_problem = (
         bool(failed_commands)
@@ -1163,6 +1497,13 @@ def format_daily_inspection_embed(summary: dict) -> dict:
     else:
         fields.append(_field("交易计划", "暂无动作", inline=False))
 
+    if summary.get("opportunity_summary") or opportunity_counts:
+        fields.append(_field(
+            "今日机会",
+            _daily_inspection_opportunity_text(summary),
+            inline=False,
+        ))
+
     report_path = _short_report_path(str(summary.get("report_path", "")))
     if report_path:
         fields.append(_field("报告", report_path, inline=False))
@@ -1173,6 +1514,29 @@ def format_daily_inspection_embed(summary: dict) -> dict:
         fields=fields,
         footer="A-Stock Trading · daily_inspection",
     )
+
+
+def _daily_inspection_opportunity_text(summary: dict) -> str:
+    counts = summary.get("opportunity_counts", {}) or {}
+    blockers = summary.get("opportunity_blockers", []) or []
+    next_action = summary.get("opportunity_next_action", {}) or {}
+    lines = [
+        str(summary.get("opportunity_summary") or "暂无机会卡摘要"),
+        str(summary.get("opportunity_decision_brief") or "").strip(),
+        "买入意向 {buy} / 核心候选 {core} / 观察候选 {watch} / 强势观察 {radar}".format(
+            buy=counts.get("buy_intents", 0),
+            core=counts.get("core_candidates", 0),
+            watch=counts.get("watch_candidates", 0),
+            radar=counts.get("radar_candidates", 0),
+        ),
+    ]
+    if blockers:
+        lines.append("阻断：" + "；".join(_finding_cn(item) for item in blockers[:3]))
+    if next_action:
+        command = next_action.get("command", "")
+        label = next_action.get("label", "下一步")
+        lines.append(f"下一步：{_label_cn(label)}" + (f" `{command}`" if command else ""))
+    return "\n".join(line for line in lines if line)
 
 
 def _short_report_path(path: str) -> str:
@@ -1194,6 +1558,74 @@ def _manual_trade_lines(items: list[dict]) -> list[str]:
     return lines
 
 
+def _positive_trial_lines(items: list[dict]) -> list[str]:
+    lines = []
+    for item in items:
+        code = item.get("code", "")
+        name = item.get("name") or code
+        status = _finding_cn(str(item.get("review_status_label") or "表现为正"))
+        ret = item.get("return_pct")
+        ret_text = f"{float(ret):.2f}%" if isinstance(ret, int | float) else str(ret or "未知")
+        command = item.get("review_command") or f"atrade stock analyze {code} --json"
+        state_text = ""
+        if item.get("candidate_state_change_label"):
+            state_text = f" / 候选变化 {item['candidate_state_change_label']}"
+        elif item.get("current_pool_tier_label"):
+            state_text = f" / 当前{item['current_pool_tier_label']}"
+        lines.append(f"- {name}({code}) {status} / 收益 {ret_text}{state_text}\n  `{command}`")
+    return lines
+
+
+def _stale_buy_intent_lines(items: list[dict]) -> list[str]:
+    lines: list[str] = []
+    for item in items:
+        code = item.get("code", "")
+        name = item.get("name", code)
+        score = item.get("score", "-")
+        reason = item.get("stale_reason_label") or item.get("stale_reason") or "已过期"
+        age = item.get("age_hours")
+        age_text = f" / {age} 小时" if age is not None else ""
+        lines.append(f"• {name}({code}) 分数 {score} / {reason}{age_text}")
+    return lines
+
+
+def _opportunity_buy_intent_lines(items: list[dict]) -> list[str]:
+    lines = []
+    for item in items:
+        code = item.get("code", "")
+        name = item.get("name") or code
+        score = _to_float(item.get("score", item.get("confidence")))
+        lines.append(f"{name}({code}) 买入意向 · 评分 {score:.1f} · 待人工确认")
+    return lines
+
+
+def _opportunity_candidate_lines(items: list[dict]) -> list[str]:
+    lines = []
+    for item in items:
+        code = item.get("code", "")
+        name = item.get("name") or code
+        tier = _label_cn(item.get("pool_tier_label", item.get("pool_tier", "观察")))
+        score = _to_float(item.get("score"))
+        note = _finding_cn(item.get("note_label", item.get("note", "待复核")))
+        parts = [f"{name}({code}) {tier}", f"评分 {score:.1f}"]
+        if _boolish(item.get("entry_signal")):
+            parts.append("入场信号")
+            route_label = item.get("primary_strategy_route_label")
+            if route_label:
+                parts.append(_finding_cn(route_label))
+        parts.append(note)
+        lines.append(" · ".join(parts))
+    return lines
+
+
+def _boolish(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
 def _route_blocker_lines(items: list[dict]) -> list[str]:
     lines = []
     for item in items:
@@ -1208,6 +1640,10 @@ def _route_blocker_lines(items: list[dict]) -> list[str]:
 def _candidate_note_label(note: str) -> str:
     if "requires_entry_strategy_route" in note:
         return "缺少有效策略路线"
+    if "below_watch_retained" in note:
+        return "低于观察线，保留跟踪"
+    if note == "screener_refresh":
+        return "筛选刷新入池"
     return note or "待复核"
 
 

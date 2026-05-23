@@ -1,10 +1,12 @@
 """Tests for platform/config.py — ConfigRegistry"""
 
-import pytest
 import sqlite3
+from types import SimpleNamespace
+
+import pytest
 
 from astock_trading.platform.db import init_db
-from astock_trading.platform.config import ConfigRegistry
+from astock_trading.platform.config import ConfigRegistry, ConfigRepository
 
 
 @pytest.fixture
@@ -37,6 +39,63 @@ def test_freeze_idempotent(conn):
 
     assert s1.version == s2.version
     assert s1.hash == s2.hash
+
+
+def test_freeze_recovers_when_same_hash_is_inserted_concurrently(conn, monkeypatch):
+    """并发 freeze 已写入同一 hash 时，应复用已有版本而不是失败。"""
+    original_insert = ConfigRepository.insert_version
+
+    def racing_insert(self, version, config_hash, config_json):
+        original_insert(self, "v_race_existing", config_hash, config_json)
+        raise sqlite3.IntegrityError("UNIQUE constraint failed: config_versions.config_hash")
+
+    monkeypatch.setattr(ConfigRepository, "insert_version", racing_insert)
+
+    snapshot = ConfigRegistry().freeze(conn)
+
+    assert snapshot.version == "v_race_existing"
+
+
+def test_freeze_retries_when_generated_version_collides(conn, monkeypatch):
+    """并发 freeze 生成同秒版本号冲突时，应换一个版本号重试。"""
+    original_insert = ConfigRepository.insert_version
+    calls = []
+
+    def racing_insert(self, version, config_hash, config_json):
+        calls.append(version)
+        if len(calls) == 1:
+            raise sqlite3.IntegrityError("UNIQUE constraint failed: config_versions.config_version")
+        original_insert(self, version, config_hash, config_json)
+
+    monkeypatch.setattr(ConfigRepository, "insert_version", racing_insert)
+
+    snapshot = ConfigRegistry().freeze(conn)
+
+    assert len(calls) == 2
+    assert snapshot.version == calls[1]
+
+
+def test_freeze_rolls_back_failed_insert_before_rechecking_existing_hash(monkeypatch):
+    """MySQL duplicate-key failures can require rollback before the existing hash is visible."""
+    calls = {"find": 0, "rollback": 0}
+
+    def find_after_rollback(self, config_hash):  # noqa: ARG001
+        calls["find"] += 1
+        return "v_after_rollback" if calls["find"] >= 3 else None
+
+    def duplicate_insert(self, version, config_hash, config_json):  # noqa: ARG001
+        raise sqlite3.IntegrityError("Duplicate entry for key config_hash")
+
+    def rollback():
+        calls["rollback"] += 1
+
+    monkeypatch.setattr(ConfigRepository, "find_version_by_hash", find_after_rollback)
+    monkeypatch.setattr(ConfigRepository, "insert_version", duplicate_insert)
+
+    snapshot = ConfigRegistry().freeze(SimpleNamespace(rollback=rollback))
+
+    assert snapshot.version == "v_after_rollback"
+    assert calls["rollback"] == 1
 
 
 def test_get_version_roundtrip(conn):

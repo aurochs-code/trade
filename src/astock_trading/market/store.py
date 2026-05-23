@@ -22,6 +22,7 @@ TTL_CONFIG = {
     "flow": 600,
     "sentiment": 1800,
     "index": 60,
+    "market_state": 1800,
 }
 
 

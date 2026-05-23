@@ -8,7 +8,17 @@
 screening:
   mx_query: "站上20日均线，股价5元到200元，上市天数大于60天，非ST，今日未涨停，近20日平均成交额大于5000万元，市值大于50亿元"
   mx_select_type: "A股"
-  market_scan_limit: 300
+  market_scan_limit: 300       # 手工 screener run 的粗筛广度
+  refresh_scan_limit: 80       # 调度 refresh 的逐票深度评分预算；需要全量时显式传 --limit
+  screener_query_timeout_seconds: 30 # 粗筛源搜索超时，超时返回 JSON 失败而不是卡住调度
+  screener_scoring_timeout_seconds: 90 # 逐票评分/采集总超时，超时不刷新候选池
+  snapshot_timeout_seconds: 20 # 单票深度采集总超时，避免慢 provider 拖住调度刷新
+  sector_context_timeout_seconds: 15 # 行业/概念上下文总超时；超时只降级 L2 证据
+  include_hot_recall: true
+  hot_recall_limit: 20
+  include_recent_signal_recall: true
+  recent_signal_recall_limit: 20
+  recent_signal_recall_event_limit: 500
   candidate_cache_ttl_hours: 24
   fallback_filters:
     min_price: 5
@@ -199,14 +209,24 @@ market_timer:
 # ---------------------------------------------------------------------------
 pool_management:
   watch_min_score: 5
+  radar_min_score: 4.5      # 强势观察线：只跟踪、不触发买入
   promote_min_score: 6.0   # 与 thresholds.buy 保持一致
   promote_streak_days: 2
+  entry_signal_promote_streak_days: 1 # 已有可执行入场路线的高分票，可先进入核心候选供模拟承接
   demote_max_score: 5
   demote_streak_days: 2
   remove_max_score: 4
   remove_streak_days: 2
   veto_immediate_demote: true
   add_to_watch_streak_days: 1
+
+# ---------------------------------------------------------------------------
+# 人工确认有效期
+# ---------------------------------------------------------------------------
+manual_confirmation:
+  # 买入意向超过有效期，或错过 auto_trade.buy_window 后，只作为待复核项；
+  # 不再压住后续观察候选和影子试运行提示。
+  pending_max_age_hours: 4
 
 # ---------------------------------------------------------------------------
 # 资金
@@ -281,7 +301,7 @@ backtest_presets:
 # ---------------------------------------------------------------------------
 auto_trade:
   enabled: false               # 开源默认关闭，需人工确认后启用
-  dry_run: true                # 开源默认只做试运行
+  dry_run: true                # 只记录模拟盘试运行事件；改为 false 才会提交 MX 模拟盘委托
   max_daily_trades: 4          # 单日最大交易次数（买+卖）
   sell_urgency: immediate      # 自动卖出的风控级别（immediate / end_of_day / advisory）
   # 买入时间窗口（避免尾盘波动）

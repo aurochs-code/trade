@@ -47,20 +47,35 @@ def compute_market_signal(
     green_count = 0
     red_count = 0
     clear_count = 0
+    fallback_intraday_count = 0
     total = 0
 
     for name, data in index_data.items():
         if "error" in data:
             continue
-        total += 1
 
         above_ma20 = data.get("above_ma20", False)
         below_ma60_days = data.get("below_ma60_days", 0)
+        ma20_missing = "ma20" in data and not _positive_number(data.get("ma20"))
 
-        if above_ma20:
-            green_count += 1
+        if isinstance(above_ma20, bool) and not ma20_missing:
+            total += 1
+            if above_ma20:
+                green_count += 1
+            else:
+                red_count += 1
         else:
-            red_count += 1
+            if "price" in data and not _positive_number(data.get("price")):
+                continue
+            change_pct = _to_float(data.get("change_pct"))
+            if change_pct is None:
+                continue
+            total += 1
+            fallback_intraday_count += 1
+            if change_pct >= 0:
+                green_count += 1
+            else:
+                red_count += 1
 
         if below_ma60_days >= clear_days:
             clear_count += 1
@@ -99,15 +114,22 @@ def compute_market_signal(
     else:
         signal = MarketSignal.RED
 
+    reason = None
+    if fallback_intraday_count and fallback_intraday_count == total and signal == MarketSignal.GREEN:
+        signal = MarketSignal.YELLOW
+        reason = "MA 数据缺失，使用日内涨跌幅保守判断"
+
     multiplier = _signal_to_multiplier(signal)
 
     state = MarketState(
         signal=signal,
         multiplier=multiplier,
         detail={
+            **({"reason": reason} if reason else {}),
             "green_count": green_count,
             "red_count": red_count,
             "clear_count": clear_count,
+            "fallback_intraday_count": fallback_intraday_count,
             "total": total,
             "green_pct": round(green_pct, 2),
             "clear_pct": round(clear_pct, 2),
@@ -127,3 +149,15 @@ def _signal_to_multiplier(signal: MarketSignal) -> float:
         MarketSignal.RED: 0.0,
         MarketSignal.CLEAR: 0.0,
     }.get(signal, 0.0)
+
+
+def _positive_number(value: object) -> bool:
+    number = _to_float(value)
+    return number is not None and number > 0
+
+
+def _to_float(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

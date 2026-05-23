@@ -71,6 +71,7 @@ class StrategyService:
         for score_result in results:
             snapshot = next((s for s in snapshots if s.code == score_result.code), None)
             score_payload = self._score_payload_with_reference(score_result)
+            score_evidence = _score_evidence_payload(score_payload)
             if snapshot and snapshot.observation_id:
                 score_payload["source_observation_id"] = snapshot.observation_id
 
@@ -109,6 +110,7 @@ class StrategyService:
                     "veto_reasons": decision.veto_reasons,
                     "notes": decision.notes,
                     "source_score_event_id": score_event_id,
+                    **score_evidence,
                     "decision_inputs": {
                         "current_exposure_pct": current_exposure_pct,
                         "weekly_buy_count": weekly_buy_count,
@@ -134,6 +136,7 @@ class StrategyService:
                     "market_multiplier": decision.market_multiplier,
                     "source_event_id": decision_event_id,
                     "source_score_event_id": score_event_id,
+                    **score_evidence,
                 }
                 manual_metadata = {**metadata, "account": "main", "execution": "manual"}
                 manual_event_id = self._publisher.publish(DomainEvent(
@@ -242,6 +245,31 @@ def _market_state_payload(market_state: MarketState) -> dict[str, Any]:
         "multiplier": market_state.multiplier,
         "detail": market_state.detail,
     }
+
+
+def _score_evidence_payload(score_payload: dict[str, Any]) -> dict[str, Any]:
+    routes = score_payload.get("strategy_routes") or []
+    primary_route = score_payload.get("primary_strategy_route")
+    return {
+        "entry_signal": bool(score_payload.get("entry_signal")),
+        "primary_strategy_route": primary_route,
+        "primary_strategy_route_label": _primary_route_label(routes, primary_route),
+        "strategy_routes": routes,
+        "technical_detail": score_payload.get("technical_detail", ""),
+        "data_quality": score_payload.get("data_quality", ""),
+    }
+
+
+def _primary_route_label(routes: list[Any], primary_route: Any) -> str | None:
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        if primary_route and route.get("route") != primary_route:
+            continue
+        label = route.get("display_name")
+        if label:
+            return str(label)
+    return None
 
 
 def _decision_rules_payload(decider: Decider) -> dict[str, Any]:

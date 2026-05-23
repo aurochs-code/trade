@@ -105,7 +105,9 @@ def execute_pipeline(
                     on_data_source_warning(pipeline_type, run_id, data_source_warning)
 
         result = _run_pipeline(ctx, pipeline_type, run_id)
+        safe_result = _json_safe_result(result)
         artifacts = {"result": "ok"}
+        artifacts.update(_pipeline_audit_artifacts(pipeline_type, safe_result))
         if data_health is not None:
             artifacts["data_sources"] = data_health
         if data_source_refresh is not None:
@@ -116,7 +118,7 @@ def execute_pipeline(
             "status": "completed",
             "pipeline": pipeline_type,
             "run_id": run_id,
-            "result": _json_safe_result(result),
+            "result": safe_result,
         }
         if data_health is not None:
             payload["data_sources"] = data_health
@@ -173,3 +175,27 @@ def _run_pipeline(ctx: Any, pipeline_type: str, run_id: str) -> dict:
 
 def _json_safe_result(result: dict) -> dict:
     return {key: value for key, value in result.items() if key != "discord_embed"}
+
+
+def _pipeline_audit_artifacts(pipeline_type: str, result: dict) -> dict:
+    if pipeline_type != "auto_trade":
+        return {}
+    keys = (
+        "enabled",
+        "dry_run",
+        "signal",
+        "paper_positions",
+        "paper_total_asset",
+        "buys",
+        "sells",
+        "diagnostics",
+        "no_trade_summary",
+        "window_state",
+    )
+    return {
+        "auto_trade": {
+            key: result[key]
+            for key in keys
+            if key in result
+        }
+    }

@@ -13,6 +13,8 @@ from astock_trading.reporting.discord import (
     format_scoring_embed, format_stop_alert_embed,
     format_propose_plan_embed, format_daily_inspection_embed,
     format_manual_confirmation_embed,
+    format_opportunity_embed,
+    format_opportunity_watch_embed,
     format_llm_summary_embed,
 )
 from astock_trading.reporting.obsidian import ObsidianProjector
@@ -120,6 +122,18 @@ def test_format_daily_inspection_embed_summarizes_health_and_report_path():
         "paper_total_asset": 205212.46,
         "plan_execution_allowed": False,
         "plan_actions": [{"type": "review_core_pool", "priority": "high"}],
+        "opportunity_summary": "先修运行/数据问题，暂停新增交易判断。",
+        "opportunity_decision_brief": "买入意向 0，核心候选 0，观察候选 0。",
+        "opportunity_counts": {
+            "buy_intents": 0,
+            "core_candidates": 0,
+            "watch_candidates": 0,
+        },
+        "opportunity_blockers": ["候选池为空", "核心池为空"],
+        "opportunity_next_action": {
+            "label": "检查运行失败",
+            "command": "atrade health --json",
+        },
     })
 
     assert "每日巡检" in embed["title"]
@@ -129,6 +143,9 @@ def test_format_daily_inspection_embed_summarizes_health_and_report_path():
     assert "health" in values
     assert "核心池" in values
     assert "待确认 2" in values
+    assert "今日机会" in {field["name"] for field in embed["fields"]}
+    assert "先修运行/数据问题" in values
+    assert "atrade health --json" in values
     assert "trade-vault/02-巡检/2026-05-16.md" in values
 
 
@@ -169,6 +186,371 @@ def test_format_daily_inspection_embed_expands_manual_trades_and_route_blockers(
     assert "仓位 16%" in values
     assert "贝达药业(300558)" in values
     assert "缺少有效策略路线" in values
+
+
+def test_format_opportunity_embed_highlights_watch_candidates_without_execution():
+    embed = format_opportunity_embed({
+        "date": "2026-05-21",
+        "status": "wait",
+        "summary": "当前没有买入意向，保留观察候选。",
+        "decision_brief": "观察候选 1 只；买入意向 0，只读复核。",
+        "execution_allowed": False,
+        "manual_confirmation_required": True,
+        "counts": {
+            "buy_intents": 0,
+            "watch_candidates": 1,
+            "core_candidates": 0,
+        },
+        "buy_intents": [],
+        "watch_candidates": [
+            {
+                "code": "300558",
+                "name": "贝达药业",
+                "pool_tier_label": "观察",
+                "score": 6.2,
+                "entry_signal": True,
+                "primary_strategy_route_label": "资金趋势确认",
+                "note_label": "缺少有效策略路线",
+            }
+        ],
+        "blockers": ["核心池为空", "缺少有效策略路线"],
+        "next_action": {
+            "label": "复核候选漏斗",
+            "command": "atrade screener explain --json",
+            "reason": "只读复核，不自动交易。",
+        },
+    })
+
+    assert "今日机会卡" in embed["title"]
+    values = "\n".join(field["value"] for field in embed["fields"])
+    assert "禁止自动执行" in values
+    assert "贝达药业(300558)" in values
+    assert "观察" in values
+    assert "入场信号" in values
+    assert "资金趋势确认" in values
+    assert "买入意向 0" in values
+    assert "不自动交易" in values
+
+
+def test_format_opportunity_embed_highlights_radar_candidates_without_execution():
+    embed = format_opportunity_embed({
+        "date": "2026-05-22",
+        "status": "wait",
+        "summary": "出现 1 只强势观察候选，先跟踪，不自动买入。",
+        "decision_brief": "买入意向 0，核心候选 0，观察候选 0，强势观察 1。",
+        "execution_allowed": False,
+        "manual_confirmation_required": True,
+        "counts": {
+            "buy_intents": 0,
+            "watch_candidates": 0,
+            "core_candidates": 0,
+            "radar_candidates": 1,
+        },
+        "buy_intents": [],
+        "watch_candidates": [],
+        "radar_candidates": [
+            {
+                "code": "603376",
+                "name": "大明电子",
+                "pool_tier_label": "强势观察",
+                "score": 4.8,
+                "note_label": "低于观察线，保留跟踪",
+            }
+        ],
+        "blockers": ["核心池为空"],
+        "next_action": {
+            "label": "复核强势观察",
+            "command": "atrade stock analyze 603376 --json",
+            "reason": "只读复核，不自动交易。",
+        },
+    })
+
+    values = "\n".join(field["value"] for field in embed["fields"])
+    assert "强势观察 1" in values
+    assert "大明电子(603376)" in values
+    assert "低于观察线，保留跟踪" in values
+    assert "禁止自动执行" in values
+
+
+def test_format_opportunity_embed_highlights_positive_shadow_trials():
+    embed = format_opportunity_embed({
+        "date": "2026-05-22",
+        "status": "review_positive_trial",
+        "summary": "有 1 只影子试运行表现为正；先人工复核，不自动晋级或下单。",
+        "decision_brief": "影子试运行表现为正 1 只，先人工复核。",
+        "execution_allowed": False,
+        "manual_confirmation_required": True,
+        "counts": {
+            "buy_intents": 0,
+            "watch_candidates": 0,
+            "core_candidates": 0,
+            "radar_candidates": 0,
+            "positive_trial_candidates": 1,
+        },
+        "buy_intents": [],
+        "watch_candidates": [],
+        "positive_trial_candidates": [
+            {
+                "code": "600584",
+                "name": "长电科技",
+                "return_pct": 9.04,
+                "review_status_label": "表现为正",
+                "current_pool_tier_label": "核心",
+                "candidate_state_change_label": "观察 -> 核心",
+                "review_command": "atrade stock analyze 600584 --json",
+            }
+        ],
+        "next_action": {
+            "label": "复核表现为正的影子候选",
+            "command": "atrade stock analyze 600584 --json",
+            "reason": "影子试运行表现为正，只能进入人工复核。",
+        },
+    })
+
+    values = "\n".join(field["value"] for field in embed["fields"])
+    assert "影子试运行" in values
+    assert "长电科技(600584)" in values
+    assert "9.04%" in values
+    assert "候选变化 观察 -> 核心" in values
+    assert "atrade stock analyze 600584 --json" in values
+
+
+def test_format_opportunity_embed_shows_stale_manual_confirmations():
+    embed = format_opportunity_embed({
+        "date": "2026-05-22",
+        "status": "review_positive_trial",
+        "summary": "有 1 只影子试运行表现为正；先人工复核，不自动晋级或下单。",
+        "decision_brief": "买入意向 0，核心候选 0，观察候选 0，强势观察 0，过期待复核 1。",
+        "execution_allowed": False,
+        "manual_confirmation_required": True,
+        "counts": {
+            "buy_intents": 0,
+            "watch_candidates": 0,
+            "core_candidates": 0,
+            "radar_candidates": 0,
+            "positive_trial_candidates": 1,
+            "stale_buy_intents": 1,
+        },
+        "buy_intents": [],
+        "stale_buy_intents": [
+            {
+                "code": "688981",
+                "name": "中芯国际",
+                "score": 6.4,
+                "stale_reason_label": "信号产生时已错过买入窗口",
+                "age_hours": 4.2,
+            }
+        ],
+        "positive_trial_candidates": [],
+        "next_action": {
+            "label": "复核表现为正的影子候选",
+            "command": "atrade stock analyze 600584 --json",
+            "reason": "影子试运行表现为正，只能进入人工复核。",
+        },
+    })
+
+    values = "\n".join(field["value"] for field in embed["fields"])
+    field_names = [field["name"] for field in embed["fields"]]
+    assert "过期待复核" in field_names
+    assert "过期待复核 1" in values
+    assert "中芯国际(688981)" in values
+    assert "信号产生时已错过买入窗口" in values
+
+
+def test_format_opportunity_embed_shows_profile_gate_and_next_window_plan():
+    embed = format_opportunity_embed({
+        "date": "2026-05-22",
+        "status": "profile_review_required",
+        "summary": "核心候选 1 只，已有买入意向；模拟承接前先复核运行 profile。",
+        "decision_brief": "买入意向 0，核心候选 1，观察候选 4，强势观察 0，过期待复核 1。",
+        "execution_allowed": False,
+        "manual_confirmation_required": True,
+        "counts": {
+            "buy_intents": 0,
+            "stale_buy_intents": 1,
+            "core_candidates": 1,
+            "watch_candidates": 4,
+            "radar_candidates": 0,
+        },
+        "stale_buy_intents": [
+            {
+                "code": "688981",
+                "name": "中芯国际",
+                "score": 6.4,
+                "stale_reason_label": "超过确认有效期",
+                "age_hours": 7.5,
+            }
+        ],
+        "approval_gate": {
+            "required": True,
+            "label": "人工确认写入运行 profile",
+            "review_command": "atrade strategy profile-activation --target trend_swing --json",
+            "apply_command": "atrade strategy profile-activation --target trend_swing --apply-env --yes --json",
+            "safe_to_auto_apply": False,
+        },
+        "next_window_plan": {
+            "status": "requires_profile_approval_before_next_window",
+            "next_buy_window": {
+                "start": "2026-05-25T09:45:00+08:00",
+                "end": "2026-05-25T14:30:00+08:00",
+            },
+            "current_signal": {
+                "code": "688981",
+                "name": "中芯国际",
+                "carries_to_next_window": False,
+            },
+            "next_window_requires_fresh_buy_signal": True,
+            "next_action": {
+                "label": "先复核运行 profile 激活",
+                "command": "atrade strategy profile-activation --target trend_swing --json",
+                "safe_to_auto_apply": False,
+            },
+        },
+        "after_approval_preview": {
+            "available": True,
+            "target_profile": "trend_swing",
+            "summary": (
+                "人工批准并写入 trend_swing 后，按当前只读预判还剩 2 个非 profile 阻断："
+                "当前不在模拟买入窗口、没有新鲜买入意向；当前核心候选已有入场信号。"
+            ),
+            "preview_command": (
+                "ASTOCK_CONFIG_PROFILE=trend_swing "
+                "atrade paper auto-readiness --skip-account --json"
+            ),
+            "post_approval_verify_command": "atrade paper auto-readiness --json",
+            "schedule_verify_command": "atrade diagnose schedule --json",
+            "writes_environment": False,
+            "places_order": False,
+        },
+        "next_action": {
+            "label": "复核运行 profile 激活",
+            "command": "atrade strategy profile-activation --target trend_swing --json",
+            "reason": "运行环境仍会使用 default。",
+        },
+        "evidence_actions": [
+            {
+                "label": "记录影子试运行复盘",
+                "command": "atrade paper trial-review --min-age-days 0 --record --json",
+                "reason": "有 2 只影子试运行表现为正但尚未记录复盘；可先写入影子复盘证据，不提交模拟盘订单。",
+            }
+        ],
+    })
+
+    values = "\n".join(field["value"] for field in embed["fields"])
+    field_names = [field["name"] for field in embed["fields"]]
+    assert "profile 审批" in field_names
+    assert "审批后预演" in field_names
+    assert "下个买入窗口" in field_names
+    assert "atrade strategy profile-activation --target trend_swing --json" in values
+    assert "人工批准并写入 trend_swing 后" in values
+    assert "atrade paper auto-readiness --skip-account --json" in values
+    assert "atrade diagnose schedule --json" in values
+    assert "不写环境、不提交模拟盘订单" in values
+    assert "证据动作" in field_names
+    assert "atrade paper trial-review --min-age-days 0 --record --json" in values
+    assert "不提交模拟盘订单" in values
+    assert "不会跨日自动提交" in values
+    assert "2026-05-25T09:45:00+08:00" in values
+
+
+def test_format_opportunity_watch_embed_highlights_new_candidates():
+    embed = format_opportunity_watch_embed({
+        "date": "2026-05-21",
+        "status": "changed",
+        "summary": "候选池从 0 变为 1，出现新观察候选，已触发主动提醒。",
+        "change_labels": ["候选池从空变为非空", "新观察候选"],
+        "current_counts": {
+            "buy_intents": 0,
+            "core_candidates": 0,
+            "watch_candidates": 1,
+            "all_candidates": 1,
+        },
+        "previous_counts": {
+            "buy_intents": 0,
+            "core_candidates": 0,
+            "watch_candidates": 0,
+            "all_candidates": 0,
+        },
+        "new_candidates": [
+            {
+                "code": "300558",
+                "name": "贝达药业",
+                "pool_tier_label": "观察",
+                "score": 6.2,
+                "note_label": "缺少有效策略路线",
+            }
+        ],
+        "opportunity": {
+            "summary": "当前没有买入意向，保留观察候选等待入场信号。",
+            "decision_brief": "买入意向 0，核心候选 0，观察候选 1。没有待确认买入，当前只读复核。",
+            "approval_gate": {
+                "required": True,
+                "label": "人工确认写入运行 profile",
+                "review_command": "atrade strategy profile-activation --target trend_swing --json",
+                "apply_command": "atrade strategy profile-activation --target trend_swing --apply-env --yes --json",
+            },
+            "after_approval_preview": {
+                "available": True,
+                "summary": "人工批准并写入 trend_swing 后，当前核心候选已有入场信号，但没有同日新鲜买入意向。",
+                "preview_command": (
+                    "ASTOCK_CONFIG_PROFILE=trend_swing "
+                    "atrade paper auto-readiness --skip-account --json"
+                ),
+                "post_approval_verify_command": "atrade paper auto-readiness --json",
+                "schedule_verify_command": "atrade diagnose schedule --json",
+                "writes_environment": False,
+                "places_order": False,
+            },
+            "next_window_plan": {
+                "available": True,
+                "next_buy_window": {
+                    "start": "2026-05-25T09:45:00+08:00",
+                    "end": "2026-05-25T14:30:00+08:00",
+                },
+                "current_signal": {
+                    "code": "688981",
+                    "name": "中芯国际",
+                    "carries_to_next_window": False,
+                },
+                "next_window_requires_fresh_buy_signal": True,
+                "next_action": {
+                    "label": "先复核运行 profile 激活",
+                    "command": "atrade strategy profile-activation --target trend_swing --json",
+                },
+            },
+            "evidence_actions": [
+                {
+                    "label": "记录影子试运行复盘",
+                    "command": "atrade paper trial-review --min-age-days 0 --record --json",
+                    "reason": "可先写入影子复盘证据，不提交模拟盘订单。",
+                }
+            ],
+        },
+        "next_action": {
+            "label": "查看今日机会卡",
+            "command": "atrade opportunity --json",
+            "reason": "只读复核，不自动交易。",
+        },
+        "execution_allowed": False,
+        "manual_confirmation_required": True,
+    })
+
+    assert "机会变化提醒" in embed["title"]
+    values = "\n".join(field["value"] for field in embed["fields"])
+    assert "候选池从空变为非空" in values
+    assert "贝达药业(300558)" in values
+    assert "观察" in values
+    assert "证据动作" in [field["name"] for field in embed["fields"]]
+    assert "profile 审批" in [field["name"] for field in embed["fields"]]
+    assert "审批后预演" in [field["name"] for field in embed["fields"]]
+    assert "下个买入窗口" in [field["name"] for field in embed["fields"]]
+    assert "人工批准并写入 trend_swing 后" in values
+    assert "atrade paper auto-readiness --skip-account --json" in values
+    assert "atrade diagnose schedule --json" in values
+    assert "不会跨日自动提交" in values
+    assert "atrade paper trial-review --min-age-days 0 --record --json" in values
+    assert "禁止自动执行" in values
+    assert "atrade opportunity --json" in values
 
 
 class TestProjectionUpdater:
@@ -536,6 +918,26 @@ class TestObsidianProjector:
         content = ObsidianProjector(event_store, db).write_scoring_report(
             "run_1", [{"name": "A", "code": "001", "total_score": 7.5, "style": "momentum"}])
         assert "7.5" in content
+
+    def test_paper_report_explains_no_trade_reason(self, event_store, db):
+        content = ObsidianProjector(event_store, db).write_paper_report(
+            run_id="run_paper",
+            positions=[],
+            balance={"total_asset": 100000, "available_cash": 100000, "market_value": 0},
+            buys=[],
+            sells=[],
+            market_signal="GREEN",
+            no_trade_summary={
+                "reason": "core_pool_empty",
+                "message": "核心候选池为空，禁止自动买入",
+                "details": {"core_count": 0, "total_count": 1},
+            },
+            dry_run=True,
+        )
+
+        assert "无交易原因" in content
+        assert "核心候选池为空，禁止自动买入" in content
+        assert "core_pool_empty" not in content
 
     def test_screening_result_uses_configured_buy_threshold(self, event_store, db):
         content = ObsidianProjector(event_store, db).write_screening_result(

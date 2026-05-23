@@ -57,13 +57,16 @@ def runs_list(
 @runs_app.command("failed")
 def runs_failed(
     days: int = typer.Option(7, help="查看最近 N 天"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
 ):
     """查看近期失败的运行"""
     conn = connect()
     try:
         journal = RunJournal(conn)
         failed = journal.get_failed_runs(days=days)
-        if not failed:
+        if as_json:
+            json_or_text(failed, True)
+        elif not failed:
             typer.echo("无失败记录")
         else:
             for r in failed:

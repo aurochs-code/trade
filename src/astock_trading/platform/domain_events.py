@@ -9,6 +9,8 @@ SCORE_CALCULATED = "score.calculated"
 DECISION_SUGGESTED = "decision.suggested"
 STRATEGY_CALIBRATION_PROPOSED = "strategy.calibration.proposed"
 STRATEGY_PROFILE_COMPARISON_PROPOSED = "strategy.profile_comparison.proposed"
+STRATEGY_PROFILE_ACTIVATION_REQUESTED = "strategy.profile_activation.requested"
+STRATEGY_PROFILE_ACTIVATION_APPLIED = "strategy.profile_activation.applied"
 STRATEGY_CAPITAL_ALLOCATION_PROPOSED = "strategy.capital_allocation.proposed"
 STRATEGY_HEALTH_REPORT_PROPOSED = "strategy.health_report.proposed"
 RISK_ADAPTIVE_SUGGESTION_PROPOSED = "risk.adaptive_suggestion.proposed"
@@ -22,6 +24,8 @@ CANDIDATE_ADDED = "candidate.added"
 AUTO_TRADE_DIAGNOSTIC = "auto_trade.diagnostic"
 AUTO_TRADE_EXECUTED = "auto_trade.executed"
 AUTO_TRADE_SUMMARY = "auto_trade.summary"
+PAPER_TRIAL_RECORDED = "paper.trial.recorded"
+PAPER_TRIAL_REVIEWED = "paper.trial.reviewed"
 
 
 @dataclass(frozen=True)

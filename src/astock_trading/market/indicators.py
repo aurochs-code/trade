@@ -57,6 +57,11 @@ def compute_technical_indicators(kline: pd.DataFrame, quote: Optional[StockQuote
 
     close = df["close"]
     volume = df["volume"]
+    if "amount" in df.columns:
+        amount = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
+        close_for_volume = close.mask(close <= 0)
+        estimated_volume = (amount / close_for_volume).fillna(0)
+        volume = volume.where(volume > 0, estimated_volume)
 
     # 移动平均
     ma5 = _ma(close, 5)
@@ -68,10 +73,20 @@ def compute_technical_indicators(kline: pd.DataFrame, quote: Optional[StockQuote
     c0 = float(close.iloc[-1]) if len(close) >= 1 else 0.0
     v0 = float(volume.iloc[-1]) if len(volume) >= 1 else 0.0
 
-    # 量比：今日成交量 / 5日均量
-    vol_ma5 = volume.rolling(5).mean()
-    vol_ma5_val = float(vol_ma5.iloc[-1]) if len(vol_ma5) >= 1 and vol_ma5.iloc[-1] > 0 else 1.0
-    volume_ratio = round(v0 / vol_ma5_val, 2) if vol_ma5_val > 0 else 1.0
+    # 量比：今日成交量 / 前 5 根有效日线均量
+    volume_base = volume.iloc[:-1] if len(volume) > 1 else volume.iloc[0:0]
+    if v0 <= 0 and quote is not None and quote.volume > 0:
+        historical_volume = volume_base[volume_base > 0]
+        if len(historical_volume) > 0:
+            v0 = float(quote.volume)
+    usable_volume = volume_base[volume_base > 0]
+    if len(usable_volume) >= 5:
+        vol_ma5_val = float(usable_volume.tail(5).mean())
+    elif len(usable_volume) > 0:
+        vol_ma5_val = float(usable_volume.mean())
+    else:
+        vol_ma5_val = 0.0
+    volume_ratio = round(v0 / vol_ma5_val, 2) if vol_ma5_val > 0 else 0.0
 
     # RSI(14)
     rsi = _rsi(close, 14)

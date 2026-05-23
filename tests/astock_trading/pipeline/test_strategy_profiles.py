@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from astock_trading.pipeline.strategy_profiles import (
+    apply_strategy_profile_activation,
+    build_strategy_profile_activation_plan,
     compare_strategy_profiles,
     profile_config_hash,
     propose_strategy_allocation,
@@ -164,6 +167,208 @@ def test_compare_strategy_profiles_without_runs_marks_shadow_validation_needed(t
     assert payload["status"] == "needs_shadow_validation"
     assert payload["profiles"][0]["evidence_status"] == "no_profile_runs"
     assert "先做影子运行" in payload["recommendations"][0]
+
+
+def test_build_strategy_profile_activation_plan_requires_manual_confirmation(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    _write_profile_config(config_dir)
+    db_path = tmp_path / "activation.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
+    try:
+        payload = build_strategy_profile_activation_plan(
+            conn,
+            config_dir=config_dir,
+            target_profile="trend_swing",
+            record=True,
+        )
+        events = EventStore(conn).query(event_type="strategy.profile_activation.requested")
+    finally:
+        conn.close()
+
+    assert payload["analysis"] == "strategy_profile_activation_plan"
+    assert payload["status"] == "requires_manual_confirmation"
+    assert payload["current_profile"] == "default"
+    assert payload["target_profile"] == "trend_swing"
+    assert payload["activation"]["export_command"] == "export ASTOCK_CONFIG_PROFILE=trend_swing"
+    assert payload["activation"]["verify_command"] == (
+        "ASTOCK_CONFIG_PROFILE=trend_swing atrade paper auto-readiness --json"
+    )
+    assert payload["activation"]["run_command_requires_user_approval"] is True
+    assert payload["activation"]["run_command_contract_id"] == "run_pipeline_auto_trade"
+    assert payload["activation"]["auto_apply"] is False
+    assert payload["approval_gate"] == {
+        "required": True,
+        "type": "profile_activation_apply",
+        "label": "人工确认写入运行 profile",
+        "reason": "当前 default 混合配置阻断自动模拟；需要人工批准后写入 ASTOCK_CONFIG_PROFILE=trend_swing。",
+        "target_profile": "trend_swing",
+        "review_command": "atrade strategy profile-activation --target trend_swing --json",
+        "apply_command": "atrade strategy profile-activation --target trend_swing --apply-env --yes --json",
+        "verify_command": "atrade diagnose schedule --json",
+        "safe_to_auto_apply": False,
+        "modifies_environment_after_approval": True,
+        "review_command_contract_id": "strategy_profile_activation_review",
+        "review_command_contract": {
+            "id": "strategy_profile_activation_review",
+            "risk_level": "read_only",
+            "writes_state": False,
+            "writes_environment": False,
+            "writes_order": False,
+            "requires_user_approval": False,
+            "state_events": [],
+        },
+        "apply_command_contract_id": "strategy_profile_activation_apply",
+        "apply_command_contract": {
+            "id": "strategy_profile_activation_apply",
+            "risk_level": "environment_write",
+            "writes_state": True,
+            "writes_environment": True,
+            "writes_order": False,
+            "requires_user_approval": True,
+            "state_events": ["strategy.profile_activation.applied"],
+        },
+        "verify_command_contract_id": "diagnose_schedule",
+        "verify_command_contract": {
+            "id": "diagnose_schedule",
+            "risk_level": "read_only",
+            "writes_state": False,
+            "writes_environment": False,
+            "writes_order": False,
+            "requires_user_approval": False,
+            "state_events": [],
+        },
+    }
+    assert payload["post_approval_checklist"]["status"] == "waiting_manual_approval"
+    assert payload["post_approval_checklist"]["summary"] == (
+        "人工批准写入 trend_swing 后，先运行只读预检和调度核查；"
+        "确认同日买入意向、买入窗口和调度首跑后，auto_trade 才能单独审批执行。"
+    )
+    assert [item["command"] for item in payload["post_approval_checklist"]["steps"]] == [
+        "atrade strategy profile-activation --target trend_swing --apply-env --yes --json",
+        "atrade diagnose schedule --json",
+        "atrade paper auto-readiness --json",
+        "atrade risk trial-guard --json",
+    ]
+    assert all(
+        item["command_contract"]["writes_order"] is False
+        for item in payload["post_approval_checklist"]["steps"]
+    )
+    assert payload["post_approval_checklist"]["paper_order_execution"] == {
+        "command": "atrade run-pipeline auto_trade --json",
+        "allowed_only_after": [
+            "运行 profile 已确认",
+            "调度核查通过",
+            "同日新鲜买入意向已形成",
+            "买入窗口打开",
+            "模拟预检和试运行护栏通过",
+        ],
+        "requires_separate_user_approval": True,
+        "command_contract": {
+            "id": "run_pipeline_auto_trade",
+            "risk_level": "paper_order_execution",
+            "writes_state": True,
+            "writes_environment": False,
+            "writes_order": True,
+            "requires_user_approval": True,
+            "state_events": ["auto_trade.diagnostic", "auto_trade.summary", "paper.order.submitted"],
+        },
+    }
+    assert payload["guardrails"]["manual_approval_required"] is True
+    assert payload["guardrails"]["modifies_environment"] is False
+    assert payload["summary"] == "当前执行 profile 为 default；目标 trend_swing 需要人工确认后才能写入运行环境。"
+    assert payload["next_action"] == {
+        "type": "confirm_profile_activation_apply",
+        "label": "确认写入运行 profile",
+        "command": "atrade strategy profile-activation --target trend_swing --apply-env --yes --json",
+        "safe_to_auto_apply": False,
+        "writes_state": True,
+        "writes_environment": True,
+        "writes_order": False,
+        "requires_user_approval": True,
+        "risk_level": "environment_write",
+        "command_contract_id": "strategy_profile_activation_apply",
+    }
+    assert payload["recorded_event_id"]
+    assert events[0]["payload"]["target_profile"] == "trend_swing"
+    assert events[0]["payload"]["next_action"]["command"] == (
+        "atrade strategy profile-activation --target trend_swing --apply-env --yes --json"
+    )
+
+
+def test_apply_strategy_profile_activation_requires_explicit_confirmation(
+    tmp_path,
+    monkeypatch,
+):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    _write_profile_config(config_dir)
+    env_file = tmp_path / ".env"
+    env_file.write_text("ASTOCK_DATABASE_URL=sqlite:///runtime.db\n", encoding="utf-8")
+    db_path = tmp_path / "activation.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
+    try:
+        payload = apply_strategy_profile_activation(
+            conn,
+            config_dir=config_dir,
+            target_profile="trend_swing",
+            env_file=env_file,
+            confirm=False,
+        )
+        events = EventStore(conn).query(event_type="strategy.profile_activation.applied")
+    finally:
+        conn.close()
+
+    assert payload["status"] == "confirmation_required"
+    assert payload["guardrails"]["modifies_environment"] is False
+    assert payload["runtime_env"]["before_profile"] is None
+    assert "ASTOCK_CONFIG_PROFILE" not in env_file.read_text(encoding="utf-8")
+    assert events == []
+
+
+def test_apply_strategy_profile_activation_updates_env_and_records_event(
+    tmp_path,
+    monkeypatch,
+):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    _write_profile_config(config_dir)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "ASTOCK_DATABASE_URL=sqlite:///runtime.db\n"
+        "ASTOCK_CONFIG_PROFILE=default\n",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "activation.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
+    try:
+        payload = apply_strategy_profile_activation(
+            conn,
+            config_dir=config_dir,
+            target_profile="trend_swing",
+            env_file=env_file,
+            confirm=True,
+        )
+        events = EventStore(conn).query(event_type="strategy.profile_activation.applied")
+    finally:
+        conn.close()
+
+    assert payload["status"] == "applied"
+    assert payload["guardrails"]["modifies_environment"] is True
+    assert payload["guardrails"]["manual_approval_required"] is True
+    assert payload["runtime_env"]["before_profile"] == "default"
+    assert payload["runtime_env"]["after_profile"] == "trend_swing"
+    assert payload["runtime_env"]["backup_path"]
+    assert Path(payload["runtime_env"]["backup_path"]).exists()
+    assert "ASTOCK_CONFIG_PROFILE=trend_swing" in env_file.read_text(encoding="utf-8")
+    assert events[0]["payload"]["target_profile"] == "trend_swing"
+    assert events[0]["payload"]["runtime_env"]["after_profile"] == "trend_swing"
 
 
 def _insert_profile_version(conn, config_dir, profile: str, version: str) -> str:

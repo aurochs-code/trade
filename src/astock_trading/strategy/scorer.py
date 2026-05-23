@@ -7,9 +7,13 @@ strategy/scorer.py — 四维评分引擎（纯函数）
 
 from __future__ import annotations
 
+from dataclasses import fields
 from typing import Optional
 
 from astock_trading.market.models import StockSnapshot
+from astock_trading.strategy.continuation_filters import ContinuationQualifier
+from astock_trading.strategy.continuation_models import ContinuationFilterConfig, ContinuationScoreConfig
+from astock_trading.strategy.continuation_scorer import ContinuationScorer
 from astock_trading.strategy.models import (
     DataQuality,
     DimensionScore,
@@ -30,10 +34,20 @@ class Scorer:
         weights: ScoringWeights,
         veto_rules: list[str],
         entry_cfg: Optional[dict] = None,
+        continuation_cfg: Optional[dict] = None,
     ):
         self.weights = weights
         self.veto_rules = set(veto_rules)
         self.entry_cfg = entry_cfg or {}
+        continuation_cfg = continuation_cfg or {}
+        self.continuation_filter_cfg = _dataclass_from_config(
+            ContinuationFilterConfig,
+            continuation_cfg.get("filters", {}),
+        )
+        self.continuation_score_cfg = _dataclass_from_config(
+            ContinuationScoreConfig,
+            continuation_cfg.get("scoring", {}),
+        )
 
     def score(self, snapshot: StockSnapshot) -> ScoreResult:
         tech = self._score_technical(snapshot)
@@ -61,9 +75,11 @@ class Scorer:
                 total = max(0, round(total - 2.0, 1))
 
         style, style_conf = self._classify_style(snapshot)
-        entry_signal = self._check_entry(snapshot, tech)
         data_quality, missing = self._assess_quality(snapshot, fund)
         strategy_routes = self._detect_strategy_routes(snapshot)
+        entry_signal = self._check_entry(snapshot, tech) or any(
+            route.entry_signal for route in strategy_routes
+        )
 
         return ScoreResult(
             code=snapshot.code,
@@ -285,6 +301,68 @@ class Scorer:
         rsi_max = float(self.entry_cfg.get("rsi_max", 70))
         close_near_high = _close_near_high(s)
         liquidity_amount = float(s.quote.amount if s.quote else 0.0)
+        continuation_filter = ContinuationQualifier(self.continuation_filter_cfg).qualify(s)
+        continuation_score = ContinuationScorer(self.continuation_score_cfg).score(
+            s,
+            continuation_filter,
+        )
+
+        if continuation_score.qualified and continuation_score.total_score >= 2.5:
+            routes.append(StrategyRouteEvidence(
+                route="short_continuation",
+                display_name="短续接力",
+                family="short_continuation",
+                confidence=min(0.9, 0.7 + continuation_score.total_score / 20.0),
+                entry_signal=True,
+                evidence={
+                    **continuation_score.component_breakdown,
+                    "continuation_score": continuation_score.total_score,
+                    "close_near_high": continuation_filter.close_near_high,
+                    "intraday_retrace": continuation_filter.intraday_retrace,
+                },
+                notes=[
+                    "continuation_qualifier_passed",
+                    *continuation_score.notes,
+                ],
+            ))
+
+        flow_net = float(s.flow.net_inflow_1d or 0.0) if s.flow else 0.0
+        volume_confirm_min = float(self.entry_cfg.get("volume_ratio_min", 1.5))
+        if (
+            t.golden_cross
+            and t.above_ma20
+            and 0.8 <= t.volume_ratio < volume_confirm_min
+            and 30 <= t.rsi < rsi_max
+            and t.ma20_slope >= 0.01
+            and t.momentum_5d >= 5.0
+            and t.deviation_rate <= 10.0
+            and t.change_pct < 8.0
+            and liquidity_amount >= 5e8
+            and flow_net >= 5e8
+        ):
+            routes.append(StrategyRouteEvidence(
+                route="flow_confirmed_trend",
+                display_name="资金趋势确认",
+                family="trend_swing",
+                confidence=0.88,
+                entry_signal=True,
+                evidence={
+                    "golden_cross": t.golden_cross,
+                    "volume_ratio": round(t.volume_ratio, 2),
+                    "volume_ratio_required": round(volume_confirm_min, 2),
+                    "main_net_inflow": round(flow_net, 2),
+                    "amount": round(liquidity_amount, 2),
+                    "momentum_5d": round(t.momentum_5d, 2),
+                    "rsi": round(t.rsi, 2),
+                    "ma20_slope": round(t.ma20_slope, 4),
+                    "deviation_rate": round(t.deviation_rate, 2),
+                    "change_pct": round(t.change_pct, 2),
+                },
+                notes=[
+                    "relative_volume_below_entry_min_but_absolute_flow_confirms",
+                    "shadow_and_paper_execution_still_require_pool_and_profile_gates",
+                ],
+            ))
 
         if (
             t.above_ma20
@@ -314,7 +392,7 @@ class Scorer:
             t.above_ma20
             and t.ma5 >= t.ma10 >= t.ma20 > 0
             and t.ma20 > t.ma60 > 0
-            and t.volume_ratio <= 1.2
+            and 0 < t.volume_ratio <= 1.2
             and 40 <= t.rsi <= 65
             and -1.5 <= t.deviation_rate <= 3.0
             and t.ma20_slope >= 0.003
@@ -355,6 +433,37 @@ class Scorer:
                     "ma20_slope": round(t.ma20_slope, 4),
                 },
                 notes=["borrowed_from_daily_stock_analysis:ma_golden_cross"],
+            ))
+
+        volume_missing = t.volume_ratio <= 0
+        if (
+            volume_missing
+            and t.above_ma20
+            and t.ma20 > t.ma60 > 0
+            and (t.golden_cross or t.ma5 >= t.ma10 >= t.ma20)
+            and t.ma20_slope >= 0.01
+            and t.momentum_5d >= 3.0
+            and 40 <= t.rsi < rsi_max
+            and t.deviation_rate <= 10.0
+        ):
+            routes.append(StrategyRouteEvidence(
+                route="trend_watch",
+                display_name="趋势观察",
+                family="trend_swing",
+                confidence=0.62,
+                entry_signal=False,
+                evidence={
+                    "golden_cross": t.golden_cross,
+                    "volume_ratio": round(t.volume_ratio, 2),
+                    "rsi": round(t.rsi, 2),
+                    "ma20_slope": round(t.ma20_slope, 4),
+                    "momentum_5d": round(t.momentum_5d, 2),
+                    "deviation_rate": round(t.deviation_rate, 2),
+                },
+                notes=[
+                    "volume_ratio_missing_blocks_entry",
+                    "shadow_watch_only",
+                ],
             ))
 
         if (
@@ -467,3 +576,13 @@ def _close_near_high(s: StockSnapshot) -> bool:
     if not q or q.high <= 0:
         return False
     return q.close >= q.high * 0.98
+
+
+def _dataclass_from_config(cls, values: dict | None):
+    allowed = {field.name for field in fields(cls)}
+    filtered = {
+        key: value
+        for key, value in (values or {}).items()
+        if key in allowed
+    }
+    return cls(**filtered)

@@ -17,6 +17,7 @@ from astock_trading.platform.time import utc_now_iso
 from astock_trading.strategy.decider import build_decider_from_config
 from astock_trading.strategy.models import (
     DecisionIntent,
+    MarketSignal,
     MarketState,
     ScoreResult,
     ScoringWeights,
@@ -27,6 +28,10 @@ StockResolver = Callable[[str], Awaitable[list[dict]]]
 StockLookup = Callable[[str], dict | None]
 
 _CODE_RE = re.compile(r"^(?:(?:sh|sz)\.?)?(\d{6})$", re.IGNORECASE)
+ENTRY_VOLUME_CONFIRM_MIN = 1.2
+ENTRY_RSI_MAX = 70.0
+ENTRY_DEVIATION_MAX = 10.0
+ENTRY_CHASE_CHANGE_PCT = 8.0
 
 
 class StockAnalysisError(ValueError):
@@ -303,6 +308,7 @@ async def analyze_stock(
         candidate_pool=_candidate_pool_row(ctx.conn, code),
         history=_score_history(ctx.conn, code, history_days),
         history_signal=_recent_history_signal_analysis(ctx.conn, code, history_days),
+        execution_readiness=_execution_readiness_for_stock(ctx),
         decision_inputs={
             "current_exposure_pct": round(current_exposure_pct, 4),
             "weekly_buy_count": weekly_buy_count,
@@ -336,6 +342,7 @@ def _build_scorer(cfg: dict) -> Scorer:
         ),
         veto_rules=cfg.get("scoring", {}).get("veto", []),
         entry_cfg=cfg.get("entry_signal", {}),
+        continuation_cfg=cfg.get("continuation", {}),
     )
 
 
@@ -346,6 +353,15 @@ def _portfolio_inputs(ctx: Any) -> tuple[float, int]:
         return get_current_exposure(ctx)
     except Exception:
         return 0.0, 0
+
+
+def _execution_readiness_for_stock(ctx: Any) -> dict | None:
+    try:
+        from astock_trading.pipeline.auto_trade import build_auto_trade_readiness
+
+        return build_auto_trade_readiness(ctx, include_account=False)
+    except Exception:
+        return None
 
 
 def _candidate_pool_row(conn: Any, code: str) -> dict | None:
@@ -432,10 +448,11 @@ def build_stock_analysis_payload(
     candidate_pool: dict | None = None,
     history: list[dict] | None = None,
     history_signal: dict | None = None,
+    execution_readiness: dict | None = None,
     decision_inputs: dict | None = None,
 ) -> dict:
     """Compose the public, stable stock analysis payload."""
-    score_payload = score.to_dict()
+    score_payload = _score_payload_for_report(score)
     decision_payload = {
         "action": decision.action.value,
         "confidence": decision.confidence,
@@ -446,18 +463,58 @@ def build_stock_analysis_payload(
         "veto_reasons": decision.veto_reasons,
         "notes": decision.notes,
     }
-    findings = _findings(snapshot, score, decision, candidate_pool, history_signal)
-    recommendations = _recommendations(decision)
+    candidate_pool_consistency = _candidate_pool_consistency(score, decision, candidate_pool)
+    execution_signal_gap = _has_execution_signal_gap(execution_readiness, code=score.code)
+    findings = _findings(
+        snapshot,
+        score,
+        decision,
+        candidate_pool,
+        history_signal,
+        candidate_pool_consistency=candidate_pool_consistency,
+        execution_signal_gap=execution_signal_gap,
+    )
+    recommendations = _recommendations(decision, candidate_pool_consistency)
+    next_action = _stock_analysis_next_action(
+        candidate_pool_consistency,
+        decision=decision,
+        score=score,
+        candidate_pool=candidate_pool,
+        execution_readiness=execution_readiness,
+        execution_signal_gap=execution_signal_gap,
+    )
+    code = str(score.code or resolved.get("code") or snapshot.code or identifier)
+    name = str(score.name or resolved.get("name") or snapshot.name or code)
+    score_total = round(float(score.total or 0), 2)
+    action = decision.action.value
 
     return {
         "analysis": "stock",
         "status": "ok",
         "generated_at": utc_now_iso(),
+        "code": code,
+        "name": name,
+        "score_total": score_total,
+        "action": action,
+        "action_label": _action_label(action),
+        "entry_signal": bool(score.entry_signal),
+        "summary": _stock_analysis_summary(
+            code=code,
+            name=name,
+            score_total=score_total,
+            action=action,
+            entry_signal=bool(score.entry_signal),
+            candidate_pool=candidate_pool,
+            next_action=next_action,
+            execution_signal_gap=execution_signal_gap,
+        ),
         "identifier": identifier,
         "resolved": resolved,
         "profile": profile,
         "config_version": config_version,
         "execution_allowed": False,
+        "decision_scope": _decision_scope(),
+        "execution_readiness": execution_readiness,
         "market": {
             "signal": market_state.signal.value,
             "multiplier": market_state.multiplier,
@@ -472,10 +529,296 @@ def build_stock_analysis_payload(
         "decision": decision_payload,
         "decision_inputs": decision_inputs or {},
         "candidate_pool": candidate_pool,
+        "candidate_pool_consistency": candidate_pool_consistency,
         "history": history or [],
         "history_signal": history_signal,
         "findings": findings,
         "recommendations": recommendations,
+        "next_action": next_action,
+    }
+
+
+def _action_label(action: str) -> str:
+    labels = {
+        "BUY": "买入意向",
+        "SELL": "卖出意向",
+        "WATCH": "观察",
+        "NO_TRADE": "不操作",
+        "CLEAR": "观望",
+        "HOLD": "持有",
+    }
+    return labels.get(action, action)
+
+
+def _score_payload_for_report(score: ScoreResult) -> dict:
+    payload = score.to_dict()
+    payload["primary_strategy_route_label"] = _primary_strategy_route_label(
+        payload.get("strategy_routes") or [],
+        payload.get("primary_strategy_route"),
+    )
+    return payload
+
+
+def _primary_strategy_route_label(routes: list[dict], primary_route: Any) -> str | None:
+    primary = str(primary_route or "")
+    if not primary:
+        return None
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        if str(route.get("route") or "") == primary:
+            label = str(route.get("display_name") or "").strip()
+            return label or None
+    return None
+
+
+def _pool_tier_label(pool_tier: str) -> str:
+    labels = {
+        "core": "核心",
+        "watch": "观察",
+        "radar": "强势观察",
+    }
+    return labels.get(pool_tier, pool_tier or "不在候选池")
+
+
+def _decision_scope() -> dict:
+    return {
+        "type": "read_only_instant_analysis",
+        "summary": (
+            "本命令只做即时单股分析，不写入 decision.suggested；"
+            "模拟承接以同日新鲜买入意向和 paper auto-readiness 为准。"
+        ),
+        "writes_state": False,
+        "writes_decision_event": False,
+        "execution_allowed": False,
+    }
+
+
+def _has_execution_signal_gap(execution_readiness: dict | None, *, code: str) -> bool:
+    if not execution_readiness:
+        return False
+    buy_side = execution_readiness.get("buy_side") or {}
+    gap = buy_side.get("signal_gap") or {}
+    if gap.get("status") != "entry_signal_without_fresh_buy_intent":
+        return False
+    entries = buy_side.get("current_entry_signals") or []
+    if not entries:
+        return True
+    return any(str(item.get("code") or "") == str(code or "") for item in entries)
+
+
+def _stock_analysis_summary(
+    *,
+    code: str,
+    name: str,
+    score_total: float,
+    action: str,
+    entry_signal: bool,
+    candidate_pool: dict | None,
+    next_action: dict | None,
+    execution_signal_gap: bool = False,
+) -> str:
+    entry_label = "入场信号已触发" if entry_signal else "入场信号未触发"
+    pool_tier = str((candidate_pool or {}).get("pool_tier") or "")
+    pool_label = _pool_tier_label(pool_tier)
+    next_label = str((next_action or {}).get("label") or "继续观察")
+    execution_note = (
+        "该结论是只读即时判断，尚未形成可承接的同日买入意向。"
+        if execution_signal_gap
+        else ""
+    )
+    return (
+        f"{name}({code}) 评分 {score_total}，{_action_label(action)}，{entry_label}；"
+        f"候选池层级：{pool_label}。{execution_note}下一步：{next_label}。"
+    )
+
+
+def _candidate_pool_consistency(
+    score: ScoreResult,
+    decision: DecisionIntent,
+    candidate_pool: dict | None,
+) -> dict:
+    current_action = decision.action.value
+    current_score = round(float(score.total or 0), 2)
+    base = {
+        "current_action": current_action,
+        "current_score": current_score,
+        "requires_pool_refresh": False,
+        "diagnostic_commands": {
+            "refresh_candidate_pool": "atrade screener refresh --json",
+            "diagnose_flow": "atrade diagnose flow --json",
+        },
+    }
+    if candidate_pool is None:
+        return {
+            "status": "not_in_pool",
+            "summary": "当前股票不在候选池；单股分析只作为复核证据，不触发模拟买入。",
+            **base,
+        }
+
+    pool_tier = str(candidate_pool.get("pool_tier") or "")
+    pool_score = round(float(candidate_pool.get("score") or 0), 2)
+    score_delta = round(current_score - pool_score, 2)
+    detail = {
+        "pool_tier": pool_tier,
+        "pool_score": pool_score,
+        "pool_last_scored_at": candidate_pool.get("last_scored_at") or "",
+        **base,
+        "score_delta": score_delta,
+    }
+    if pool_tier == "core" and current_action != "BUY":
+        if score.entry_signal and current_score >= pool_score and _decision_execution_gate_blocks_buy(decision):
+            return {
+                "status": "execution_gate_blocked",
+                "summary": (
+                    "当前单股评分和核心候选一致，入场信号已触发；但大盘或执行闸门暂不允许"
+                    "形成可承接买入意向，先查看 profile、模拟预检和下个买入窗口，不刷新候选池。"
+                ),
+                **detail,
+                "execution_gate": {
+                    "market_signal": decision.market_signal.value,
+                    "market_multiplier": decision.market_multiplier,
+                    "notes": decision.notes,
+                },
+            }
+        return {
+            "status": "current_analysis_weaker_than_pool",
+            "summary": "当前单股即时判断为观察，但候选池仍显示核心；先刷新候选池证据，不把旧核心状态当作可模拟买入依据。",
+            **detail,
+            "requires_pool_refresh": True,
+        }
+    if pool_tier in {"watch", "radar"} and current_action == "BUY":
+        return {
+            "status": "current_analysis_stronger_than_pool",
+            "summary": "当前单股即时判断已形成买入意向，但候选池仍未进入核心；先刷新候选池证据，再看模拟承接预检。",
+            **detail,
+            "requires_pool_refresh": True,
+        }
+    if abs(score_delta) >= 1.0:
+        return {
+            "status": "score_drift",
+            "summary": "当前单股即时评分与候选池评分差异较大；先刷新候选池证据，再复核下一步。",
+            **detail,
+            "requires_pool_refresh": True,
+        }
+    return {
+        "status": "aligned",
+        "summary": "当前单股即时判断与候选池状态基本一致。",
+        **detail,
+    }
+
+
+def _stock_analysis_next_action(
+    candidate_pool_consistency: dict,
+    *,
+    decision: DecisionIntent,
+    score: ScoreResult,
+    candidate_pool: dict | None,
+    execution_readiness: dict | None = None,
+    execution_signal_gap: bool = False,
+) -> dict | None:
+    if candidate_pool_consistency.get("requires_pool_refresh"):
+        return {
+            "type": "refresh_candidate_pool_state",
+            "label": "刷新候选池证据",
+            "command": "atrade screener refresh --json",
+            "reason": "当前单股即时判断与候选池层级不一致，先重建候选池证据。",
+            "safe_to_auto_apply": False,
+            **_stock_analysis_action_contract(
+                "screener_refresh",
+                writes_state=True,
+                risk_level="state_write",
+            ),
+        }
+    pool_tier = str((candidate_pool or {}).get("pool_tier") or "")
+    if pool_tier == "core" and score.entry_signal:
+        if profile_action := _stock_analysis_profile_review_action(execution_readiness):
+            if decision.action.value != "BUY":
+                profile_action["reason"] = (
+                    "当前单股入场信号仍在，但大盘或执行闸门尚未形成可承接买入意向；"
+                    "运行 profile 仍需人工确认，先只读复核 profile 激活计划。"
+                )
+            return profile_action
+        if execution_signal_gap:
+            return {
+                "type": "wait_for_fresh_buy_signal",
+                "label": "等待同日买入意向",
+                "command": "atrade diagnose flow --json",
+                "reason": "当前单股即时判断已有入场信号，但尚未形成可承接的同日买入意向；查看候选流和下个买入窗口，不进入模拟承接。",
+                "safe_to_auto_apply": True,
+                **_stock_analysis_action_contract("diagnose_flow"),
+            }
+        if decision.action.value != "BUY":
+            return {
+                "type": "inspect_execution_gate",
+                "label": "复核执行闸门",
+                "command": "atrade diagnose flow --json",
+                "reason": "当前仍是核心入场信号，但即时决策被大盘或执行闸门压成观察；先看候选流、profile 和下个窗口，不刷新候选池。",
+                "safe_to_auto_apply": True,
+                **_stock_analysis_action_contract("diagnose_flow"),
+            }
+        return {
+            "type": "paper_auto_readiness",
+            "label": "复核模拟承接预检",
+            "command": "atrade paper auto-readiness --json",
+            "reason": "当前是核心候选且已形成买入意向；先检查 profile、买入窗口、风控和模拟盘承接状态，不自动下单。",
+            "safe_to_auto_apply": True,
+            **_stock_analysis_action_contract("paper_auto_readiness"),
+        }
+    if pool_tier in {"watch", "radar"} and decision.action.value == "WATCH" and not score.entry_signal:
+        return {
+            "type": "continue_shadow_trial",
+            "label": "继续影子观察",
+            "command": "atrade paper trial-plan --json",
+            "reason": "当前仍是观察候选且入场信号未触发；继续用影子试运行清单跟踪，不进入模拟买入。",
+            "safe_to_auto_apply": True,
+            **_stock_analysis_action_contract("paper_trial_plan"),
+        }
+    return None
+
+
+def _decision_execution_gate_blocks_buy(decision: DecisionIntent) -> bool:
+    if decision.market_multiplier <= 0:
+        return True
+    if decision.market_signal == MarketSignal.RED:
+        return True
+    return any("禁止新开仓" in str(note) or "大盘" in str(note) for note in decision.notes)
+
+
+def _stock_analysis_action_contract(
+    command_contract_id: str,
+    *,
+    writes_state: bool = False,
+    risk_level: str = "read_only",
+) -> dict:
+    return {
+        "writes_state": writes_state,
+        "writes_environment": False,
+        "writes_order": False,
+        "requires_user_approval": False,
+        "risk_level": risk_level,
+        "command_contract_id": command_contract_id,
+    }
+
+
+def _stock_analysis_profile_review_action(execution_readiness: dict | None) -> dict | None:
+    if not execution_readiness:
+        return None
+    execution_profile = execution_readiness.get("execution_profile") or {}
+    status = str(execution_readiness.get("status") or "")
+    profile_status = str(execution_profile.get("status") or "")
+    if status != "profile_review_required" and profile_status != "review_required":
+        return None
+    readiness_action = execution_readiness.get("next_action") or {}
+    return {
+        "type": str(readiness_action.get("type") or "review_runtime_profile_activation"),
+        "label": "复核运行 profile 激活",
+        "command": str(
+            readiness_action.get("command") or "atrade strategy profile-activation --target trend_swing --json"
+        ),
+        "reason": "当前单股分析是只读买入意向，但运行 profile 仍需人工确认；先只读复核 profile 激活计划，不进入模拟承接。",
+        "safe_to_auto_apply": False,
+        **_stock_analysis_action_contract("strategy_profile_activation_review"),
     }
 
 
@@ -485,33 +828,80 @@ def _findings(
     decision: DecisionIntent,
     candidate_pool: dict | None,
     history_signal: dict | None = None,
+    candidate_pool_consistency: dict | None = None,
+    execution_signal_gap: bool = False,
 ) -> list[str]:
     findings: list[str] = []
     if snapshot.quote is None:
-        findings.append("quote data unavailable")
+        findings.append("行情报价不可用")
     if snapshot.technical is None:
-        findings.append("technical indicators unavailable")
+        findings.append("技术指标不可用")
     if score.veto_triggered:
-        findings.append("hard veto triggered: " + ",".join(score.hard_veto))
+        findings.append("触发硬否决：" + "，".join(score.hard_veto))
     if score.warning_signals:
-        findings.append("warning signals: " + ",".join(score.warning_signals))
+        findings.append("预警信号：" + "，".join(score.warning_signals))
     if not score.entry_signal:
-        findings.append("entry signal not triggered")
+        findings.append("入场信号未触发")
+        entry_blockers = _entry_signal_blockers(snapshot)
+        if entry_blockers:
+            findings.append("入场阻断：" + "；".join(entry_blockers))
     if score.data_missing_fields:
-        findings.append("missing data fields: " + ",".join(score.data_missing_fields))
+        findings.append("缺失数据字段：" + "，".join(score.data_missing_fields))
     if candidate_pool is None:
-        findings.append("not in candidate pool")
+        findings.append("不在候选池")
     if decision.notes:
-        findings.extend(decision.notes)
+        for note in decision.notes:
+            if note not in findings:
+                findings.append(note)
     if history_signal and history_signal.get("miss_reason"):
         findings.append(f"历史镜像：{history_signal['miss_reason']}")
+    if candidate_pool_consistency and candidate_pool_consistency.get("requires_pool_refresh"):
+        findings.append(f"候选池一致性：{candidate_pool_consistency.get('summary')}")
+    if (candidate_pool_consistency or {}).get("status") == "execution_gate_blocked":
+        findings.append(f"执行闸门：{candidate_pool_consistency.get('summary')}")
+    if execution_signal_gap:
+        findings.append("模拟承接：只读即时判断已有买入意向，但尚未形成可承接的同日买入意向")
     return findings
 
 
-def _recommendations(decision: DecisionIntent) -> list[str]:
-    base = ["manual confirmation required before any order; this report never executes trades"]
+def _entry_signal_blockers(snapshot: StockSnapshot) -> list[str]:
+    t = snapshot.technical
+    if t is None:
+        return []
+
+    blockers = []
+    if not t.golden_cross:
+        blockers.append("未出现金叉")
+    if t.volume_ratio <= 0:
+        blockers.append("量比缺失或不可用")
+    elif t.volume_ratio < ENTRY_VOLUME_CONFIRM_MIN:
+        blockers.append(
+            f"量能确认不足（量比 {t.volume_ratio:.2f} < {ENTRY_VOLUME_CONFIRM_MIN:.1f}）"
+        )
+    if t.rsi >= ENTRY_RSI_MAX:
+        blockers.append(f"RSI 过热（{t.rsi:.1f} >= {ENTRY_RSI_MAX:.0f}）")
+    if t.deviation_rate > ENTRY_DEVIATION_MAX:
+        blockers.append(
+            f"乖离率过高（{t.deviation_rate:.1f}% > {ENTRY_DEVIATION_MAX:.0f}%），追高风险"
+        )
+
+    change_pct = snapshot.quote.change_pct if snapshot.quote else t.change_pct
+    if change_pct >= ENTRY_CHASE_CHANGE_PCT:
+        blockers.append(
+            f"当日涨幅较大（{change_pct:.1f}% >= {ENTRY_CHASE_CHANGE_PCT:.0f}%），追高风险"
+        )
+    return blockers
+
+
+def _recommendations(
+    decision: DecisionIntent,
+    candidate_pool_consistency: dict | None = None,
+) -> list[str]:
+    base = ["任何下单前都需要人工确认；本报告只读，不执行交易。"]
+    if candidate_pool_consistency and candidate_pool_consistency.get("requires_pool_refresh"):
+        base.append("先刷新候选池证据，再把旧候选池层级作为模拟承接依据")
     if decision.action.value == "BUY":
-        return base + ["treat BUY as a candidate intent, then verify price, liquidity, and portfolio risk"]
+        return base + ["买入意向只作为候选信号；继续复核价格、流动性和组合风险。"]
     if decision.action.value == "WATCH":
-        return base + ["keep on watchlist until score, entry signal, and market gate align"]
-    return base + ["avoid new exposure until score, veto, or market conditions improve"]
+        return base + ["继续观察，等待评分、入场信号和市场门控同时对齐。"]
+    return base + ["评分、否决项或市场环境改善前，不新增仓位。"]

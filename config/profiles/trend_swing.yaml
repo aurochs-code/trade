@@ -27,4 +27,4 @@ strategy:
     remove_streak_days: 2
   auto_trade:
     enabled: true
-    dry_run: true
+    dry_run: false

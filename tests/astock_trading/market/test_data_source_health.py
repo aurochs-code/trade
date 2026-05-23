@@ -56,6 +56,32 @@ def test_evaluate_data_source_health_marks_stale_optional_as_warning(tmp_path):
         conn.close()
 
 
+def test_evaluate_data_source_health_accepts_market_announcements_alias(tmp_path):
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "hot_stocks", "2026-05-15", {"items": [1]})
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_observation("baidu", "fund_flow", "000858", {"main_net_inflow": 1})
+        store.save_observation(
+            "opencli",
+            "market_announcements",
+            "cn_a",
+            {"items": [{"code": "603311", "title": "复牌公告"}]},
+        )
+
+        result = evaluate_data_source_health(conn, now=now)
+
+        assert result["checks"]["announcements"]["status"] == "healthy"
+        assert result["checks"]["announcements"]["kind"] == "market_announcements"
+        assert "announcements" not in result["optional_missing"]
+    finally:
+        conn.close()
+
+
 def test_evaluate_data_source_health_marks_empty_payload_as_degraded(tmp_path):
     db_path = tmp_path / "test.db"
     init_db(db_path)
@@ -143,6 +169,133 @@ def test_evaluate_data_source_health_includes_recent_provider_failures(tmp_path)
         ]
         assert failures["recent"][0]["resolved_by_fallback"] is False
         assert failures["unresolved"][0]["symbol"] == "603215"
+    finally:
+        conn.close()
+
+
+def test_evaluate_data_source_health_tracks_circuit_open_as_skipped_not_unresolved(tmp_path):
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "hot_stocks", "2026-05-15", {"items": [1]})
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_observation("baidu", "fund_flow", "000858", {"net_inflow_1d": 1})
+        store.save_provider_failure(
+            source="AkShareFlowAdapter",
+            target_kind="fund_flow",
+            symbol="603215",
+            status="circuit_open",
+            error_type="CircuitOpen",
+            error_message="provider 熔断中，跳过本次调用",
+            run_id="run_flow_circuit_open",
+        )
+
+        result = evaluate_data_source_health(conn, now=now)
+
+        failures = result["provider_failures"]
+        assert failures["total_recent"] == 1
+        assert failures["skipped_recent"] == 1
+        assert failures["unresolved_recent"] == 0
+        assert failures["resolved_recent"] == 0
+        assert failures["by_skipped_source"] == {"AkShareFlowAdapter": 1}
+        assert failures["by_unresolved_source"] == {}
+        assert failures["recent"][0]["skipped_by_circuit"] is True
+        assert failures["unresolved"] == []
+    finally:
+        conn.close()
+
+
+def test_evaluate_data_source_health_resolves_cross_platform_hot_stocks_with_hot_stocks_fallback(tmp_path):
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_provider_failure(
+            source="OpenCliFinanceAdapter",
+            target_kind="cross_platform_hot_stocks",
+            symbol="cn_a",
+            status="timeout",
+            error_type="TimeoutError",
+            error_message="provider 超时",
+            run_id="run_opencli_timeout",
+        )
+        store.save_observation("AStockSignalAdapter", "hot_stocks", "latest", {"items": [1]})
+        failure_time = (now - timedelta(minutes=2)).isoformat()
+        success_time = (now - timedelta(minutes=1)).isoformat()
+        conn.execute(
+            "UPDATE market_observations SET observed_at = ? WHERE kind = 'provider_failure'",
+            (failure_time,),
+        )
+        conn.execute(
+            """UPDATE market_observations
+               SET observed_at = ?
+               WHERE kind = 'hot_stocks' AND symbol = 'latest'""",
+            (success_time,),
+        )
+
+        result = evaluate_data_source_health(conn, now=now)
+
+        failures = result["provider_failures"]
+        assert failures["unresolved_recent"] == 0
+        assert failures["resolved_recent"] == 1
+        assert failures["recent"][0]["resolved_by_fallback"] is True
+        assert failures["recent"][0]["resolved_source"] == "AStockSignalAdapter"
+        assert failures["unresolved"] == []
+    finally:
+        conn.close()
+
+
+def test_evaluate_data_source_health_resolves_cross_platform_hot_stocks_with_nearby_prior_hot_stocks(tmp_path):
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_observation(
+            "AStockSignalAdapter",
+            "hot_stocks",
+            "latest",
+            {"items": [{"code": "688981"}]},
+            run_id="run_evening",
+        )
+        store.save_provider_failure(
+            source="OpenCliFinanceAdapter",
+            target_kind="cross_platform_hot_stocks",
+            symbol="cn_a",
+            status="timeout",
+            error_type="TimeoutError",
+            error_message="provider 超时",
+            run_id="run_evening",
+        )
+        success_time = (now - timedelta(seconds=30)).isoformat()
+        failure_time = (now - timedelta(seconds=20)).isoformat()
+        conn.execute(
+            """UPDATE market_observations
+               SET observed_at = ?
+               WHERE kind = 'hot_stocks' AND symbol = 'latest'""",
+            (success_time,),
+        )
+        conn.execute(
+            "UPDATE market_observations SET observed_at = ? WHERE kind = 'provider_failure'",
+            (failure_time,),
+        )
+
+        result = evaluate_data_source_health(conn, now=now)
+
+        failures = result["provider_failures"]
+        assert failures["unresolved_recent"] == 0
+        assert failures["resolved_recent"] == 1
+        assert failures["recent"][0]["resolved_by_fallback"] is True
+        assert failures["recent"][0]["resolved_source"] == "AStockSignalAdapter"
+        assert failures["recent"][0]["resolved_observed_at"] == success_time
     finally:
         conn.close()
 

@@ -1,6 +1,7 @@
 """Tests for market/store.py and market/service.py"""
 
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
 import subprocess
@@ -13,12 +14,14 @@ import pytest
 
 from astock_trading.market import service as market_service_module
 from astock_trading.market.adapters import AkShareHKMarketAdapter, OpenCliFinanceAdapter, OpenCliXueqiuAdapter
+from astock_trading.market.akshare_adapters import MXMarketAdapter
 from astock_trading.market.models import (
     FinancialReport,
     FundFlow,
     IndexQuote,
     SentimentData,
     StockQuote,
+    StockSnapshot,
     TechnicalIndicators,
 )
 from astock_trading.market.store import MarketStore
@@ -39,6 +42,221 @@ def db(tmp_path):
 @pytest.fixture
 def store(db):
     return MarketStore(db)
+
+
+def _run_async(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def test_fetch_sina_intraday_suppresses_akshare_stderr(monkeypatch, capfd):
+    class FakeAkshare:
+        def stock_intraday_sina(self, symbol, date):
+            print("0%| mock intraday progress", file=sys.stderr)
+            return pd.DataFrame({
+                "price": [14.8, 15.0],
+                "volume": [1000, 2000],
+                "name": ["双环传动", "双环传动"],
+            })
+
+        def stock_zh_a_daily(self, symbol, adjust):
+            print("0%| mock daily progress", file=sys.stderr)
+            return pd.DataFrame({"close": [14.5, 14.8]})
+
+    monkeypatch.setitem(sys.modules, "akshare", FakeAkshare())
+
+    quotes = market_service_module._fetch_sina_intraday(["002138"])
+
+    captured = capfd.readouterr()
+    assert quotes["002138"] is not None
+    assert quotes["002138"].price == 15.0
+    assert captured.err == ""
+
+
+def test_collect_intraday_batch_suppresses_akshare_spot_stderr(monkeypatch, store, capfd):
+    class FakeAkshare:
+        def stock_zh_a_spot_em(self):
+            print("0%| mock spot progress", file=sys.stderr)
+            return pd.DataFrame([{
+                "代码": "002138",
+                "名称": "双环传动",
+                "最新价": 15.0,
+                "今开": 14.8,
+                "最高": 15.2,
+                "最低": 14.7,
+                "成交量": 5000000,
+                "成交额": 750000000.0,
+                "涨跌幅": 1.5,
+            }])
+
+    monkeypatch.setitem(sys.modules, "akshare", FakeAkshare())
+    svc = MarketService(market_providers=[], store=store)
+
+    snapshots = _run_async(
+        svc.collect_intraday_batch([{"code": "002138", "name": "双环传动"}], run_id="run_spot")
+    )
+
+    captured = capfd.readouterr()
+    assert snapshots[0].quote is not None
+    assert snapshots[0].quote.price == 15.0
+    assert captured.err == ""
+
+
+def test_get_quote_rejects_provider_price_that_diverges_from_daily_kline():
+    class BadRealtimeProvider:
+        async def get_realtime(self, codes):
+            return {
+                "600584": StockQuote(
+                    code="600584",
+                    name="长电科技",
+                    price=177.75,
+                    open=190.82,
+                    high=192.99,
+                    low=176.66,
+                    close=177.75,
+                    volume=43_493_461,
+                    amount=8_113_828_937.0,
+                    change_pct=-4.64,
+                )
+            }
+
+        async def get_kline(self, code, period="daily", count=120):
+            assert code == "600584"
+            return pd.DataFrame({
+                "date": ["2026-05-21", "2026-05-22"],
+                "open": [65.0, 66.88],
+                "high": [67.0, 71.28],
+                "low": [64.0, 65.67],
+                "close": [66.0, 66.84],
+                "volume": [100_000_000, 312_505_756],
+                "amount": [6_600_000_000.0, 21_324_471_319.4],
+            })
+
+    class FallbackRealtimeProvider:
+        async def get_realtime(self, codes):
+            return {
+                "600584": StockQuote(
+                    code="600584",
+                    name="长电科技",
+                    price=66.84,
+                    open=66.88,
+                    high=71.28,
+                    low=65.67,
+                    close=66.84,
+                    volume=312_505_756,
+                    amount=21_324_471_319.4,
+                    change_pct=0.94,
+                )
+            }
+
+        async def get_kline(self, code, period="daily", count=120):
+            return None
+
+    svc = MarketService(market_providers=[BadRealtimeProvider(), FallbackRealtimeProvider()])
+
+    quote = _run_async(svc._get_quote("600584"))
+
+    assert quote is not None
+    assert quote.price == 66.84
+
+
+def test_collect_batch_times_out_single_snapshot_and_continues():
+    class SlowMarketService(MarketService):
+        async def collect_snapshot(self, code, name="", run_id=None):
+            await asyncio.sleep(1)
+            return SimpleNamespace(code=code, name=name)
+
+    svc = SlowMarketService(market_providers=[])
+
+    snapshots = _run_async(
+        svc.collect_batch(
+            [{"code": "002138", "name": "双环传动"}],
+            run_id="run-timeout",
+            per_snapshot_timeout_seconds=0.01,
+        )
+    )
+
+    assert len(snapshots) == 1
+    assert snapshots[0].code == "002138"
+    assert snapshots[0].name == "双环传动"
+    assert snapshots[0].quote is None
+
+
+def test_collect_batch_timeout_does_not_expire_queued_snapshots():
+    class SlowButValidMarketService(MarketService):
+        async def collect_snapshot(self, code, name="", run_id=None):
+            async with self._sem:
+                await asyncio.sleep(0.03)
+                quote = StockQuote(
+                    code=code,
+                    name=name,
+                    price=10.0,
+                    open=10.0,
+                    high=10.0,
+                    low=10.0,
+                    close=10.0,
+                    volume=100,
+                    amount=1000.0,
+                    change_pct=1.0,
+                )
+                return StockSnapshot(code=code, name=name, quote=quote)
+
+    svc = SlowButValidMarketService(market_providers=[], concurrency=1)
+
+    snapshots = _run_async(
+        svc.collect_batch(
+            [
+                {"code": "002138", "name": "双环传动"},
+                {"code": "688981", "name": "中芯国际"},
+            ],
+            run_id="run-queued-timeout",
+            per_snapshot_timeout_seconds=0.05,
+        )
+    )
+
+    assert [snapshot.code for snapshot in snapshots] == ["002138", "688981"]
+    assert all(snapshot.quote is not None for snapshot in snapshots)
+
+
+def test_collect_batch_times_out_sector_context_and_keeps_snapshots():
+    class SlowSectorMarketService(MarketService):
+        async def collect_snapshot(self, code, name="", run_id=None):
+            quote = StockQuote(
+                code=code,
+                name=name,
+                price=10.0,
+                open=10.0,
+                high=10.0,
+                low=10.0,
+                close=10.0,
+                volume=100,
+                amount=1000.0,
+                change_pct=1.0,
+            )
+            return StockSnapshot(code=code, name=name, quote=quote)
+
+        async def _attach_sector_context(self, snapshots, run_id=None):
+            await asyncio.sleep(1)
+            return []
+
+    svc = SlowSectorMarketService(market_providers=[])
+
+    snapshots = _run_async(
+        svc.collect_batch(
+            [{"code": "002138", "name": "双环传动"}],
+            run_id="run-sector-timeout",
+            include_sector_context=True,
+            sector_context_timeout_seconds=0.01,
+        )
+    )
+
+    assert len(snapshots) == 1
+    assert snapshots[0].code == "002138"
+    assert snapshots[0].quote is not None
+    assert snapshots[0].sector is None
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +860,144 @@ class TestMarketService:
         assert snap.quote.price == 15.0
         assert snap.financial is not None
 
+    def test_market_state_falls_back_to_cached_signal_when_index_providers_fail(self, store):
+        store.save_observation(
+            "market_service",
+            "market_state",
+            "market",
+            {"signal": "YELLOW", "multiplier": 0.5},
+            run_id="previous_market_signal",
+        )
+        svc = MarketService(market_providers=[FailingProvider()], store=store)
+
+        state, index_data = _run_async(
+            svc.collect_market_state(run_id="run_provider_failed")
+        )
+
+        assert state.signal.value == "YELLOW"
+        assert state.multiplier == 0.5
+        assert state.detail["reason"] == "指数数据源无有效数据，沿用最近市场信号"
+        assert index_data == {}
+
+    def test_market_state_uses_projection_when_live_index_payload_is_invalid(self, store):
+        class InvalidIndexProvider:
+            async def get_index(self, symbols):
+                return {
+                    symbol: IndexQuote(
+                        symbol=symbol,
+                        name=name,
+                        price=0.0,
+                        change_pct=0.0,
+                        ma20=0.0,
+                        ma60=0.0,
+                        above_ma20=False,
+                    )
+                    for symbol, name in {
+                        "sh000001": "上证指数",
+                        "sz399001": "深证成指",
+                        "sz399006": "创业板指",
+                    }.items()
+                }
+
+        now = datetime.now(timezone.utc).isoformat()
+        for symbol, name, ma20_pct in (
+            ("sh000001", "上证指数", 2.0),
+            ("sz399001", "深证成指", 1.5),
+            ("sz399006", "创业板指", 3.0),
+        ):
+            store._conn.execute(
+                """INSERT INTO projection_market_state
+                   (index_symbol, name, signal, price_cents, change_pct, ma20_pct, ma60_pct, updated_at)
+                   VALUES (?, ?, '', ?, ?, ?, ?, ?)""",
+                (symbol, name, 310000, 0.8, ma20_pct, 4.0, now),
+            )
+
+        svc = MarketService(market_providers=[InvalidIndexProvider()], store=store)
+
+        state, index_data = _run_async(
+            svc.collect_market_state(run_id="run_invalid_live_index")
+        )
+
+        assert state.signal.value == "GREEN"
+        assert state.multiplier == 1.0
+        assert state.detail["reason"] == "指数数据源无有效数据，使用最近市场投影"
+        assert state.detail["fallback_source"] == "projection_market_state"
+        assert index_data["上证指数"]["symbol"] == "sh000001"
+
+    def test_market_state_projection_query_quotes_signal_for_mysql_reserved_column(self):
+        class InvalidIndexProvider:
+            async def get_index(self, symbols):
+                return {
+                    symbol: IndexQuote(
+                        symbol=symbol,
+                        name=name,
+                        price=0.0,
+                        change_pct=1.0,
+                        ma20=0.0,
+                        ma60=0.0,
+                        above_ma20=False,
+                    )
+                    for symbol, name in {
+                        "sh000001": "上证指数",
+                        "sz399001": "深证成指",
+                        "sz399006": "创业板指",
+                    }.items()
+                }
+
+        class FakeMySQLProjectionConn:
+            def __init__(self):
+                self.queries: list[str] = []
+
+            def execute(self, sql, params=None):
+                self.queries.append(sql)
+                if " signal," in sql and "`signal`" not in sql:
+                    raise RuntimeError("SQL syntax error near reserved word signal")
+                now = datetime.now(timezone.utc).isoformat()
+                rows = [
+                    {
+                        "index_symbol": "sh000001",
+                        "name": "上证指数",
+                        "signal": "",
+                        "price_cents": 411289,
+                        "change_pct": 0.87,
+                        "ma20_pct": -0.69,
+                        "ma60_pct": 1.17,
+                        "updated_at": now,
+                    },
+                    {
+                        "index_symbol": "sz399001",
+                        "name": "深证成指",
+                        "signal": "",
+                        "price_cents": 1559729,
+                        "change_pct": 2.3,
+                        "ma20_pct": 1.11,
+                        "ma60_pct": 7.13,
+                        "updated_at": now,
+                    },
+                    {
+                        "index_symbol": "sz399006",
+                        "name": "创业板指",
+                        "signal": "",
+                        "price_cents": 393850,
+                        "change_pct": 2.84,
+                        "ma20_pct": 3.03,
+                        "ma60_pct": 12.57,
+                        "updated_at": now,
+                    },
+                ]
+                return SimpleNamespace(fetchall=lambda: rows)
+
+        fake_conn = FakeMySQLProjectionConn()
+        store = SimpleNamespace(_conn=fake_conn, get_cached=lambda *args, **kwargs: None)
+        svc = MarketService(market_providers=[InvalidIndexProvider()], store=store)
+
+        state, index_data = _run_async(svc.collect_market_state())
+
+        assert state.signal.value == "GREEN"
+        assert state.detail["fallback_source"] == "projection_market_state"
+        assert index_data["深证成指"]["source"] == "projection_market_state"
+        assert any("`signal`" in query for query in fake_conn.queries)
+
     def test_akshare_flow_tick_suppresses_download_warning(self, monkeypatch):
         from astock_trading.market.akshare_adapters import AkShareFlowAdapter
 
@@ -665,6 +1021,74 @@ class TestMarketService:
         assert result is not None
         assert result.net_inflow_1d == 80.0
         assert not any("正在下载数据" in str(item.message) for item in caught)
+
+    def test_mx_index_fallback_suppresses_akshare_progress_stderr(self, monkeypatch, capsys):
+        from astock_trading.market.mx import realtime
+
+        def fake_market_index_mx():
+            return {
+                "上证指数": {"price": 3100.0, "change_pct": 0.5},
+                "深证成指": {"price": 10500.0, "change_pct": 0.8},
+                "创业板指": {"price": 2200.0, "change_pct": 1.1},
+                "科创50": {"price": 1000.0, "change_pct": 0.6},
+            }
+
+        class FakeAkshare:
+            def stock_zh_index_daily(self, symbol):
+                print("0%| mock akshare progress", file=sys.stderr)
+                return pd.DataFrame({
+                    "date": pd.date_range("2026-01-01", periods=80).astype(str),
+                    "close": [1000.0 + i for i in range(80)],
+                })
+
+        monkeypatch.setattr(realtime, "get_market_index_mx", fake_market_index_mx)
+        monkeypatch.setitem(sys.modules, "akshare", FakeAkshare())
+
+        result = MXMarketAdapter()._get_index_sync()
+
+        captured = capsys.readouterr()
+        assert result["上证指数"].price == 3100.0
+        assert "mock akshare progress" not in captured.err
+
+    def test_mx_kline_uses_akshare_when_mx_volume_is_missing(self, monkeypatch, capsys):
+        dates = pd.date_range("2026-04-01", periods=30, freq="B").strftime("%Y-%m-%d")
+        mx_df = pd.DataFrame({
+            "date": dates,
+            "open": [10 + i * 0.1 for i in range(30)],
+            "close": [10.1 + i * 0.1 for i in range(30)],
+            "high": [10.2 + i * 0.1 for i in range(30)],
+            "low": [9.9 + i * 0.1 for i in range(30)],
+            "volume": [0] * 30,
+            "涨跌幅": [0] * 30,
+        })
+        ak_df = pd.DataFrame({
+            "date": dates,
+            "open": [10 + i * 0.1 for i in range(30)],
+            "close": [10.1 + i * 0.1 for i in range(30)],
+            "high": [10.2 + i * 0.1 for i in range(30)],
+            "low": [9.9 + i * 0.1 for i in range(30)],
+            "volume": [1_000_000 + i * 10_000 for i in range(30)],
+            "amount": [10_000_000 + i * 100_000 for i in range(30)],
+        })
+
+        class FakeAkshare:
+            def stock_zh_a_daily(self, symbol, adjust):
+                print("0%| mock akshare progress", file=sys.stderr)
+                assert symbol == "sh600066"
+                assert adjust == "qfq"
+                return ak_df
+
+        adapter = MXMarketAdapter()
+        monkeypatch.setattr(adapter, "_get_kline_from_mx", lambda code, count: mx_df)
+        monkeypatch.setitem(sys.modules, "akshare", FakeAkshare())
+
+        result = adapter._get_kline_sync("600066", "daily", 20)
+
+        assert result is not None
+        assert result["volume"].sum() > 0
+        assert "amount" in result.columns
+        captured = capsys.readouterr()
+        assert "mock akshare progress" not in captured.err
 
     def test_akshare_flow_records_internal_subsource_errors(self, monkeypatch, store):
         from astock_trading.market.akshare_adapters import AkShareFlowAdapter
@@ -818,6 +1242,35 @@ class TestMarketService:
         assert technical.ma20 == 15.0
         assert hk_provider.calls == []
         assert a_provider.calls == ["600066"]
+
+    def test_technical_continues_when_first_kline_has_missing_volume(self, store):
+        dates = pd.date_range("2026-04-01", periods=30, freq="B").strftime("%Y-%m-%d")
+        price_only = pd.DataFrame({
+            "date": dates,
+            "open": [10 + i * 0.1 for i in range(30)],
+            "close": [10.1 + i * 0.1 for i in range(30)],
+            "high": [10.2 + i * 0.1 for i in range(30)],
+            "low": [9.9 + i * 0.1 for i in range(30)],
+            "volume": [0] * 30,
+        })
+        with_volume = price_only.copy()
+        with_volume["volume"] = [1_000_000 + i * 50_000 for i in range(30)]
+
+        first_provider = TrackingAShareKlineProvider(price_only)
+        second_provider = TrackingAShareKlineProvider(with_volume)
+        svc = MarketService(
+            market_providers=[first_provider, second_provider],
+            store=store,
+        )
+
+        technical = asyncio.get_event_loop().run_until_complete(
+            svc._get_technical("600066", None)
+        )
+
+        assert technical is not None
+        assert technical.volume_ratio > 0
+        assert first_provider.calls == ["600066"]
+        assert second_provider.calls == ["600066"]
 
     def test_hk_quote_falls_back_to_hk_kline_only(self, store):
         a_provider = TrackingAShareKlineProvider(
@@ -978,6 +1431,30 @@ def test_opencli_finance_adapter_collects_hot_sectors(monkeypatch):
         "sort": "money-flow",
         "source": "eastmoney",
     }]
+
+
+def test_baostock_login_suppresses_stdout(monkeypatch, capsys):
+    from astock_trading.market import baostock_adapters
+
+    class LoginResult:
+        error_code = "0"
+        error_msg = ""
+
+    class FakeBaostock:
+        @staticmethod
+        def login():
+            print("login success!")
+            return LoginResult()
+
+    monkeypatch.setattr(baostock_adapters, "_bs_logged_in", False)
+    monkeypatch.setitem(sys.modules, "baostock", FakeBaostock())
+
+    try:
+        baostock_adapters._bs_ensure_login()
+        captured = capsys.readouterr()
+        assert "login success" not in captured.out
+    finally:
+        monkeypatch.setattr(baostock_adapters, "_bs_logged_in", False)
 
 
 def test_opencli_finance_adapter_searches_market_news(monkeypatch):

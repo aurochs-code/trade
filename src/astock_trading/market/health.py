@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 
@@ -27,7 +27,7 @@ DEFAULT_EXPECTATIONS = (
     DataSourceExpectation("northbound_realtime", ("northbound_realtime",), 24, True),
     DataSourceExpectation("baidu_fund_flow", ("fund_flow", "flow"), 24, True),
     DataSourceExpectation("industry_comparison", ("industry_comparison",), 72, False),
-    DataSourceExpectation("announcements", ("announcements",), 72, False),
+    DataSourceExpectation("announcements", ("announcements", "market_announcements"), 72, False),
     DataSourceExpectation("research_reports", ("research_reports",), 168, False),
     DataSourceExpectation("stock_news", ("stock_news",), 72, False),
     DataSourceExpectation("basic_info", ("basic_info",), 168, False),
@@ -36,8 +36,18 @@ DEFAULT_EXPECTATIONS = (
 
 DEFAULT_CANDIDATE_POOL_MAX_AGE_HOURS = 24
 _SUCCESS_KIND_ALIASES = {
+    "cross_platform_hot_stocks": ("cross_platform_hot_stocks", "hot_stocks"),
     "fund_flow": ("fund_flow", "flow"),
     "flow": ("fund_flow", "flow"),
+}
+_SUCCESS_SYMBOL_ALIASES = {
+    ("cross_platform_hot_stocks", "cn_a"): ("cn_a", "latest"),
+    ("cross_platform_hot_stocks", "latest"): ("cn_a", "latest"),
+    ("hot_stocks", "cn_a"): ("cn_a", "latest"),
+    ("hot_stocks", "latest"): ("cn_a", "latest"),
+}
+_SUCCESS_LOOKBACK_MINUTES = {
+    "cross_platform_hot_stocks": 15,
 }
 
 
@@ -145,8 +155,10 @@ def _recent_provider_failures(
 
     recent = []
     unresolved = []
+    skipped = []
     source_counter: Counter = Counter()
     unresolved_source_counter: Counter = Counter()
+    skipped_source_counter: Counter = Counter()
     target_kind_counter: Counter = Counter()
     for row in rows:
         observed = _parse_dt(row["observed_at"])
@@ -161,6 +173,9 @@ def _recent_provider_failures(
         source = str(payload.get("source") or row["source"])
         target_kind = str(payload.get("target_kind") or "")
         symbol = str(payload.get("symbol") or row["symbol"])
+        status = str(payload.get("status") or "provider_error")
+        error_type = str(payload.get("error_type") or "")
+        skipped_by_circuit = status == "circuit_open" or error_type == "CircuitOpen"
         resolved = _provider_failure_resolution(
             conn,
             target_kind=target_kind,
@@ -171,8 +186,8 @@ def _recent_provider_failures(
             "source": source,
             "target_kind": target_kind,
             "symbol": symbol,
-            "status": str(payload.get("status") or "provider_error"),
-            "error_type": str(payload.get("error_type") or ""),
+            "status": status,
+            "error_type": error_type,
             "error_message": str(payload.get("error_message") or ""),
             "observed_at": row["observed_at"],
             "age_hours": round(age_hours, 2),
@@ -180,6 +195,7 @@ def _recent_provider_failures(
             "resolved_by_fallback": resolved is not None,
             "resolved_source": resolved["source"] if resolved else "",
             "resolved_observed_at": resolved["observed_at"] if resolved else "",
+            "skipped_by_circuit": skipped_by_circuit,
         }
         details = payload.get("details")
         if isinstance(details, dict):
@@ -188,20 +204,26 @@ def _recent_provider_failures(
         source_counter.update([source])
         if target_kind:
             target_kind_counter.update([target_kind])
-        if not resolved:
+        if skipped_by_circuit:
+            skipped.append(item)
+            skipped_source_counter.update([source])
+        elif not resolved:
             unresolved.append(item)
             unresolved_source_counter.update([source])
 
     return {
         "total_recent": len(recent),
         "unresolved_recent": len(unresolved),
-        "resolved_recent": len(recent) - len(unresolved),
+        "resolved_recent": len(recent) - len(unresolved) - len(skipped),
+        "skipped_recent": len(skipped),
         "max_age_hours": max_age_hours,
         "by_source": dict(sorted(source_counter.items())),
         "by_unresolved_source": dict(sorted(unresolved_source_counter.items())),
+        "by_skipped_source": dict(sorted(skipped_source_counter.items())),
         "by_target_kind": dict(sorted(target_kind_counter.items())),
         "recent": recent,
         "unresolved": unresolved,
+        "skipped": skipped,
     }
 
 
@@ -215,13 +237,19 @@ def _provider_failure_resolution(
     if not target_kind or not symbol:
         return None
     success_kinds = _SUCCESS_KIND_ALIASES.get(target_kind, (target_kind,))
-    placeholders = ",".join("?" for _ in success_kinds)
-    params: list[object] = [*success_kinds, symbol, observed_at]
+    success_symbols = _SUCCESS_SYMBOL_ALIASES.get((target_kind, symbol), (symbol,))
+    success_after = observed_at
+    lookback_minutes = _SUCCESS_LOOKBACK_MINUTES.get(target_kind)
+    if lookback_minutes:
+        success_after = (_parse_dt(observed_at) - timedelta(minutes=lookback_minutes)).isoformat()
+    kind_placeholders = ",".join("?" for _ in success_kinds)
+    symbol_placeholders = ",".join("?" for _ in success_symbols)
+    params: list[object] = [*success_kinds, *success_symbols, success_after]
     row = conn.execute(
         f"""SELECT source, observed_at
             FROM market_observations
-            WHERE kind IN ({placeholders})
-              AND symbol = ?
+            WHERE kind IN ({kind_placeholders})
+              AND symbol IN ({symbol_placeholders})
               AND observed_at >= ?
             ORDER BY observed_at ASC
             LIMIT 1""",

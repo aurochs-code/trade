@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 
 import pandas as pd
 import pytest
@@ -39,6 +40,112 @@ def test_tencent_financial_adapter_maps_pe_and_pb(monkeypatch):
     assert report is not None
     assert report.pe_ttm == 300.45
     assert report.pb == 11.51
+
+
+def test_akshare_financial_adapter_maps_scoring_fields(monkeypatch):
+    import akshare as ak
+
+    from astock_trading.market.adapters import AkShareFinancialAdapter
+
+    monkeypatch.setattr(
+        ak,
+        "stock_financial_analysis_indicator",
+        lambda symbol, start_year: pd.DataFrame([{
+            "净资产收益率(%)": "12.5",
+            "主营业务收入增长率(%)": "18.6",
+            "每股经营性现金流(元)": "0.91",
+        }]),
+    )
+
+    adapter = AkShareFinancialAdapter()
+    report = asyncio.get_event_loop().run_until_complete(adapter.get_financial("002384"))
+
+    assert report is not None
+    assert report.roe == 12.5
+    assert report.revenue_growth == 18.6
+    assert report.operating_cash_flow == 0.91
+
+
+def test_akshare_financial_adapter_uses_ths_summary_fallback(monkeypatch):
+    import akshare as ak
+
+    from astock_trading.market.adapters import AkShareFinancialAdapter
+
+    monkeypatch.setattr(
+        ak,
+        "stock_financial_analysis_indicator",
+        lambda symbol, start_year: pd.DataFrame([{"日期": "2026-03-31"}]),
+    )
+    monkeypatch.setattr(
+        ak,
+        "stock_financial_abstract_ths",
+        lambda symbol: pd.DataFrame([
+            {
+                "报告期": "2025-12-31",
+                "营业总收入同比增长率": "9.5%",
+                "每股经营现金流": "0.42",
+                "净资产收益率": "8.1%",
+            },
+            {
+                "报告期": "2026-03-31",
+                "营业总收入同比增长率": "21.3%",
+                "每股经营现金流": "0.88",
+                "净资产收益率": "13.2%",
+            },
+        ]),
+    )
+
+    adapter = AkShareFinancialAdapter()
+    report = asyncio.get_event_loop().run_until_complete(adapter.get_financial("002384"))
+
+    assert report is not None
+    assert report.roe == 13.2
+    assert report.revenue_growth == 21.3
+    assert report.operating_cash_flow == 0.88
+
+
+def test_akshare_financial_adapter_suppresses_stderr_noise(monkeypatch, capfd):
+    import akshare as ak
+
+    from astock_trading.market.adapters import AkShareFinancialAdapter
+
+    def noisy_financial_indicator(symbol, start_year):
+        print("正在下载数据，请稍等", file=sys.stderr)
+        return pd.DataFrame([{
+            "净资产收益率(%)": "12.5",
+            "主营业务收入增长率(%)": "18.6",
+            "每股经营性现金流(元)": "0.91",
+        }])
+
+    monkeypatch.setattr(ak, "stock_financial_analysis_indicator", noisy_financial_indicator)
+
+    adapter = AkShareFinancialAdapter()
+    report = asyncio.get_event_loop().run_until_complete(adapter.get_financial("002384"))
+
+    assert report is not None
+    assert capfd.readouterr().err == ""
+
+
+def test_akshare_flow_adapter_suppresses_stderr_noise(monkeypatch, capfd):
+    import akshare as ak
+
+    from astock_trading.market.adapters import AkShareFlowAdapter
+
+    def noisy_fund_flow(stock, market):
+        print("正在下载数据，请稍等", file=sys.stderr)
+        return pd.DataFrame([
+            {"日期": "2026-05-20", "主力净流入-净额": 1_000_000},
+            {"日期": "2026-05-21", "主力净流入-净额": -2_000_000},
+        ])
+
+    monkeypatch.setattr(ak, "stock_individual_fund_flow", noisy_fund_flow)
+
+    adapter = AkShareFlowAdapter()
+    flow = asyncio.get_event_loop().run_until_complete(adapter.get_fund_flow("002384", days=2))
+
+    assert flow is not None
+    assert flow.net_inflow_1d == -1_000_000
+    assert capfd.readouterr().err == ""
 
 
 class FakeMootdxClient:
@@ -241,3 +348,46 @@ def test_signal_adapter_prefers_eastmoney_industry_comparison():
     assert industry["top"][0]["turnover_yi"] == 25
     assert industry["top"][0]["leader"] == "绿的谐波"
     assert industry["bottom"][0]["name"] == "银行"
+
+
+def test_signal_adapter_industry_comparison_suppresses_stderr_noise(capsys):
+    from astock_trading.market.adapters import AStockSignalAdapter
+
+    class NoisyIndustryAk:
+        def stock_board_industry_name_em(self):
+            print("0%| mock industry progress", file=sys.stderr)
+            return pd.DataFrame([
+                {"板块名称": "机器人", "涨跌幅": "3.2", "成交额": 2500000000, "上涨家数": 35, "下跌家数": 5, "领涨股票": "绿的谐波"},
+            ])
+
+    adapter = AStockSignalAdapter(ak_module=NoisyIndustryAk())
+
+    industry = asyncio.get_event_loop().run_until_complete(adapter.get_industry_comparison(top_n=1))
+
+    captured = capsys.readouterr()
+    assert industry["top"][0]["name"] == "机器人"
+    assert "mock industry progress" not in captured.err
+
+
+def test_signal_adapter_announcements_suppresses_stderr_noise(capsys):
+    from astock_trading.market.adapters import AStockSignalAdapter
+
+    class NoisyAnnouncementsAk:
+        def stock_zh_a_disclosure_report_cninfo(self, symbol, market):
+            print("0%| mock announcements progress", file=sys.stderr)
+            return pd.DataFrame([
+                {
+                    "公告标题": "复牌公告",
+                    "公告类型": "交易提示",
+                    "公告日期": "2026-05-22",
+                    "公告链接": "https://example.com",
+                }
+            ])
+
+    adapter = AStockSignalAdapter(ak_module=NoisyAnnouncementsAk())
+
+    rows = asyncio.get_event_loop().run_until_complete(adapter.get_announcements("000858", limit=1))
+
+    captured = capsys.readouterr()
+    assert rows[0]["title"] == "复牌公告"
+    assert "mock announcements progress" not in captured.err

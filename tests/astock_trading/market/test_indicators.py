@@ -100,6 +100,76 @@ def test_above_ma20_uses_quote():
     assert result.change_pct == 2.0
 
 
+def test_volume_ratio_uses_quote_volume_when_latest_kline_volume_missing():
+    """最新 K 线成交量为 0 时，使用实时行情成交量计算量比。"""
+    n = 20
+    prices = [10.0 + i * 0.1 for i in range(n)]
+    df = pd.DataFrame({
+        "date": pd.date_range("2026-04-01", periods=n, freq="B").strftime("%Y-%m-%d"),
+        "open": prices,
+        "close": prices,
+        "high": [p * 1.01 for p in prices],
+        "low": [p * 0.99 for p in prices],
+        "volume": [1_000_000] * (n - 1) + [0],
+        "amount": [p * 1_000_000 for p in prices[:-1]] + [0],
+    })
+    quote = StockQuote(
+        code="002384", name="东山精密", price=12.0,
+        open=11.8, high=12.1, low=11.6, close=12.0,
+        volume=2_000_000, amount=24_000_000, change_pct=2.0,
+    )
+
+    result = compute_technical_indicators(df, quote)
+
+    assert result.volume_ratio == 2.0
+
+
+def test_volume_ratio_does_not_invent_baseline_without_historical_volume():
+    """没有历史量能基准时，不用实时成交量制造假量比。"""
+    n = 20
+    prices = [10.0 + i * 0.1 for i in range(n)]
+    df = pd.DataFrame({
+        "date": pd.date_range("2026-04-01", periods=n, freq="B").strftime("%Y-%m-%d"),
+        "open": prices,
+        "close": prices,
+        "high": [p * 1.01 for p in prices],
+        "low": [p * 0.99 for p in prices],
+        "volume": [0] * n,
+    })
+    quote = StockQuote(
+        code="688981", name="中芯国际", price=126.0,
+        open=122.0, high=130.0, low=120.0, close=126.0,
+        volume=100_000_000, amount=12_600_000_000, change_pct=2.8,
+    )
+
+    result = compute_technical_indicators(df, quote)
+
+    assert result.volume_ratio == 0.0
+
+
+def test_volume_ratio_estimates_volume_from_amount_when_volume_missing():
+    """成交量缺失但成交额存在时，用成交额/收盘价估算量能基准。"""
+    n = 20
+    prices = [10.0 + i * 0.1 for i in range(n)]
+    historical_volume = [1_000_000] * (n - 1)
+    df = pd.DataFrame({
+        "date": pd.date_range("2026-04-01", periods=n, freq="B").strftime("%Y-%m-%d"),
+        "open": prices,
+        "close": prices,
+        "high": [p * 1.01 for p in prices],
+        "low": [p * 0.99 for p in prices],
+        "volume": [0] * n,
+        "amount": [
+            price * volume
+            for price, volume in zip(prices[:-1], historical_volume)
+        ] + [prices[-1] * 2_000_000],
+    })
+
+    result = compute_technical_indicators(df)
+
+    assert result.volume_ratio == 2.0
+
+
 def test_english_column_names():
     """Should handle English column names (stock_zh_a_daily format)."""
     n = 60

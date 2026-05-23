@@ -122,8 +122,23 @@ class ConfigRegistry:
         repo = ConfigRepository(conn)
         version = repo.find_version_by_hash(config_hash)
         if not version:
-            version = f"v{local_now_str('%Y%m%d_%H%M%S')}_{config_hash[:8]}"
-            repo.insert_version(version, config_hash, config_json)
+            for attempt in range(3):
+                version = _new_config_version(config_hash, attempt=attempt)
+                try:
+                    repo.insert_version(version, config_hash, config_json)
+                    break
+                except Exception:
+                    existing = repo.find_version_by_hash(config_hash)
+                    if existing:
+                        version = existing
+                        break
+                    _rollback_failed_insert(conn)
+                    existing = repo.find_version_by_hash(config_hash)
+                    if existing:
+                        version = existing
+                        break
+                    if attempt >= 2:
+                        raise
 
         return ConfigSnapshot(version=version, hash=config_hash, data=copy.deepcopy(data))
 
@@ -235,3 +250,18 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
         else:
             result[key] = copy.deepcopy(value)
     return result
+
+
+def _new_config_version(config_hash: str, *, attempt: int = 0) -> str:
+    suffix = f"_{attempt}" if attempt else ""
+    return f"v{local_now_str('%Y%m%d_%H%M%S_%f')}_{config_hash[:8]}{suffix}"
+
+
+def _rollback_failed_insert(conn: Any) -> None:
+    rollback = getattr(conn, "rollback", None)
+    if not callable(rollback):
+        return
+    try:
+        rollback()
+    except Exception:
+        return

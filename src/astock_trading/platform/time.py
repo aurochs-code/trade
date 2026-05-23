@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -31,12 +32,28 @@ def _load_trading_dates() -> set[str]:
         _logger.info(f"[time] A股日历已加载，共 {len(dates)} 个交易日")
         return dates
     except Exception as e:
-        _logger.warning(f"[time] 无法从 AkShare 加载日历，回退到 chinese-calendar: {e}")
+        _logger.debug("[time] 无法从 AkShare 加载日历，回退到 chinese-calendar: %s", e)
         _CACHE_LOADED = True  # 只失败一次，不重试
         return set()
 
 
+def _env_now() -> datetime | None:
+    value = os.getenv("ASTOCK_TEST_NOW", "").strip()
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=MARKET_TZ)
+    return parsed
+
+
 def utc_now() -> datetime:
+    fixed = _env_now()
+    if fixed:
+        return fixed.astimezone(timezone.utc)
     return datetime.now(timezone.utc)
 
 
@@ -45,6 +62,9 @@ def utc_now_iso() -> str:
 
 
 def local_now() -> datetime:
+    fixed = _env_now()
+    if fixed:
+        return fixed.astimezone(MARKET_TZ)
     return datetime.now(MARKET_TZ)
 
 
@@ -62,6 +82,19 @@ def local_today() -> date:
 
 def local_today_str() -> str:
     return local_today().isoformat()
+
+
+def is_market_weekday(target: date | datetime | str | None = None) -> bool:
+    """只做无网络的 A 股周内交易日预判，主要用于阻断周末窗口。"""
+    if target is None:
+        check_date = local_today()
+    elif isinstance(target, datetime):
+        check_date = target.astimezone(MARKET_TZ).date() if target.tzinfo else target.date()
+    elif isinstance(target, str):
+        check_date = date.fromisoformat(target)
+    else:
+        check_date = target
+    return check_date.weekday() < 5
 
 
 def local_date_bounds_utc(target: date | str | None = None) -> tuple[str, str]:

@@ -28,3 +28,6 @@ strategy:
   pool_management:
     promote_min_score: 6.0
     promote_streak_days: 1
+  auto_trade:
+    enabled: true
+    dry_run: true

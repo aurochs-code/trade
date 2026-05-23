@@ -90,6 +90,65 @@ def test_detects_volume_breakout_strategy_route(scorer):
     assert payload["strategy_routes"][0]["evidence"]["volume_ratio"] == 2.4
 
 
+def test_detects_short_continuation_entry_route_without_golden_cross(scorer):
+    s = _make_snapshot(
+        name="短续候选",
+        quote=StockQuote(
+            code="300611", name="短续候选", price=28.96,
+            open=28.0, high=29.18, low=27.63, close=28.96,
+            volume=12000000, amount=3.4e8, change_pct=4.0,
+        ),
+        technical=TechnicalIndicators(
+            ma5=27.4, ma10=26.3, ma20=25.9, ma60=24.5,
+            above_ma20=True, volume_ratio=1.35, rsi=66.0,
+            golden_cross=False, ma20_slope=0.018,
+            momentum_5d=7.2, daily_volatility=0.035,
+            deviation_rate=5.2, change_pct=4.0,
+        ),
+    )
+
+    result = scorer.score(s)
+
+    assert result.entry_signal is True
+    assert result.primary_strategy_route == "short_continuation"
+    route = result.strategy_routes[0]
+    assert route.display_name == "短续接力"
+    assert route.family == "short_continuation"
+    assert route.entry_signal is True
+    assert route.evidence["continuation_score"] >= 2.5
+    assert route.evidence["close_near_high"] >= 0.75
+
+
+def test_detects_flow_confirmed_trend_when_relative_volume_is_low(scorer):
+    s = _make_snapshot(
+        name="资金趋势候选",
+        quote=StockQuote(
+            code="002384", name="资金趋势候选", price=220.55,
+            open=210.92, high=221.73, low=210.92, close=220.55,
+            volume=84361695, amount=18_374_458_405.73, change_pct=6.56,
+        ),
+        technical=TechnicalIndicators(
+            ma5=216.77, ma10=216.06, ma20=203.87, ma60=143.58,
+            above_ma20=True, volume_ratio=0.92, rsi=67.6,
+            golden_cross=True, ma20_slope=0.061,
+            momentum_5d=8.46, daily_volatility=0.049,
+            deviation_rate=8.18, change_pct=6.56,
+        ),
+        flow=FundFlow(net_inflow_1d=3_330_975_094, northbound_net_positive=False),
+    )
+
+    result = scorer.score(s)
+
+    assert result.entry_signal is True
+    assert result.primary_strategy_route == "flow_confirmed_trend"
+    route = result.strategy_routes[0]
+    assert route.display_name == "资金趋势确认"
+    assert route.family == "trend_swing"
+    assert route.entry_signal is True
+    assert route.evidence["volume_ratio"] == 0.92
+    assert route.evidence["main_net_inflow"] == 3_330_975_094
+
+
 def test_detects_shrink_pullback_strategy_route(scorer):
     s = _make_snapshot(
         technical=TechnicalIndicators(
@@ -107,6 +166,51 @@ def test_detects_shrink_pullback_strategy_route(scorer):
     assert "shrink_pullback" in routes
     assert routes["shrink_pullback"].family == "trend_swing"
     assert routes["shrink_pullback"].evidence["volume_ratio"] == 0.85
+
+
+def test_detects_trend_watch_route_when_volume_ratio_is_missing(scorer):
+    s = _make_snapshot(
+        technical=TechnicalIndicators(
+            ma5=123.3, ma10=122.1, ma20=118.2, ma60=108.8,
+            above_ma20=True, volume_ratio=0.0, rsi=62.8,
+            golden_cross=True, ma20_slope=0.033,
+            momentum_5d=7.9, daily_volatility=0.08,
+            deviation_rate=7.6, change_pct=0.1,
+        ),
+    )
+
+    result = scorer.score(s)
+
+    assert result.entry_signal is False
+    assert result.primary_strategy_route == "trend_watch"
+    route = result.strategy_routes[0]
+    assert route.display_name == "趋势观察"
+    assert route.entry_signal is False
+    assert route.evidence["volume_ratio"] == 0.0
+    assert "volume_ratio_missing_blocks_entry" in route.notes
+
+
+def test_configured_volume_floor_allows_trend_golden_cross_entry():
+    scorer = Scorer(
+        weights=ScoringWeights(technical=3, fundamental=2, flow=2, sentiment=3),
+        veto_rules=["below_ma20", "limit_up_today", "consecutive_outflow", "ma20_trend_down"],
+        entry_cfg={"rsi_max": 70, "volume_ratio_min": 1.2},
+    )
+    s = _make_snapshot(
+        technical=TechnicalIndicators(
+            ma5=123.3, ma10=122.1, ma20=118.2, ma60=108.8,
+            above_ma20=True, volume_ratio=1.26, rsi=62.8,
+            golden_cross=True, ma20_slope=0.033,
+            momentum_5d=7.9, daily_volatility=0.08,
+            deviation_rate=7.6, change_pct=0.1,
+        ),
+    )
+
+    result = scorer.score(s)
+
+    assert result.entry_signal is True
+    route = next(route for route in result.strategy_routes if route.route == "ma_golden_cross")
+    assert route.entry_signal is True
 
 
 def test_dragon_head_route_uses_confirmed_sector_strength(scorer):

@@ -6,6 +6,7 @@ from astock_trading.platform.db import connect, init_db
 
 
 def test_build_market_service_uses_common_provider_order(tmp_path):
+    from astock_trading.market.baostock_adapters import BaoStockMarketAdapter
     from astock_trading.market.hk_adapters import AkShareHKFinancialAdapter, AkShareHKMarketAdapter
     from astock_trading.market.service import MarketService
     from astock_trading.platform.service_factory import build_market_service
@@ -20,6 +21,7 @@ def test_build_market_service_uses_common_provider_order(tmp_path):
 
     assert isinstance(service, MarketService)
     assert any(isinstance(provider, AkShareHKMarketAdapter) for provider in service._market)
+    assert any(isinstance(provider, BaoStockMarketAdapter) for provider in service._market)
     assert any(isinstance(provider, AkShareHKFinancialAdapter) for provider in service._financial)
 
 
@@ -42,6 +44,31 @@ def test_pipeline_context_uses_shared_market_service_builder(tmp_path, monkeypat
         assert isinstance(ctx.market_svc, MarketService)
     finally:
         ctx.conn.close()
+
+
+def test_load_config_snapshot_uses_file_config_when_freeze_fails(tmp_path, monkeypatch):
+    from astock_trading.platform import service_factory
+
+    class FakeRegistry:
+        def freeze(self, conn):
+            raise RuntimeError("duplicate config version")
+
+        def load_and_validate(self):
+            return {"strategy": {"entry_signal": {"volume_ratio_min": 1.2}}}, []
+
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    monkeypatch.setattr(service_factory, "ConfigRegistry", FakeRegistry)
+
+    try:
+        snapshot, cfg = service_factory.load_config_snapshot(conn)
+    finally:
+        conn.close()
+
+    assert snapshot.version == "unversioned"
+    assert snapshot.data["strategy"]["entry_signal"]["volume_ratio_min"] == 1.2
+    assert cfg["entry_signal"]["volume_ratio_min"] == 1.2
 
 
 def test_build_strategy_service_wires_manual_confirmation_notifier(tmp_path, monkeypatch):

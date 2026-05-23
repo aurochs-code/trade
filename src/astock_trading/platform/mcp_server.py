@@ -40,6 +40,7 @@ except ModuleNotFoundError:
             raise RuntimeError("mcp package is not installed")
 
 from astock_trading.platform.events import EventStore
+from astock_trading.platform.hermes_commands import build_opportunity_card
 from astock_trading.platform.runs import RunJournal
 from astock_trading.platform import service_factory
 from astock_trading.platform.domain_events import (
@@ -370,6 +371,13 @@ def trade_explain_run(run_id: str) -> str:
 def trade_propose_plan() -> str:
     """生成不执行交易的 Agent 交易计划。"""
     return json.dumps(propose_plan_payload(_conn), ensure_ascii=False, default=str)
+
+
+@mcp.tool()
+@_safe
+def trade_opportunity_card() -> str:
+    """生成不执行交易的今日机会卡。"""
+    return json.dumps(build_opportunity_card(_conn), ensure_ascii=False, default=str)
 
 
 @mcp.tool()

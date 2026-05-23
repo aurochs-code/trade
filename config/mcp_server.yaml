@@ -31,6 +31,7 @@ tool_policy:
         - trade_diagnose_strategy
         - trade_explain_run
         - trade_propose_plan
+        - trade_opportunity_card
         - trade_paper_status
         - trade_mock_portfolio
         - trade_mock_balance

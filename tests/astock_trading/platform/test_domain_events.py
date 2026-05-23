@@ -13,6 +13,8 @@ def test_domain_event_names_are_stable():
     assert events.DECISION_SUGGESTED == "decision.suggested"
     assert events.STRATEGY_CALIBRATION_PROPOSED == "strategy.calibration.proposed"
     assert events.STRATEGY_PROFILE_COMPARISON_PROPOSED == "strategy.profile_comparison.proposed"
+    assert events.STRATEGY_PROFILE_ACTIVATION_REQUESTED == "strategy.profile_activation.requested"
+    assert events.STRATEGY_PROFILE_ACTIVATION_APPLIED == "strategy.profile_activation.applied"
     assert events.STRATEGY_CAPITAL_ALLOCATION_PROPOSED == "strategy.capital_allocation.proposed"
     assert events.STRATEGY_HEALTH_REPORT_PROPOSED == "strategy.health_report.proposed"
     assert events.RISK_ADAPTIVE_SUGGESTION_PROPOSED == "risk.adaptive_suggestion.proposed"
@@ -23,6 +25,8 @@ def test_domain_event_names_are_stable():
     assert events.EVIDENCE_BACKFILLED == "evidence.backfilled"
     assert events.AUTO_TRADE_EXECUTED == "auto_trade.executed"
     assert events.AUTO_TRADE_SUMMARY == "auto_trade.summary"
+    assert events.PAPER_TRIAL_RECORDED == "paper.trial.recorded"
+    assert events.PAPER_TRIAL_REVIEWED == "paper.trial.reviewed"
     assert events.CANDIDATE_ADDED == "candidate.added"
 
 

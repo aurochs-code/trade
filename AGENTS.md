@@ -50,19 +50,28 @@ expanding MCP further.
 Use JSON output for automation:
 
 - `atrade agent-context --json`
+- `atrade commands --json`
 - `atrade doctor --json`
 - `atrade health --json`
 - `atrade backtest CODES START END --history-mirror --json`
 - `atrade calibrate --json`
 - `atrade dashboard snapshot --json`
+- `atrade diagnose flow --json`
 - `atrade diagnose health --json`
+- `atrade diagnose schedule --json`
 - `atrade diagnose strategy --json`
 - `atrade data-sources diagnose --json`
 - `atrade digest --json`
+- `atrade llm-context --mode morning --json`
+- `atrade llm-context --mode close --json`
+- `atrade llm-context --mode weekly --json`
 - `atrade events query --json`
 - `atrade events evidence CODE --json`
 - `atrade events backfill-evidence --json`
 - `atrade history signal --date YYYY-MM-DD --code CODE --json`
+- `atrade opportunity --json`
+- `atrade opportunity-watch --json`
+- `atrade run-pipeline auto_trade --json`
 - `atrade runs list --json`
 - `atrade status --json`
 - `atrade screener candidates --json`
@@ -72,6 +81,7 @@ Use JSON output for automation:
 - `atrade screener run --query "..." --json`
 - `atrade strategy allocation --json`
 - `atrade strategy health --json`
+- `atrade strategy profile-activation --target trend_swing --json`
 - `atrade strategy profiles --json`
 - `atrade stock analyze CODE_OR_NAME --json`
 - `atrade suggest --json`
@@ -90,6 +100,13 @@ Use JSON output for automation:
 - `atrade review shadow --json`
 - `atrade review trades --json`
 - `atrade manual-trades list --json`
+- `atrade manual-trades list --status stale --json`
+- `atrade manual-trades expire-stale --yes --json`
+- `atrade paper auto-readiness --json`
+- `atrade paper trial-plan --json`
+- `atrade paper trial-plan --record --json`
+- `atrade paper trial-review --json`
+- `atrade paper trial-review --record --json`
 - `atrade paper status --json`
 - `atrade db status --json`
 - `atrade db tables --json`
@@ -116,3 +133,7 @@ runtime config locations and does not require `cd` into the repository.
 Strategy parameters can be switched with `ASTOCK_CONFIG_PROFILE`:
 `trend_swing`, `short_continuation`, or `defensive_watch`. Do not switch
 profiles for execution tasks without explicit user approval.
+
+`atrade commands --json` is the machine-readable command contract catalog. Use
+it to distinguish read-only commands, state-writing commands, environment writes,
+and commands that may submit MX paper orders before running any operator action.

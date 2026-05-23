@@ -15,6 +15,18 @@ def test_intraday_monitor_can_run_more_than_once_on_trading_day():
     assert decision is None
 
 
+def test_auto_trade_can_run_more_than_once_on_trading_day():
+    from astock_trading.platform.pipeline_policy import should_skip_pipeline
+
+    decision = should_skip_pipeline(
+        "auto_trade",
+        is_trading_day=True,
+        is_completed_today=True,
+    )
+
+    assert decision is None
+
+
 def test_weekly_can_run_on_non_trading_day():
     from astock_trading.platform.pipeline_policy import should_skip_pipeline
 
@@ -102,3 +114,29 @@ def test_new_trade_guard_blocks_failed_runs_data_sources_and_portfolio_breach():
         "data_source_health_failed",
         "portfolio_risk_block",
     ]
+
+
+def test_new_trade_guard_ignores_failed_run_after_same_pipeline_recovers():
+    from astock_trading.platform.pipeline_policy import new_trade_guard_decision
+
+    decision = new_trade_guard_decision(
+        failed_runs=[
+            {
+                "run_id": "run_auto_trade_failed",
+                "run_type": "auto_trade",
+                "started_at": "2026-05-22T06:22:40+00:00",
+                "error_message": "stale running cleaned up after 0h",
+            }
+        ],
+        successful_runs=[
+            {
+                "run_id": "run_auto_trade_recovered",
+                "run_type": "auto_trade",
+                "started_at": "2026-05-22T06:42:04+00:00",
+            }
+        ],
+    )
+
+    assert decision["status"] == "ok"
+    assert decision["allow_new_trades"] is True
+    assert decision["blockers"] == []

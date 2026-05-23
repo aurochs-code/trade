@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import typer
 
 from astock_trading.platform.agent_diagnostics import (
+    diagnose_flow,
     diagnose_health,
+    diagnose_schedule,
     diagnose_strategy,
     explain_run,
     propose_agent_trade_plan,
@@ -40,6 +44,38 @@ def diagnose_strategy_cmd(
     conn = connect()
     try:
         json_or_text(diagnose_strategy(conn), as_json)
+    finally:
+        conn.close()
+
+
+@diagnose_app.command("flow")
+def diagnose_flow_cmd(
+    include_account: bool = typer.Option(False, "--include-account", help="读取 MX 模拟盘账户；默认只查本地证据"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """诊断候选召回、策略闸门、机会卡和模拟承接链路，不执行交易。"""
+    from astock_trading.pipeline.auto_trade import build_auto_trade_readiness
+    from astock_trading.pipeline.context import build_context
+
+    ctx = build_context()
+    try:
+        auto_readiness = build_auto_trade_readiness(ctx, include_account=include_account)
+        json_or_text(diagnose_flow(ctx.conn, auto_readiness=auto_readiness), as_json)
+    finally:
+        ctx.conn.close()
+
+
+@diagnose_app.command("schedule")
+def diagnose_schedule_cmd(
+    jobs_path: Path | None = typer.Option(None, "--jobs-path", help="Hermes jobs.json 路径"),
+    env_file: Path | None = typer.Option(None, "--env-file", help="atrade 运行 .env 路径"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """诊断 Hermes trading 调度是否漏跑关键盘中任务，不执行补跑。"""
+    init_db()
+    conn = connect()
+    try:
+        json_or_text(diagnose_schedule(conn, jobs_path=jobs_path, env_file=env_file), as_json)
     finally:
         conn.close()
 

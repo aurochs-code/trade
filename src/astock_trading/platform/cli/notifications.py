@@ -12,10 +12,17 @@ import typer
 from astock_trading.platform.agent_diagnostics import propose_agent_trade_plan
 from astock_trading.platform.cli.common import json_or_text
 from astock_trading.platform.db import connect, init_db
+from astock_trading.platform.hermes_commands import (
+    build_opportunity_card,
+    build_opportunity_watch,
+    write_opportunity_watch_state,
+)
 from astock_trading.reporting.discord import (
     format_daily_inspection_embed,
     format_llm_summary_embed,
     format_manual_confirmation_embed,
+    format_opportunity_embed,
+    format_opportunity_watch_embed,
     format_propose_plan_embed,
 )
 from astock_trading.reporting.discord_sender import send_embed
@@ -139,6 +146,7 @@ def _build_daily_inspection_summary(payload: dict, report_path: str = "") -> dic
     manual_trades = _result_json(results_by_name, "manual_trades") or []
     paper = _result_json(results_by_name, "paper_status") or {}
     plan = _result_json(results_by_name, "propose_plan") or {}
+    opportunity = _result_json(results_by_name, "opportunity") or {}
 
     data_sources = (
         (diagnose.get("inputs", {}) or {}).get("data_sources")
@@ -173,6 +181,12 @@ def _build_daily_inspection_summary(payload: dict, report_path: str = "") -> dic
         "paper_total_asset": paper_balance.get("total_asset", 0) or 0,
         "plan_execution_allowed": bool(plan.get("execution_allowed")) if isinstance(plan, dict) else False,
         "plan_actions": plan.get("actions", []) if isinstance(plan, dict) else [],
+        "opportunity_status": _status_from_json(opportunity),
+        "opportunity_summary": opportunity.get("summary", "") if isinstance(opportunity, dict) else "",
+        "opportunity_decision_brief": opportunity.get("decision_brief", "") if isinstance(opportunity, dict) else "",
+        "opportunity_counts": opportunity.get("counts", {}) if isinstance(opportunity, dict) else {},
+        "opportunity_blockers": opportunity.get("blockers", []) if isinstance(opportunity, dict) else [],
+        "opportunity_next_action": opportunity.get("next_action", {}) if isinstance(opportunity, dict) else {},
     }
 
 
@@ -245,6 +259,82 @@ def notify_propose_plan(
     )
     json_or_text(payload, as_json)
     if not dry_run and not ok:
+        raise typer.Exit(1)
+
+
+@notify_app.command("opportunity")
+def notify_opportunity(
+    dry_run: bool = typer.Option(False, "--dry-run", help="只生成卡片，不发送 Discord"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """生成今日机会卡并推送 Discord。"""
+    init_db()
+    conn = connect()
+    try:
+        opportunity = build_opportunity_card(conn)
+    finally:
+        conn.close()
+
+    embed = format_opportunity_embed(opportunity)
+    ok, error = _send_or_dry_run(embed, "A股今日机会卡", dry_run)
+    payload = _notification_payload(
+        embed=embed,
+        dry_run=dry_run,
+        ok=ok,
+        error=error,
+        extra={"opportunity": opportunity},
+    )
+    json_or_text(payload, as_json)
+    if not dry_run and not ok:
+        raise typer.Exit(1)
+
+
+@notify_app.command("opportunity-watch")
+def notify_opportunity_watch(
+    state_file: Path | None = typer.Option(None, "--state-file", help="机会变化状态文件"),
+    reset_state: bool = typer.Option(False, "--reset-state", help="忽略旧状态并重建今日基线"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只生成卡片，不发送 Discord，也不更新状态"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """候选池出现新增机会时推送 Discord；无变化时静默。"""
+    init_db()
+    conn = connect()
+    try:
+        monitor = build_opportunity_watch(
+            conn,
+            state_file=state_file,
+            update_state=False,
+            reset_state=reset_state,
+        )
+    finally:
+        conn.close()
+
+    should_notify = bool(monitor.get("should_notify"))
+    embed = format_opportunity_watch_embed(monitor) if should_notify else {}
+    if should_notify:
+        ok, error = _send_or_dry_run(embed, "A股机会变化提醒", dry_run)
+    else:
+        ok, error = True, ""
+
+    if not dry_run and (ok or not should_notify):
+        write_opportunity_watch_state(monitor, state_file)
+        monitor["state_updated"] = True
+
+    status = "dry_run" if dry_run else ("sent" if should_notify and ok else ("failed" if should_notify else "silent"))
+    result = {
+        "status": status,
+        "notification": {
+            "target": "discord",
+            "ok": ok,
+            "error": error,
+            "skipped": not should_notify,
+            "reason": "" if should_notify else monitor.get("summary", ""),
+        },
+        "embed": embed,
+        "monitor": monitor,
+    }
+    json_or_text(result, as_json)
+    if not dry_run and should_notify and not ok:
         raise typer.Exit(1)
 
 

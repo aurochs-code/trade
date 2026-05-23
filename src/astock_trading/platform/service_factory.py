@@ -16,6 +16,7 @@ from astock_trading.market.adapters import (
     AkShareHKFinancialAdapter,
     AkShareHKMarketAdapter,
     AkShareMarketAdapter,
+    BaoStockMarketAdapter,
     BaiduFundFlowAdapter,
     MootdxMarketAdapter,
     MXMarketAdapter,
@@ -82,13 +83,26 @@ def resolve_vault_path() -> Optional[str]:
 
 
 def load_config_snapshot(conn: Any) -> tuple[Optional[ConfigSnapshot], dict]:
-    """Load and freeze strategy config, returning an empty config on failure."""
+    """Load and freeze strategy config, falling back to file config if versioning fails."""
+    registry = ConfigRegistry()
     try:
-        snapshot = ConfigRegistry().freeze(conn)
+        snapshot = registry.freeze(conn)
         return snapshot, snapshot.data.get("strategy", {})
     except Exception as exc:
-        _logger.warning("[service_factory] 配置加载失败，使用空配置: %s", exc)
-        return None, {}
+        _logger.warning("[service_factory] 配置快照写入失败，使用未版本化文件配置: %s", exc)
+        try:
+            data, errors = registry.load_and_validate()
+            if errors:
+                _logger.warning("[service_factory] 配置校验警告: %s", errors)
+            snapshot = ConfigSnapshot(
+                version="unversioned",
+                hash="unversioned",
+                data=data,
+            )
+            return snapshot, data.get("strategy", {})
+        except Exception as fallback_exc:
+            _logger.error("[service_factory] 配置文件加载失败，使用空配置: %s", fallback_exc)
+            return None, {}
 
 
 def build_market_service(conn: Any, store: Optional[MarketStore] = None) -> MarketService:
@@ -102,6 +116,7 @@ def build_market_service(conn: Any, store: Optional[MarketStore] = None) -> Mark
             MootdxMarketAdapter(),
             AkShareHKMarketAdapter(),
             AkShareMarketAdapter(),
+            BaoStockMarketAdapter(),
         ],
         financial_providers=[
             TencentFinancialAdapter(),
@@ -126,6 +141,7 @@ def build_strategy_service(event_store: EventStore, cfg: dict) -> StrategyServic
         ),
         veto_rules=cfg.get("scoring", {}).get("veto", []),
         entry_cfg=cfg.get("entry_signal", {}),
+        continuation_cfg=cfg.get("continuation", {}),
     )
     decider = build_decider_from_config(cfg)
     return StrategyService(

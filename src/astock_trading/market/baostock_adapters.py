@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import redirect_stdout
+import io
 import threading
 from typing import Optional
 
@@ -25,7 +27,8 @@ def _bs_ensure_login():
     with _bs_lock:
         if not _bs_logged_in:
             import baostock as bs
-            lg = bs.login()
+            with redirect_stdout(io.StringIO()):
+                lg = bs.login()
             if lg.error_code != "0":
                 raise RuntimeError(f"baostock login failed: {lg.error_msg} {lg.error_msg}")
             _bs_logged_in = True
@@ -37,7 +40,8 @@ def _bs_logout():
     with _bs_lock:
         if _bs_logged_in:
             import baostock as bs
-            bs.logout()
+            with redirect_stdout(io.StringIO()):
+                bs.logout()
             _bs_logged_in = False
 
 

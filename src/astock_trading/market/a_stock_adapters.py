@@ -9,6 +9,7 @@ from typing import Optional
 
 import pandas as pd
 
+from astock_trading.market.akshare_adapters import _quiet_akshare_call
 from astock_trading.market.models import FinancialReport, FundFlow, IndexQuote, StockQuote
 from astock_trading.platform.time import local_today
 
@@ -511,7 +512,7 @@ class AStockSignalAdapter:
         end_str = trade_date.replace("-", "")
         records = []
         try:
-            df = ak.stock_lhb_detail_em(start_date=start_str, end_date=end_str)
+            df = _quiet_akshare_call(ak.stock_lhb_detail_em, start_date=start_str, end_date=end_str)
             if df is not None and not df.empty:
                 for _, row in df[df["代码"] == normalized].iterrows():
                     records.append({
@@ -528,7 +529,12 @@ class AStockSignalAdapter:
             latest_date = records[0]["date"].replace("-", "")[:8]
             for flag, key in (("买入", "buy"), ("卖出", "sell")):
                 try:
-                    df_detail = ak.stock_lhb_stock_detail_em(symbol=normalized, date=latest_date, flag=flag)
+                    df_detail = _quiet_akshare_call(
+                        ak.stock_lhb_stock_detail_em,
+                        symbol=normalized,
+                        date=latest_date,
+                        flag=flag,
+                    )
                     if df_detail is not None and not df_detail.empty:
                         for _, row in df_detail.head(5).iterrows():
                             seats[key].append({
@@ -542,7 +548,7 @@ class AStockSignalAdapter:
 
         institution = {}
         try:
-            df_inst = ak.stock_lhb_jgmmtj_em(symbol=normalized)
+            df_inst = _quiet_akshare_call(ak.stock_lhb_jgmmtj_em, symbol=normalized)
             if df_inst is not None and not df_inst.empty:
                 row = df_inst.iloc[0]
                 institution = {
@@ -563,7 +569,7 @@ class AStockSignalAdapter:
         history = []
         upcoming = []
         try:
-            df = ak.stock_restricted_release_queue_em(symbol=normalized)
+            df = _quiet_akshare_call(ak.stock_restricted_release_queue_em, symbol=normalized)
             if df is not None and not df.empty:
                 for _, row in df.head(15).iterrows():
                     history.append({
@@ -575,7 +581,7 @@ class AStockSignalAdapter:
         except Exception:
             pass
         try:
-            df = ak.stock_restricted_release_detail_em(date=trade_date.replace("-", ""))
+            df = _quiet_akshare_call(ak.stock_restricted_release_detail_em, date=trade_date.replace("-", ""))
             if df is not None and not df.empty:
                 for _, row in df[df["股票代码"] == normalized].iterrows():
                     upcoming.append({
@@ -604,7 +610,8 @@ class AStockSignalAdapter:
 
     def _get_industry_comparison_em(self) -> list[dict]:
         try:
-            df = self._akshare().stock_board_industry_name_em()
+            ak = self._akshare()
+            df = _quiet_akshare_call(ak.stock_board_industry_name_em)
             if df is None or df.empty:
                 return []
             rows = []
@@ -626,7 +633,8 @@ class AStockSignalAdapter:
 
     def _get_industry_comparison_sina(self) -> list[dict]:
         try:
-            df = self._akshare().stock_sector_spot(indicator="行业")
+            ak = self._akshare()
+            df = _quiet_akshare_call(ak.stock_sector_spot, indicator="行业")
             if df is None or df.empty:
                 return []
             rows = []
@@ -651,7 +659,8 @@ class AStockSignalAdapter:
 
     def _get_industry_comparison_ths(self, top_n: int = 20) -> dict:
         try:
-            df = self._akshare().stock_board_industry_summary_ths()
+            ak = self._akshare()
+            df = _quiet_akshare_call(ak.stock_board_industry_summary_ths)
             if df is None or df.empty:
                 return {"top": [], "bottom": [], "total": 0}
             rows = []
@@ -678,7 +687,11 @@ class AStockSignalAdapter:
         ak = self._akshare()
         normalized = _normalize_a_stock_code(code)
         try:
-            df = ak.stock_zh_a_disclosure_report_cninfo(symbol=normalized, market="沪深京")
+            df = _quiet_akshare_call(
+                ak.stock_zh_a_disclosure_report_cninfo,
+                symbol=normalized,
+                market="沪深京",
+            )
             if df is None or df.empty:
                 return []
             rows = []

@@ -53,6 +53,22 @@ def _candidate_env_files() -> list[Path]:
     return deduped
 
 
+def candidate_env_files() -> list[Path]:
+    """Return runtime .env lookup candidates in load order."""
+    return _candidate_env_files()
+
+
+def parse_env_file(env_file: Path) -> dict[str, str]:
+    """Parse a simple shell-style .env file without mutating os.environ."""
+    values: dict[str, str] = {}
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        parsed = _parse_env_line(line)
+        if parsed:
+            key, value = parsed
+            values[key] = value
+    return values
+
+
 def load_runtime_env() -> Path | None:
     """Load the first available runtime .env without overriding process env."""
     if os.environ.get("ASTOCK_NO_ENV_FILE", "").strip().lower() in {"1", "true", "yes"}:
@@ -60,11 +76,7 @@ def load_runtime_env() -> Path | None:
     for env_file in _candidate_env_files():
         if not env_file.exists():
             continue
-        for line in env_file.read_text(encoding="utf-8").splitlines():
-            parsed = _parse_env_line(line)
-            if not parsed:
-                continue
-            key, value = parsed
+        for key, value in parse_env_file(env_file).items():
             os.environ.setdefault(key, value)
         return env_file
     return None

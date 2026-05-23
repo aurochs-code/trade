@@ -110,3 +110,42 @@ def test_execute_pipeline_persists_data_source_artifacts_when_refresh_still_fail
     assert run_journal.failed is not None
     assert run_journal.failed["artifacts"]["data_sources"]["required_missing"] == ["hot_stocks"]
     assert run_journal.failed["artifacts"]["data_source_refresh"]["status"] == "failed"
+
+
+def test_execute_pipeline_persists_auto_trade_audit_artifacts(monkeypatch):
+    import astock_trading.pipeline.auto_trade as auto_trade_pipeline
+
+    def fake_auto_trade_run(ctx, run_id):
+        return {
+            "enabled": True,
+            "dry_run": True,
+            "signal": "YELLOW",
+            "buys": [],
+            "sells": [],
+            "diagnostics": [{"reason": "core_pool_empty"}],
+            "no_trade_summary": {
+                "reason": "core_pool_empty",
+                "message": "核心候选池为空；当前观察候选 1 只、强势观察 1 只，只跟踪不自动买入。",
+            },
+            "window_state": {"buy_open": True, "sell_open": True},
+            "discord_embed": {"title": "不应写入 run artifact"},
+        }
+
+    monkeypatch.setattr(auto_trade_pipeline, "run", fake_auto_trade_run)
+
+    run_journal = FakeRunJournal()
+    ctx = SimpleNamespace(conn=object(), run_journal=run_journal, config_version="test")
+
+    result = execute_pipeline(
+        ctx,
+        "auto_trade",
+        is_trading_day=True,
+        ignore_data_source_health=True,
+    )
+
+    assert result["status"] == "completed"
+    assert run_journal.completed is not None
+    artifacts = run_journal.completed["artifacts"]
+    assert artifacts["auto_trade"]["no_trade_summary"]["reason"] == "core_pool_empty"
+    assert artifacts["auto_trade"]["diagnostics"][0]["reason"] == "core_pool_empty"
+    assert "discord_embed" not in artifacts["auto_trade"]

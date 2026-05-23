@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 import typer
 
@@ -10,6 +11,7 @@ from astock_trading.pipeline.adaptive_risk import run_adaptive_risk
 from astock_trading.pipeline.context import build_context
 from astock_trading.platform.cli.common import json_or_text
 from astock_trading.platform.config import ConfigRegistry
+from astock_trading.platform.database import MissingDatabaseUrl
 from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.events import EventStore
 from astock_trading.platform.time import local_today
@@ -123,8 +125,22 @@ def risk_trial_guard(
         if not within_cap:
             status = "breached"
 
+    runtime_context = _trial_guard_runtime_context()
+    blockers = runtime_context.get("blockers", []) or []
+    if status == "ok" and any(item.get("reason") == "profile_review_required" for item in blockers):
+        status = "profile_review_required"
+    candidate_flow = runtime_context.get("candidate_flow", {}) or {}
+    candidate_summary = candidate_flow.get("candidate_summary", {}) or _empty_candidate_summary()
+    current_entry_signals = candidate_flow.get("current_entry_signals", []) or []
     payload = {
         "status": status,
+        "summary": _trial_guard_summary(
+            status=status,
+            checked_order=checked_order,
+            cap_amount=cap_amount,
+            blockers=blockers,
+            candidate_summary=candidate_summary,
+        ),
         "manual_confirmation_required": True,
         "real_broker_integration": "disabled",
         "real_order_auto_execution_allowed": False,
@@ -136,12 +152,264 @@ def risk_trial_guard(
             "cap_amount": cap_amount,
         },
         "checked_order": checked_order,
+        "candidate_summary": candidate_summary,
+        "current_entry_signals": current_entry_signals,
+        **runtime_context,
         "instructions": [
             "系统只生成买入意向和记录人工成交，不直连券商实盘下单。",
             "首轮实盘单笔金额应按试运行上限人工确认；超限时先降低股数或放弃执行。",
         ],
     }
     json_or_text(payload, as_json)
+
+
+def _trial_guard_summary(
+    *,
+    status: str,
+    checked_order: dict[str, Any] | None,
+    cap_amount: float,
+    blockers: list[dict[str, Any]],
+    candidate_summary: dict[str, Any],
+) -> str:
+    candidate_text = candidate_summary.get("summary") or _empty_candidate_summary()["summary"]
+    if status == "breached" and checked_order:
+        excess = checked_order.get("excess_amount", 0)
+        return (
+            f"试运行护栏未通过：拟执行金额 {checked_order.get('amount')} "
+            f"超过试运行上限 {cap_amount}，超出 {excess}；{candidate_text}"
+        )
+    if blockers:
+        labels = "、".join(str(item.get("label") or item.get("reason") or "未知阻断") for item in blockers)
+        return f"试运行护栏未通过：{labels}；{candidate_text}"
+    return f"试运行护栏通过；{candidate_text}"
+
+
+def _trial_guard_runtime_context() -> dict[str, Any]:
+    try:
+        init_db()
+        conn = connect()
+    except (MissingDatabaseUrl, RuntimeError, OSError) as exc:
+        return {
+            "candidate_flow": {
+                "status": "unavailable",
+                "summary": f"运行库不可用，无法读取当前候选流：{exc}",
+                "candidate_summary": _empty_candidate_summary(),
+                "current_entry_signals": [],
+            },
+            "execution_profile": {"status": "unknown"},
+            "blockers": [],
+            "next_action": {
+                "type": "diagnose_flow",
+                "label": "诊断候选流",
+                "command": "atrade diagnose flow --json",
+                "safe_to_auto_apply": True,
+                **_read_only_action_contract("diagnose_flow"),
+            },
+        }
+
+    try:
+        candidate_flow = _trial_guard_candidate_flow(conn)
+        execution_profile = _trial_guard_execution_profile(conn)
+    finally:
+        conn.close()
+
+    blockers = _trial_guard_blockers(execution_profile)
+    next_action = _trial_guard_next_action(
+        candidate_flow=candidate_flow,
+        execution_profile=execution_profile,
+    )
+    return {
+        "candidate_flow": candidate_flow,
+        "execution_profile": execution_profile,
+        "blockers": blockers,
+        "next_action": next_action,
+    }
+
+
+def _trial_guard_candidate_flow(conn: Any) -> dict[str, Any]:
+    rows = conn.execute(
+        """SELECT code, pool_tier, name, score, added_at, last_scored_at,
+                  streak_days, note
+           FROM projection_candidate_pool
+           ORDER BY CASE pool_tier WHEN 'core' THEN 0 WHEN 'watch' THEN 1 ELSE 2 END,
+                    score DESC,
+                    last_scored_at DESC,
+                    code
+           LIMIT 10"""
+    ).fetchall()
+    candidates = [dict(row) for row in rows]
+    try:
+        from astock_trading.platform.candidate_evidence import enrich_candidate_rows_with_latest_scores
+
+        enrich_candidate_rows_with_latest_scores(conn, candidates)
+    except Exception:
+        pass
+    summary = _trial_guard_candidate_summary(candidates)
+    return {
+        "status": "ok",
+        "summary": summary["summary"],
+        "candidate_summary": summary,
+        "current_entry_signals": [
+            _trial_guard_entry_signal_summary(item)
+            for item in candidates
+            if _truthy(item.get("entry_signal"))
+        ],
+    }
+
+
+def _trial_guard_execution_profile(conn: Any) -> dict[str, Any]:
+    try:
+        from astock_trading.platform.agent_diagnostics import diagnose_schedule
+
+        runtime_profile = diagnose_schedule(conn).get("runtime_profile", {}) or {}
+    except Exception as exc:
+        return {
+            "status": "unknown",
+            "message": f"运行 profile 读取失败：{exc}",
+        }
+    return {
+        "status": runtime_profile.get("status", "unknown"),
+        "effective_profile": runtime_profile.get("effective_profile"),
+        "recommended_profile": runtime_profile.get("recommended_profile"),
+        "safe_to_auto_apply": runtime_profile.get("safe_to_auto_apply"),
+        "activation_request_status": runtime_profile.get("activation_request_status"),
+        "message": runtime_profile.get("message", ""),
+    }
+
+
+def _trial_guard_candidate_summary(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    core_count = sum(1 for item in candidates if item.get("pool_tier") == "core")
+    watch_count = sum(1 for item in candidates if item.get("pool_tier") == "watch")
+    radar_count = sum(1 for item in candidates if item.get("pool_tier") == "radar")
+    entry_signal_count = sum(1 for item in candidates if _truthy(item.get("entry_signal")))
+    total = len(candidates)
+    return {
+        "total": total,
+        "core_count": core_count,
+        "watch_count": watch_count,
+        "radar_count": radar_count,
+        "entry_signal_count": entry_signal_count,
+        "summary": (
+            f"候选池 {total} 只：核心 {core_count}、观察 {watch_count}、强势观察 {radar_count}；"
+            f"当前入场信号 {entry_signal_count} 只。"
+        ),
+    }
+
+
+def _empty_candidate_summary() -> dict[str, Any]:
+    return {
+        "total": 0,
+        "core_count": 0,
+        "watch_count": 0,
+        "radar_count": 0,
+        "entry_signal_count": 0,
+        "summary": "候选池 0 只：核心 0、观察 0、强势观察 0；当前入场信号 0 只。",
+    }
+
+
+def _trial_guard_entry_signal_summary(candidate: dict[str, Any]) -> dict[str, Any]:
+    code = str(candidate.get("code") or "")
+    tier = str(candidate.get("pool_tier") or "")
+    route = candidate.get("primary_strategy_route")
+    return {
+        "code": code,
+        "name": candidate.get("name", ""),
+        "pool_tier": tier,
+        "pool_tier_label": _pool_tier_label(tier),
+        "score": candidate.get("score", 0) or 0,
+        "entry_signal": True,
+        "primary_strategy_route": route,
+        "primary_strategy_route_label": (
+            candidate.get("primary_strategy_route_label") or _strategy_route_label(route)
+        ),
+        "data_quality": candidate.get("data_quality", ""),
+        "review_command": f"atrade stock analyze {code} --json" if code else "",
+    }
+
+
+def _trial_guard_blockers(execution_profile: dict[str, Any]) -> list[dict[str, str]]:
+    if execution_profile.get("status") != "review_required":
+        return []
+    target = execution_profile.get("recommended_profile") or "trend_swing"
+    return [
+        {
+            "reason": "profile_review_required",
+            "label": "运行 profile 仍需人工确认",
+            "command": f"atrade strategy profile-activation --target {target} --json",
+        }
+    ]
+
+
+def _trial_guard_next_action(
+    *,
+    candidate_flow: dict[str, Any],
+    execution_profile: dict[str, Any],
+) -> dict[str, Any]:
+    if execution_profile.get("status") == "review_required":
+        target = execution_profile.get("recommended_profile") or "trend_swing"
+        return {
+            "type": "review_runtime_profile_activation",
+            "label": "复核运行 profile 激活",
+            "command": f"atrade strategy profile-activation --target {target} --json",
+            "reason": "试运行前仍需人工确认运行 profile；该动作只读，不写环境。",
+            "safe_to_auto_apply": False,
+            **_read_only_action_contract("strategy_profile_activation_review"),
+        }
+    entry_signals = candidate_flow.get("current_entry_signals", []) or []
+    if entry_signals:
+        command = entry_signals[0].get("review_command") or "atrade diagnose flow --json"
+        return {
+            "type": "review_current_entry_signal",
+            "label": "复核当前核心入场信号",
+            "command": command,
+            "reason": "试运行护栏只读；先复核当前入场证据，再看买入意向和窗口。",
+            "safe_to_auto_apply": True,
+            **_read_only_action_contract("stock_analyze"),
+        }
+    return {
+        "type": "diagnose_flow",
+        "label": "诊断候选流",
+        "command": "atrade diagnose flow --json",
+        "reason": "当前没有可直接复核的入场信号，先看候选流诊断。",
+        "safe_to_auto_apply": True,
+        **_read_only_action_contract("diagnose_flow"),
+    }
+
+
+def _read_only_action_contract(command_contract_id: str) -> dict[str, Any]:
+    return {
+        "writes_state": False,
+        "writes_environment": False,
+        "writes_order": False,
+        "requires_user_approval": False,
+        "risk_level": "read_only",
+        "command_contract_id": command_contract_id,
+    }
+
+
+def _pool_tier_label(tier: str) -> str:
+    return {"core": "核心", "watch": "观察", "radar": "强势观察"}.get(tier, tier or "未分层")
+
+
+def _strategy_route_label(route: Any) -> str | None:
+    labels = {
+        "short_continuation": "短续接力",
+        "flow_confirmed_trend": "资金趋势确认",
+        "volume_breakout": "放量突破",
+        "shrink_pullback": "缩量回踩",
+        "ma_golden_cross": "均线金叉",
+        "trend_watch": "趋势观察",
+        "dragon_head": "龙头策略",
+    }
+    return labels.get(str(route)) if route else None
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "是", "有"}
+    return bool(value)
 
 
 @risk_app.command("adaptive")

@@ -17,9 +17,12 @@ from astock_trading.market.models import (
 from astock_trading.strategy.models import (
     Action,
     DataQuality,
+    DimensionScore,
     MarketSignal,
     MarketState,
+    ScoreResult,
     ScoringWeights,
+    StrategyRouteEvidence,
 )
 from astock_trading.strategy.scorer import Scorer
 from astock_trading.strategy.decider import Decider
@@ -148,6 +151,62 @@ class TestStrategyService:
         manual_event = event_store.query(event_type="manual_trade.requested")[0]
         assert manual_event["payload"]["source_event_id"] == decision_event["event_id"]
         assert manual_event["payload"]["source_score_event_id"] == score_event["event_id"]
+
+    def test_buy_decision_persists_entry_route_evidence(self, event_store):
+        score = ScoreResult(
+            code="002384",
+            name="东山精密",
+            total=7.0,
+            dimensions=[
+                DimensionScore("technical", 2.5, 3.0, "金叉成立，资金确认"),
+                DimensionScore("fundamental", 1.2, 3.0, "基本面可用"),
+                DimensionScore("flow", 1.5, 2.0, "资金较强"),
+                DimensionScore("sentiment", 1.8, 2.0, "偏强"),
+            ],
+            entry_signal=True,
+            style=Style.MOMENTUM,
+            style_confidence=0.88,
+            data_quality=DataQuality.OK,
+            strategy_routes=[
+                StrategyRouteEvidence(
+                    route="flow_confirmed_trend",
+                    display_name="资金趋势确认",
+                    family="trend_swing",
+                    confidence=0.88,
+                    evidence={"main_net_inflow": 3330975094.0},
+                    entry_signal=True,
+                )
+            ],
+            primary_strategy_route="flow_confirmed_trend",
+        )
+
+        class StaticScorer:
+            def score_batch(self, snapshots):
+                return [score]
+
+        decider = Decider(buy_threshold=6.5, watch_threshold=5.0, require_entry_signal_for_buy=True)
+        svc = StrategyService(StaticScorer(), decider, event_store)
+
+        svc.evaluate(
+            [_make_snapshot("002384", "东山精密")],
+            MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
+            run_id="run_entry_route_evidence",
+            config_version="v_test",
+        )
+
+        decision_payload = event_store.query(event_type="decision.suggested")[0]["payload"]
+        assert decision_payload["action"] == "BUY"
+        assert decision_payload["entry_signal"] is True
+        assert decision_payload["primary_strategy_route"] == "flow_confirmed_trend"
+        assert decision_payload["primary_strategy_route_label"] == "资金趋势确认"
+        assert decision_payload["strategy_routes"][0]["display_name"] == "资金趋势确认"
+        assert decision_payload["technical_detail"] == "金叉成立，资金确认"
+        assert decision_payload["data_quality"] == "ok"
+
+        manual_payload = event_store.query(event_type="manual_trade.requested")[0]["payload"]
+        assert manual_payload["entry_signal"] is True
+        assert manual_payload["primary_strategy_route"] == "flow_confirmed_trend"
+        assert manual_payload["primary_strategy_route_label"] == "资金趋势确认"
 
     def test_degraded_score_keeps_previous_valid_score_as_reference_only(self, event_store):
         previous_event_id = event_store.append(

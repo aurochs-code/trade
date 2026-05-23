@@ -33,6 +33,8 @@ _logger = logging.getLogger(__name__)
 
 _CANDIDATE_NOTE_LABELS = {
     "requires_entry_strategy_route": "缺少有效策略路线，暂留观察",
+    "below_watch_retained": "低于观察线，保留强势观察",
+    "screener_refresh": "筛选刷新入池",
 }
 
 
@@ -488,8 +490,8 @@ class ObsidianProjector:
         for r in rows:
             tiers.setdefault(r["pool_tier"], []).append(r)
 
-        tier_labels = {"core": "核心池", "watch": "观察池"}
-        for tier_key in ["core", "watch"]:
+        tier_labels = {"core": "核心池", "watch": "观察池", "radar": "强势观察池"}
+        for tier_key in ["core", "watch", "radar"]:
             tier_rows = tiers.get(tier_key, [])
             label = tier_labels.get(tier_key, tier_key)
             lines.extend([f"## {label}（{len(tier_rows)} 只）", ""])
@@ -549,7 +551,8 @@ class ObsidianProjector:
         pool_counts = {r["pool_tier"]: r["cnt"] for r in pool_rows}
         core_count = pool_counts.get("core", 0)
         watch_count = pool_counts.get("watch", 0)
-        other_count = sum(v for k, v in pool_counts.items() if k not in ("core", "watch"))
+        radar_count = pool_counts.get("radar", 0)
+        other_count = sum(v for k, v in pool_counts.items() if k not in ("core", "watch", "radar"))
 
         # 指数数据
         indices = market_state_detail.get("indices", {})
@@ -594,6 +597,7 @@ class ObsidianProjector:
             "| 类别 | 数量 |", "|------|------|",
             f"| 核心池 | {core_count} |",
             f"| 观察池 | {watch_count} |",
+            f"| 强势观察池 | {radar_count} |",
             f"| 其他 | {other_count} |",
         ])
 
@@ -722,6 +726,7 @@ class ObsidianProjector:
         core_edge = []      # 核心池 5.5 <= score < 7
         watch_stable = []   # 观察池 score >= 5.5
         watch_edge = []     # 观察池 4.5 <= score < 5.5
+        radar = []           # 强势观察池 4.5 <= score < 5.0
         vetoed = []         # note 含 veto
         low = []            # score < 4.5
 
@@ -749,6 +754,8 @@ class ObsidianProjector:
                     watch_edge.append(entry)
                 else:
                     low.append(entry)
+            elif tier == "radar":
+                radar.append(entry)
             else:
                 low.append(entry)
 
@@ -771,11 +778,13 @@ class ObsidianProjector:
             f"| 核心池·买入边缘 | {len(core_edge)} |",
             f"| 观察池·稳定 | {len(watch_stable)} |",
             f"| 观察池·边缘 | {len(watch_edge)} |",
+            f"| 强势观察 | {len(radar)} |",
             f"| 否决池 | {len(vetoed)} |",
             f"| 低分/规避 | {len(low)} |",
             "",
             "> 买入边缘：核心池评分 5.5–6.9，距买入阈值 < 2 分",
             "> 观察边缘：观察池评分 4.5–5.4，接近但未达买入线",
+            "> 强势观察：来自筛选或热点召回，暂未达到观察线，只跟踪不买入",
         ]
 
         # 详细列表（只列有内容的分组）
@@ -797,6 +806,7 @@ class ObsidianProjector:
         lines.extend(_table("核心池·买入边缘", core_edge))
         lines.extend(_table("观察池·稳定", watch_stable))
         lines.extend(_table("观察池·边缘", watch_edge))
+        lines.extend(_table("强势观察", radar))
         lines.extend(_table("否决", vetoed))
 
         lines.extend(["", "---", "", f"> 自动生成于 {now}"])
@@ -908,6 +918,7 @@ class ObsidianProjector:
         sells: list[dict],
         market_signal: str = "",
         market_indices: dict | None = None,
+        no_trade_summary: dict | None = None,
         dry_run: bool = False,
     ) -> str:
         """生成模拟盘收盘报告。
@@ -1029,6 +1040,9 @@ class ObsidianProjector:
                 lines.append("")
         else:
             lines.extend(["---", "", "## 今日交易", "", "无交易信号", ""])
+            if no_trade_summary:
+                message = str(no_trade_summary.get("message") or "未形成符合条件的模拟交易信号。")
+                lines.extend(["### 无交易原因", "", f"- {message}", ""])
 
         # 池子状态
         pool_rows = self._conn.execute(
@@ -1041,7 +1055,10 @@ class ObsidianProjector:
                 "|------|------|",
             ])
             for r in pool_rows:
-                lines.append(f"| {r['pool_tier']} | {r['cnt']} |")
+                tier_label = {"core": "核心池", "watch": "观察池", "radar": "强势观察池"}.get(
+                    r["pool_tier"], r["pool_tier"]
+                )
+                lines.append(f"| {tier_label} | {r['cnt']} |")
             lines.append("")
 
         lines.extend(["---", "", "> 本报告由模拟盘自动交易引擎自动生成", ""])

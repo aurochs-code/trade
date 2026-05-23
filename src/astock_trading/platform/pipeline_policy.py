@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Literal
 
 SkipReason = Literal["non_trading_day", "completed_today"]
 DataSourceGateDecision = Literal["failed", "warning"]
 
-MULTI_RUN_PIPELINES = frozenset({"sentiment", "intraday_monitor"})
+MULTI_RUN_PIPELINES = frozenset({"sentiment", "intraday_monitor", "auto_trade"})
 NON_TRADING_DAY_PIPELINES = frozenset({"sentiment", "weekly", "monthly"})
 MARKET_DATA_GATED_PIPELINES = frozenset({
     "morning",
@@ -51,12 +52,13 @@ def data_source_gate_decision(
 def new_trade_guard_decision(
     *,
     failed_runs: list[dict] | None = None,
+    successful_runs: list[dict] | None = None,
     data_source_health: dict | None = None,
     portfolio_breaches: list[dict] | None = None,
 ) -> dict:
     """Return whether the system may open new trades under daily anomaly guards."""
     blockers = []
-    failed_runs = failed_runs or []
+    failed_runs = filter_unrecovered_failed_runs(failed_runs or [], successful_runs or [])
     portfolio_breaches = portfolio_breaches or []
     data_source_health = data_source_health or {}
 
@@ -98,6 +100,42 @@ def new_trade_guard_decision(
         "allow_new_trades": not blockers,
         "blockers": blockers,
     }
+
+
+def filter_unrecovered_failed_runs(failed_runs: list[dict], successful_runs: list[dict]) -> list[dict]:
+    """Return failed runs that do not have a later successful run of the same type."""
+    recovered_after: dict[str, datetime] = {}
+    for run in successful_runs:
+        run_type = str(run.get("run_type") or "")
+        started_at = _parse_run_started_at(run)
+        if not run_type or started_at is None:
+            continue
+        current = recovered_after.get(run_type)
+        if current is None or started_at > current:
+            recovered_after[run_type] = started_at
+
+    unrecovered = []
+    for run in failed_runs:
+        run_type = str(run.get("run_type") or "")
+        failed_at = _parse_run_started_at(run)
+        recovered_at = recovered_after.get(run_type)
+        if failed_at is not None and recovered_at is not None and recovered_at > failed_at:
+            continue
+        unrecovered.append(run)
+    return unrecovered
+
+
+def _parse_run_started_at(run: dict) -> datetime | None:
+    value = str(run.get("started_at") or "")
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _portfolio_breach_payload(event: dict) -> dict:

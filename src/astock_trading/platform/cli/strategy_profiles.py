@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import typer
 
 from astock_trading.pipeline.context import build_context
 from astock_trading.pipeline.strategy_health import run_strategy_health_review
-from astock_trading.pipeline.strategy_profiles import compare_strategy_profiles, propose_strategy_allocation
+from astock_trading.pipeline.strategy_profiles import (
+    apply_strategy_profile_activation,
+    build_strategy_profile_activation_plan,
+    compare_strategy_profiles,
+    propose_strategy_allocation,
+)
 from astock_trading.platform.cli.common import json_or_text
 
 
@@ -31,6 +38,42 @@ def strategy_profiles(
     ctx = build_context()
     try:
         payload = compare_strategy_profiles(ctx.conn, profiles=profile_names, record=record)
+        if as_json:
+            json_or_text(payload, True)
+            return
+        typer.echo(payload["report_markdown"])
+    finally:
+        ctx.conn.close()
+
+
+@strategy_app.command("profile-activation")
+def strategy_profile_activation(
+    target: str = typer.Option("trend_swing", "--target", help="需要人工确认激活的目标 profile"),
+    record: bool = typer.Option(False, "--record/--no-record", help="是否记录 strategy.profile_activation.requested 事件"),
+    apply_env: bool = typer.Option(False, "--apply-env", help="人工确认后写入运行 .env"),
+    yes: bool = typer.Option(False, "--yes", help="确认写入运行 .env"),
+    env_file: Path | None = typer.Option(None, "--env-file", help="运行 .env 路径"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """生成 profile 激活计划；默认不修改环境，可用 --apply-env --yes 人工确认写入 .env。"""
+    ctx = build_context()
+    try:
+        try:
+            if apply_env:
+                payload = apply_strategy_profile_activation(
+                    ctx.conn,
+                    target_profile=target,
+                    env_file=env_file,
+                    confirm=yes,
+                )
+            else:
+                payload = build_strategy_profile_activation_plan(
+                    ctx.conn,
+                    target_profile=target,
+                    record=record,
+                )
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
         if as_json:
             json_or_text(payload, True)
             return

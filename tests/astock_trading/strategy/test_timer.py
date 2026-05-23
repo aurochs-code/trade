@@ -27,6 +27,26 @@ def test_red_signal():
     assert state.multiplier == 0.0
 
 
+def test_missing_ma20_uses_intraday_change_without_false_red():
+    """MA 数据缺失时，不应把 above_ma20 缺失直接当成跌破均线。"""
+    import astock_trading.strategy.timer as _timer
+    _timer._last_valid_state = None
+
+    index_data = {
+        "上证指数": {"change_pct": 0.47, "ma20": None, "below_ma60_days": 0},
+        "深证成指": {"change_pct": 1.39, "ma20": None, "below_ma60_days": 0},
+        "创业板指": {"change_pct": 1.91, "ma20": None, "below_ma60_days": 0},
+        "失真指数": {"price": 0, "change_pct": 0, "ma20": None, "below_ma60_days": 0},
+    }
+    state = compute_market_signal(index_data)
+
+    assert state.signal == MarketSignal.YELLOW
+    assert state.multiplier == 0.5
+    assert state.detail["fallback_intraday_count"] == 3
+    assert state.detail["total"] == 3
+    assert "MA 数据缺失" in state.detail["reason"]
+
+
 def test_yellow_signal():
     index_data = {
         "上证指数": {"above_ma20": True, "below_ma60_days": 0},

@@ -77,6 +77,36 @@ def test_runtime_db_uses_sqlalchemy_url(monkeypatch, tmp_path):
         conn.close()
 
 
+def test_runtime_db_reloads_when_database_url_changes(monkeypatch, tmp_path):
+    import astock_trading.platform.db as db_module
+
+    db_module._RUNTIME_DB = None
+    db_module._RUNTIME_DB_URL = None
+    first_path = tmp_path / "runtime-1.db"
+    second_path = tmp_path / "runtime-2.db"
+
+    monkeypatch.setenv("ASTOCK_DATABASE_URL", f"sqlite:///{first_path}")
+    init_db()
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO event_log "
+            "(event_id, stream, stream_type, stream_version, event_type, payload_json, metadata_json, occurred_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("evt_first", "s:first", "t", 1, "e", "{}", "{}", "2026-01-01T00:00:00+00:00"),
+        )
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("ASTOCK_DATABASE_URL", f"sqlite:///{second_path}")
+    init_db()
+    conn = connect()
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM event_log").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
 def test_init_db_migrates_v1_projection_positions(tmp_path):
     db_path = tmp_path / "legacy.db"
     conn = sqlite3.connect(str(db_path))

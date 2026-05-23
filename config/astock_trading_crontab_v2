@@ -12,6 +12,12 @@ LOG_DIR="$HOME/.local/state/a-stock-trading/logs/cron"
 # 午休检查 11:55
 55 11 * * 1-5 $TRADE run-pipeline noon --json >> $LOG_DIR/cron_noon.log 2>&1
 
+# 盘中候选池轻量刷新 13:40：在 14:00 模拟盘自动交易前补当天候选证据
+40 13 * * 1-5 $TRADE screener refresh --limit 10 --json >> $LOG_DIR/cron_screener_refresh_intraday.log 2>&1
+
+# 盘中影子试运行记录 13:45：只写 paper.trial.recorded，不下单
+45 13 * * 1-5 $TRADE paper trial-plan --record --json >> $LOG_DIR/cron_paper_trial.log 2>&1
+
 # 盘中持仓风控轮巡：09:35-11:30、13:00-14:55，每 5 分钟
 35-55/5 9 * * 1-5 $TRADE run-pipeline intraday_monitor --json >> $LOG_DIR/cron_intraday_monitor.log 2>&1
 */5 10 * * 1-5 $TRADE run-pipeline intraday_monitor --json >> $LOG_DIR/cron_intraday_monitor.log 2>&1
@@ -19,14 +25,25 @@ LOG_DIR="$HOME/.local/state/a-stock-trading/logs/cron"
 */5 13-14 * * 1-5 $TRADE run-pipeline intraday_monitor --json >> $LOG_DIR/cron_intraday_monitor.log 2>&1
 55 14 * * 1-5 $TRADE run-pipeline intraday_monitor --json >> $LOG_DIR/cron_intraday_monitor.log 2>&1
 
+# 模拟盘自动交易 14:00（盘中风控/卖出检查；买入侧仍受新鲜评分 gate 约束）
+0 14 * * 1-5 $TRADE run-pipeline auto_trade --json >> $LOG_DIR/cron_auto_trade.log 2>&1
+
+# 盘中候选-模拟闭环 14:12 + 14:24：先刷新候选并承接一次，买入窗口结束前再兜底承接一次
+12 14 * * 1-5 $TRADE screener refresh --limit 20 --json >> $LOG_DIR/cron_screener_refresh_intraday.log 2>&1
+24 14 * * 1-5 $TRADE run-pipeline auto_trade --json >> $LOG_DIR/cron_auto_trade.log 2>&1
+
+# 候选池刷新 15:10：刷新强势观察、观察池和核心候选池
+10 15 * * 1-5 $TRADE screener refresh --json >> $LOG_DIR/cron_screener_refresh.log 2>&1
+
+# 核心池评分 15:25：候选刷新后再评分，避免评分早于候选池
+25 15 * * 1-5 $TRADE run-pipeline scoring --json >> $LOG_DIR/cron_scoring.log 2>&1
+
 # 收盘报告 15:35
 35 15 * * 1-5 $TRADE run-pipeline evening --json >> $LOG_DIR/cron_evening.log 2>&1
 
-# 核心池评分 15:40
-40 15 * * 1-5 $TRADE run-pipeline scoring --json >> $LOG_DIR/cron_scoring.log 2>&1
-
-# 模拟盘自动交易 14:00（盘中风控/卖出检查；买入侧仍受新鲜评分 gate 约束）
-0 14 * * 1-5 $TRADE run-pipeline auto_trade --json >> $LOG_DIR/cron_auto_trade.log 2>&1
+# 影子试运行记录与当日复盘 15:45：只写 paper.trial.* 影子事件，不提交模拟盘订单
+45 15 * * 1-5 $TRADE paper trial-plan --record --json >> $LOG_DIR/cron_paper_trial.log 2>&1
+46 15 * * 1-5 $TRADE paper trial-review --min-age-days 0 --record --json >> $LOG_DIR/cron_paper_trial.log 2>&1
 
 # 周报 周日 20:00
 0 20 * * 0 $TRADE run-pipeline weekly --json >> $LOG_DIR/cron_weekly.log 2>&1
