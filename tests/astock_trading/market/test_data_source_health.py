@@ -56,6 +56,38 @@ def test_evaluate_data_source_health_marks_stale_optional_as_warning(tmp_path):
         conn.close()
 
 
+def test_evaluate_data_source_health_defers_stale_required_sources_on_weekend(tmp_path):
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        now = datetime(2026, 5, 24, 0, 34, tzinfo=timezone.utc)
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "hot_stocks", "latest", {"items": [1]})
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_observation("baidu", "fund_flow", "000858", {"main_net_inflow": 1})
+        friday_close = "2026-05-22T07:36:00+00:00"
+        conn.execute(
+            "UPDATE market_observations SET observed_at = ?",
+            (friday_close,),
+        )
+
+        result = evaluate_data_source_health(conn, now=now)
+
+        assert result["status"] == "warning"
+        assert result["required_missing"] == []
+        assert result["deferred_required"] == [
+            "hot_stocks",
+            "northbound_realtime",
+            "baidu_fund_flow",
+        ]
+        assert result["calendar_context"]["market_weekday"] is False
+        assert result["checks"]["hot_stocks"]["stale_reason"] == "non_trading_day"
+        assert result["checks"]["hot_stocks"]["next_refresh_required_before_next_window"] is True
+    finally:
+        conn.close()
+
+
 def test_evaluate_data_source_health_accepts_market_announcements_alias(tmp_path):
     db_path = tmp_path / "test.db"
     init_db(db_path)

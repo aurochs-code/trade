@@ -73,6 +73,39 @@ def test_build_data_source_diagnosis_includes_latest_screener_source_quality(tmp
         conn.close()
 
 
+def test_data_source_diagnosis_does_not_block_new_trades_for_weekend_stale_gate_sources(tmp_path):
+    db_path = tmp_path / "diagnose.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "hot_stocks", "latest", {"items": [1]})
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_observation("AkShareFlowAdapter", "fund_flow", "002384", {"items": [1]})
+        conn.execute(
+            "UPDATE market_observations SET observed_at = ?",
+            ("2026-05-22T07:36:00+00:00",),
+        )
+
+        payload = build_data_source_diagnosis(
+            conn,
+            now=datetime(2026, 5, 24, 0, 34, tzinfo=timezone.utc),
+        )
+        blockers = data_source_blockers_for_new_trades(payload)
+
+        assert payload["status"] == "warning"
+        assert payload["health"]["required_missing"] == []
+        assert payload["health"]["deferred_required"] == [
+            "hot_stocks",
+            "northbound_realtime",
+            "baidu_fund_flow",
+        ]
+        assert blockers == []
+        assert any("非交易日核心源自然过期" in item for item in payload["findings"])
+    finally:
+        conn.close()
+
+
 def test_latest_screener_source_quality_ignores_newer_market_signal_snapshots(tmp_path):
     db_path = tmp_path / "diagnose.db"
     init_db(db_path)

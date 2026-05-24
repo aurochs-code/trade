@@ -15,7 +15,12 @@ from astock_trading.platform.cli.screener import _scan_limit
 
 def _cli_env(tmp_path: Path) -> dict:
     env = os.environ.copy()
-    env["ASTOCK_DATABASE_URL"] = f"sqlite:///{tmp_path / 'runtime.db'}"
+    db_url = f"sqlite:///{tmp_path / 'runtime.db'}"
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"ASTOCK_DATABASE_URL={db_url}\n", encoding="utf-8")
+    env["ASTOCK_DATABASE_URL"] = db_url
+    env["ASTOCK_ENV_FILE"] = str(env_file)
+    env.pop("ASTOCK_CONFIG_PROFILE", None)
     return env
 
 
@@ -4016,6 +4021,191 @@ def test_hermes_opportunity_prioritizes_runtime_profile_review_for_stale_core_bu
     assert watch_payload["opportunity"]["next_window_plan"]["current_signal"]["carries_to_next_window"] is False
     assert watch_payload["opportunity"]["recent_unusable_buy_signal"]["top"]["code"] == "688981"
     assert watch_payload["snapshot"]["attention_key"].startswith("profile_review_required|")
+
+
+def test_hermes_opportunity_prioritizes_paper_readiness_for_weekend_stale_core_buy_signal(
+    tmp_path,
+    monkeypatch,
+):
+    from astock_trading.market.store import MarketStore
+    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.events import EventStore
+    from astock_trading.platform.history_mirror import archive_signal_history
+
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+    db_path = tmp_path / "runtime.db"
+    monkeypatch.setenv("ASTOCK_TEST_NOW", "2026-05-24T08:34:00+08:00")
+    monkeypatch.setenv("ASTOCK_CONFIG_PROFILE", "trend_swing")
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        store = MarketStore(conn)
+        store.save_observation("astock_signal", "hot_stocks", "latest", {"items": [1]})
+        store.save_observation("astock_signal", "northbound_realtime", "cn_a", {"items": [1]})
+        store.save_observation("AkShareFlowAdapter", "fund_flow", "002384", {"items": [1]})
+        store.save_observation(
+            "market_service",
+            "snapshot",
+            "002384",
+            {
+                "code": "002384",
+                "name": "东山精密",
+                "completeness": {
+                    "has_quote": True,
+                    "has_technical": True,
+                    "has_financial": True,
+                    "has_flow": True,
+                    "has_sentiment": True,
+                    "has_sector": True,
+                },
+            },
+            run_id="weekend-score",
+        )
+        conn.execute(
+            "UPDATE market_observations SET observed_at = ? "
+            "WHERE kind IN ('hot_stocks', 'northbound_realtime', 'fund_flow')",
+            ("2026-05-22T07:36:00+00:00",),
+        )
+        archive_signal_history(
+            conn,
+            snapshot_date="2026-05-22",
+            history_group_id="hist_weekend_core",
+            run_id="weekend-score",
+            phase="screener",
+            candidates=[
+                {
+                    "code": "002384",
+                    "name": "东山精密",
+                    "total_score": 7.0,
+                    "data_quality": "ok",
+                    "data_missing_fields": [],
+                    "entry_signal": True,
+                }
+            ],
+            decisions=[
+                {
+                    "code": "002384",
+                    "name": "东山精密",
+                    "action": "BUY",
+                    "score": 7.0,
+                }
+            ],
+        )
+        conn.execute(
+            """INSERT INTO projection_candidate_pool
+               (code, pool_tier, name, score, added_at, last_scored_at, streak_days, note)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("002384", "core", "东山精密", 7.0, "2026-05-22", "2026-05-22", 1, "screener_refresh"),
+        )
+        events = EventStore(conn)
+        score_event_id = events.append(
+            "score:002384",
+            "strategy",
+            "score.calculated",
+            {
+                "code": "002384",
+                "name": "东山精密",
+                "total_score": 7.0,
+                "data_quality": "ok",
+                "entry_signal": True,
+                "primary_strategy_route": "flow_confirmed_trend",
+                "strategy_routes": [
+                    {
+                        "route": "flow_confirmed_trend",
+                        "display_name": "资金趋势确认",
+                        "entry_signal": True,
+                    }
+                ],
+                "technical_detail": "金叉成立，资金确认",
+            },
+            metadata={"run_id": "weekend-score"},
+        )
+        decision_event_id = events.append(
+            "decision:002384",
+            "strategy",
+            "decision.suggested",
+            {
+                "code": "002384",
+                "name": "东山精密",
+                "action": "BUY",
+                "score": 7.0,
+                "source_score_event_id": score_event_id,
+            },
+            metadata={"run_id": "weekend-score"},
+        )
+        manual_event_id = events.append(
+            "manual_trade:002384",
+            "manual_trade",
+            "manual_trade.requested",
+            {
+                "status": "pending",
+                "side": "buy",
+                "code": "002384",
+                "name": "东山精密",
+                "score": 7.0,
+                "source_event_id": decision_event_id,
+                "source_score_event_id": score_event_id,
+            },
+            metadata={"run_id": "weekend-score", "execution": "manual"},
+        )
+        conn.execute(
+            "UPDATE event_log SET occurred_at = ? WHERE event_id IN (?, ?, ?)",
+            ("2026-05-22T07:25:53+00:00", score_event_id, decision_event_id, manual_event_id),
+        )
+        events.append(
+            "paper_trial:2026-05-24:002384",
+            "paper_trial",
+            "paper.trial.reviewed",
+            {
+                "code": "002384",
+                "name": "东山精密",
+                "pool_tier": "watch",
+                "pool_tier_label": "观察",
+                "trial_date": "2026-05-22",
+                "review_date": "2026-05-24",
+                "review_status": "positive",
+                "review_status_label": "表现为正",
+                "return_pct": 6.56,
+                "trial_start_price": 206.97,
+                "current_price": 220.55,
+                "current_pool_tier": "core",
+                "current_pool_tier_label": "核心",
+                "current_score": 7.0,
+                "current_entry_signal": True,
+                "current_primary_strategy_route": "flow_confirmed_trend",
+                "current_primary_strategy_route_label": "资金趋势确认",
+                "candidate_state_changed": True,
+                "candidate_state_change_label": "观察 -> 核心",
+                "price_anomaly": False,
+                "paper_order_submitted": False,
+            },
+            metadata={"source": "paper.trial-review", "shadow_only": True},
+        )
+    finally:
+        conn.close()
+
+    env = _cli_env(tmp_path)
+    env["ASTOCK_TEST_NOW"] = "2026-05-24T08:34:00+08:00"
+    env["ASTOCK_CONFIG_PROFILE"] = "trend_swing"
+    result = subprocess.run(
+        [str(cli), "opportunity", "--json"],
+        cwd=root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "paper_auto_readiness"
+    assert payload["next_action"]["type"] == "paper_auto_readiness"
+    assert payload["next_action"]["command"] == "atrade paper auto-readiness --json"
+    assert payload["counts"]["stale_buy_intents"] == 1
+    assert payload["counts"]["active_positive_trial_candidates"] == 1
+    assert payload["suggestion"]["data_source_blockers"] == []
+    assert "核心数据源不可用" not in " ".join(payload["blockers"])
+    assert "模拟盘自动交易预检" in payload["summary"]
 
 
 def test_hermes_surfaces_recent_unusable_buy_signal_in_digest_and_opportunity(tmp_path, monkeypatch):

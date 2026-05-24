@@ -429,6 +429,17 @@ def build_suggestion(conn: Any) -> dict[str, Any]:
         }
         recommendation = "有买入意向，先解释证据，再走人工确认。"
         status = "review_buy_intent"
+    elif has_stale_core_buy_intent:
+        action = {
+            "type": "paper_auto_readiness",
+            "label": "检查模拟盘自动交易预检",
+            "command": "atrade paper auto-readiness --json",
+            "reason": "已有核心候选和买入意向，但人工确认已过期或可能错过买入窗口；先检查模拟盘自动交易预检。",
+            "safe_to_auto_apply": True,
+            **_action_contract("paper_auto_readiness"),
+        }
+        recommendation = "已有核心候选和买入意向；先检查模拟盘自动交易预检。"
+        status = "paper_auto_readiness"
     elif active_positive_trials:
         first = active_positive_trials[0]
         if first.get("review_recorded") is False:
@@ -459,17 +470,6 @@ def build_suggestion(conn: Any) -> dict[str, Any]:
             }
             recommendation = f"有 {len(active_positive_trials)} 只仍在候选池内的影子试运行表现为正；先人工复核，不自动晋级或下单。"
         status = "review_positive_trial"
-    elif has_stale_core_buy_intent:
-        action = {
-            "type": "paper_auto_readiness",
-            "label": "检查模拟盘自动交易预检",
-            "command": "atrade paper auto-readiness --json",
-            "reason": "已有核心候选和买入意向，但人工确认已过期或可能错过买入窗口；先检查模拟盘自动交易预检。",
-            "safe_to_auto_apply": True,
-            **_action_contract("paper_auto_readiness"),
-        }
-        recommendation = "已有核心候选和买入意向；先检查模拟盘自动交易预检。"
-        status = "paper_auto_readiness"
     elif _has_observable_candidates(candidate_pool):
         action = {
             "type": "paper_trial_plan",
@@ -1516,6 +1516,8 @@ def _opportunity_summary(
             )
         return f"核心候选 {counts.get('core_candidates', 0)} 只，运行 profile 待复核；等待新鲜买入意向。"
     if status == "needs_health_check":
+        if recent_unusable_text:
+            return f"{recent_unusable_text}；同时先修运行/数据问题，暂停新增交易判断。"
         return "先修运行/数据问题，暂停新增交易判断。"
     if status == "wait_no_qualified_candidates":
         return "暂无合格候选；继续观察，不降低买入线。"

@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from astock_trading.platform.time import is_market_weekday
+
 
 @dataclass(frozen=True)
 class DataSourceExpectation:
@@ -275,9 +277,11 @@ def evaluate_data_source_health(
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
+    market_weekday = is_market_weekday(now)
 
     checks: dict[str, dict] = {}
     required_missing: list[str] = []
+    deferred_required: list[str] = []
     optional_missing: list[str] = []
 
     for expected in expectations:
@@ -300,10 +304,11 @@ def evaluate_data_source_health(
             observed = _parse_dt(latest["observed_at"])
             age_hours = (now - observed).total_seconds() / 3600
             payload_count = _payload_count(latest["payload_json"])
+            payload_ok = payload_count >= expected.min_payload_count
+            stale_by_age = age_hours > age_limit
+            status = "healthy" if not stale_by_age and payload_ok else "degraded"
             item = {
-                "status": "healthy"
-                if age_hours <= age_limit and payload_count >= expected.min_payload_count
-                else "degraded",
+                "status": status,
                 "required": expected.required,
                 "latest_observed_at": latest["observed_at"],
                 "age_hours": round(age_hours, 2),
@@ -314,11 +319,18 @@ def evaluate_data_source_health(
                 "payload_count": payload_count,
                 "min_payload_count": expected.min_payload_count,
             }
+            if expected.required and stale_by_age and payload_ok and not market_weekday:
+                item["stale_reason"] = "non_trading_day"
+                item["next_refresh_required_before_next_window"] = True
+                item["blocks_new_trades"] = False
 
         checks[expected.name] = item
         if item["status"] != "healthy":
             if expected.required:
-                required_missing.append(expected.name)
+                if item.get("blocks_new_trades") is False:
+                    deferred_required.append(expected.name)
+                else:
+                    required_missing.append(expected.name)
             else:
                 optional_missing.append(expected.name)
 
@@ -336,11 +348,22 @@ def evaluate_data_source_health(
         if item["status"] != "healthy":
             optional_missing.append(name)
 
-    status = "failed" if required_missing else "warning" if optional_missing else "ok"
+    status = (
+        "failed"
+        if required_missing
+        else "warning"
+        if optional_missing or deferred_required
+        else "ok"
+    )
     return {
         "status": status,
+        "calendar_context": {
+            "market_weekday": market_weekday,
+            "non_trading_day": not market_weekday,
+        },
         "checks": checks,
         "required_missing": required_missing,
+        "deferred_required": deferred_required,
         "optional_missing": optional_missing,
         "provider_failures": _recent_provider_failures(
             conn,

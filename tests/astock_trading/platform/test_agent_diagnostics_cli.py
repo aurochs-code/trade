@@ -932,6 +932,9 @@ def test_llm_context_close_includes_simulation_flow_gate(tmp_path, monkeypatch):
     monkeypatch.setenv("ASTOCK_TEST_NOW", "2026-05-23T10:00:00+08:00")
     jobs_path = tmp_path / "jobs.json"
     scripts_dir = tmp_path / "scripts"
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"ASTOCK_DATABASE_URL=sqlite:///{db_path}\n", encoding="utf-8")
+    monkeypatch.setenv("ASTOCK_ENV_FILE", str(env_file))
     monkeypatch.setenv("ASTOCK_HERMES_JOBS_PATH", str(jobs_path))
     monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
     init_db(db_path)

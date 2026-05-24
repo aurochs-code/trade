@@ -428,6 +428,9 @@ def build_data_source_diagnosis(
     if health.get("required_missing"):
         findings.append(f"核心门禁源缺失或过期: {', '.join(health['required_missing'])}")
         recommendations.append("先运行 atrade check-data-sources --json 或对应 pipeline 修复核心源。")
+    if health.get("deferred_required"):
+        findings.append(f"非交易日核心源自然过期: {', '.join(health['deferred_required'])}")
+        recommendations.append("当前可继续只读复核；下个买入窗口前通过候选刷新或 atrade check-data-sources --json 更新核心源。")
     if health.get("optional_missing"):
         findings.append(f"辅助源降级: {', '.join(health['optional_missing'])}")
         recommendations.append("辅助源降级时可以继续只读分析，但不要提高交易置信度。")
