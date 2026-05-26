@@ -65,11 +65,17 @@
 | `15:25` | 核心池评分 | `no_agent` / local | 对候选池和核心池重新评分 |
 | `15:30` | 交易计划生成 | `no_agent` / local | 生成只读交易计划，不执行 |
 | `15:35` | 收盘 pipeline | `no_agent` / local | 生成收盘报告、投影和基础复盘数据 |
-| `15:45` | 影子试运行记录复盘 | `no_agent` / local | 补录收盘候选并记录当日影子复盘 |
+| `15:45` | 影子试运行记录复盘 | `no_agent` / local | 补录收盘候选、记录当日影子复盘并推送人工复核清单 |
 | `15:50` | 每日巡检报告 | `no_agent` / local | 汇总系统健康、运行记录、人工确认和交易计划 |
 | `15:55` | LLM 收盘复盘 | 脚本内 LLM / Discord Rich Embed | 输出系统与数据质量、今日闭环、收盘热点、盘前与收盘对比、候选池变化和明日清单 |
 
 收盘后健康诊断与每日巡检、LLM 收盘复盘重叠，当前已暂停。
+
+候选池刷新脚本成功后会先执行
+`atrade market-intel watchlist-sync --source candidate-pool --preserve-holdings --yes --json`：
+清理 MX 自选里的非持仓旧票，并加入最新核心池、观察池和强势观察。同步只改 MX 自选，
+不提交模拟盘订单；如需临时关闭，可设置 `ASTOCK_WATCHLIST_SYNC_DISABLE=1`，测试时可设置
+`ASTOCK_WATCHLIST_SYNC_DRY_RUN=1`。
 
 建议在 `15:10` 候选池刷新后、`15:25` 核心池评分前补充一条 `15:18`
 机会变化提醒任务，执行 `atrade notify opportunity-watch --json`。它只对新强势观察、
@@ -98,8 +104,15 @@
 影子试运行记录复盘由 `a_stock_paper_trial_cycle_silent.sh` 执行，调度为
 `45 13,15 * * 1-5`。它先执行 `atrade paper trial-plan --record --json`，把观察候选、
 强势观察候选和核心候选写入 `paper.trial.recorded`；15:40 后再执行
-`atrade paper trial-review --min-age-days 0 --record --json` 记录当日影子复盘。该任务只写
-`paper.trial.*` 影子事件，不调用 `paper buy` / `paper sell`，也不自动晋级候选。
+`atrade paper trial-review --min-age-days 0 --record --json` 记录当日影子复盘，并调用
+`atrade notify manual-followup --skip-account --json` 推送收盘后的人工复核清单。该任务只写
+`paper.trial.*` 影子事件和 Discord 通知，不读取 MX 账户、不调用 `paper buy` / `paper sell`，
+也不自动晋级候选或把信号带到下一交易日买入。
+
+人工复核自动汇总用 `atrade review manual-followup --json`，手工补发 Discord 卡片用
+`atrade notify manual-followup --json`。它只读聚合机会卡、影子复盘和模拟承接预检，
+把“继续观察、等待自动承接、需要你确认”的动作直接列给 Hermes/人读；若下一步可能提交
+MX 模拟盘委托，只会展示待确认命令，不会由 Hermes 自动执行。
 
 ### 每周
 

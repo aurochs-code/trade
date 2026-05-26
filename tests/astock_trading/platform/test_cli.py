@@ -1105,6 +1105,7 @@ def test_health_json_treats_recovered_failed_runs_as_non_actionable(tmp_path):
     db_path = tmp_path / "runtime.db"
     env = os.environ.copy()
     env["ASTOCK_DATABASE_URL"] = f"sqlite:///{db_path}"
+    env["ASTOCK_TEST_NOW"] = "2026-05-22T15:00:00+08:00"
 
     init_db(db_path)
     conn = connect(db_path)
@@ -1492,6 +1493,7 @@ def test_agent_context_json_via_bin_trade():
     assert payload["recommended_commands"]["commands"] == "atrade commands --json"
     assert payload["recommended_commands"]["opportunity"] == "atrade opportunity --json"
     assert payload["recommended_commands"]["opportunity_watch"] == "atrade opportunity-watch --json"
+    assert payload["recommended_commands"]["manual_followup"] == "atrade review manual-followup --json"
     assert payload["recommended_commands"]["screener_explain"] == "atrade screener explain --json"
     assert payload["recommended_commands"]["paper_auto_readiness"] == "atrade paper auto-readiness --json"
     assert payload["recommended_commands"]["risk_trial_guard"] == "atrade risk trial-guard --json"
@@ -1501,6 +1503,10 @@ def test_agent_context_json_via_bin_trade():
     assert payload["recommended_commands"]["diagnose_flow"] == "atrade diagnose flow --json"
     assert payload["recommended_commands"]["diagnose_schedule"] == "atrade diagnose schedule --json"
     assert payload["recommended_commands"]["llm_context_close"] == "atrade llm-context --mode close --json"
+    assert (
+        payload["recommended_commands"]["market_watchlist_sync"]
+        == "atrade market-intel watchlist-sync --source candidate-pool --preserve-holdings --dry-run --json"
+    )
     assert (
         payload["recommended_commands"]["strategy_profile_activation"]
         == "atrade strategy profile-activation --target trend_swing --json"
@@ -1586,6 +1592,13 @@ def test_agent_command_catalog_json_via_bin_trade():
         "pool.demoted",
     ]
     assert by_id["opportunity_watch"]["options"]["--no-write"]["effect"] == "只比较，不更新机会监控状态文件"
+    assert by_id["manual_followup"]["command"] == "atrade review manual-followup --json"
+    assert by_id["manual_followup"]["risk_level"] == "read_only"
+    assert by_id["manual_followup"]["writes_state"] is False
+    assert by_id["manual_followup"]["writes_order"] is False
+    assert by_id["notify_manual_followup"]["command"] == "atrade notify manual-followup --json"
+    assert by_id["notify_manual_followup"]["risk_level"] == "notification_write"
+    assert by_id["notify_manual_followup"]["writes_order"] is False
     assert by_id["paper_trial_plan_record"]["writes_state"] is True
     assert by_id["paper_trial_plan_record"]["writes_order"] is False
     assert by_id["paper_trial_plan_record"]["state_events"] == ["paper.trial.recorded"]
@@ -1615,6 +1628,26 @@ def test_agent_command_catalog_json_via_bin_trade():
     assert by_id["manual_trades_expire_stale"]["writes_order"] is False
     assert by_id["manual_trades_expire_stale"]["requires_user_approval"] is True
     assert by_id["manual_trades_expire_stale"]["state_events"] == ["manual_trade.expired"]
+    assert by_id["market_watchlist_sync_preview"]["command"] == (
+        "atrade market-intel watchlist-sync --source candidate-pool --preserve-holdings --dry-run --json"
+    )
+    assert by_id["market_watchlist_sync_preview"]["writes_state"] is False
+    assert by_id["market_watchlist_sync_preview"]["writes_order"] is False
+    assert by_id["market_watchlist_sync_preview"]["requires_user_approval"] is False
+    assert by_id["market_watchlist_sync_preview"]["options"]["--preserve-holdings/--no-preserve-holdings"][
+        "default"
+    ] is True
+    assert by_id["market_watchlist_sync_preview"]["options"]["--operation-delay"]["default"] == 1.5
+    assert by_id["market_watchlist_sync_preview"]["options"]["--max-retries"]["default"] == 3
+    assert by_id["market_watchlist_sync_apply"]["command"] == (
+        "atrade market-intel watchlist-sync --source candidate-pool --preserve-holdings --yes --json"
+    )
+    assert by_id["market_watchlist_sync_apply"]["writes_state"] is True
+    assert by_id["market_watchlist_sync_apply"]["writes_order"] is False
+    assert by_id["market_watchlist_sync_apply"]["requires_user_approval"] is True
+    assert by_id["market_watchlist_sync_apply"]["risk_level"] == "external_state_write"
+    assert by_id["market_watchlist_sync_apply"]["options"]["--operation-delay"]["default"] == 1.5
+    assert by_id["market_watchlist_sync_apply"]["options"]["--max-retries"]["default"] == 3
     assert by_id["record_buy"]["writes_state"] is True
     assert by_id["record_buy"]["requires_user_approval"] is True
 
@@ -1972,6 +2005,7 @@ def test_market_intel_help_via_bin_trade():
     assert "northbound" in result.stdout
     assert "fund-flow" in result.stdout
     assert "watchlist" in result.stdout
+    assert "watchlist-sync" in result.stdout
 
 
 def test_risk_position_json_via_bin_trade(tmp_path):
@@ -1993,6 +2027,27 @@ def test_risk_position_json_via_bin_trade(tmp_path):
     assert payload["price"] == 15.0
     assert payload["shares"] > 0
     assert payload["shares"] % 100 == 0
+
+
+def test_risk_portfolio_json_labels_local_projection_scope(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "risk", "portfolio", "--json"],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["scope"] == "local_projection"
+    assert payload["portfolio"]["holding_count"] == 0
+    assert payload["paper_account"]["status"] == "not_checked"
+    assert payload["paper_account"]["command"] == "atrade paper status --json"
+    assert "本地投影" in payload["paper_account"]["note"]
 
 
 def test_risk_trial_guard_json_via_bin_trade(tmp_path):
@@ -3987,6 +4042,7 @@ def test_hermes_opportunity_prioritizes_runtime_profile_review_for_stale_core_bu
     assert operator_attention["follow_up_commands"] == [
         "atrade diagnose flow --json",
         "atrade opportunity --json",
+        "atrade review manual-followup --json",
         "atrade digest --json",
         "atrade paper auto-readiness --json",
         "atrade risk trial-guard --json",
@@ -4811,6 +4867,7 @@ def test_hermes_opportunity_refreshes_recorded_positive_trial_from_current_pool(
 
 def test_hermes_opportunity_positive_shadow_trial_exposes_profile_gate_and_next_window(
     tmp_path,
+    monkeypatch,
 ):
     from astock_trading.market.store import MarketStore
     from astock_trading.platform.db import connect, init_db
@@ -4823,6 +4880,7 @@ def test_hermes_opportunity_positive_shadow_trial_exposes_profile_gate_and_next_
     db_path = tmp_path / "runtime.db"
     env_file = tmp_path / ".env"
     jobs_path = tmp_path / "jobs.json"
+    monkeypatch.setenv("ASTOCK_TEST_NOW", "2026-05-25T10:00:00+08:00")
     today = local_today_str()
     env_file.write_text(f"ASTOCK_DATABASE_URL=sqlite:///{db_path}\n", encoding="utf-8")
     jobs_path.write_text(
@@ -4926,6 +4984,7 @@ def test_hermes_opportunity_positive_shadow_trial_exposes_profile_gate_and_next_
     env = _cli_env(tmp_path)
     env["ASTOCK_ENV_FILE"] = str(env_file)
     env["ASTOCK_HERMES_JOBS_PATH"] = str(jobs_path)
+    env["ASTOCK_TEST_NOW"] = "2026-05-25T10:00:00+08:00"
     env.pop("ASTOCK_CONFIG_PROFILE", None)
     result = subprocess.run(
         [str(cli), "opportunity", "--json"],
@@ -6539,7 +6598,8 @@ def test_notify_opportunity_embed_labels_candidate_pool_when_core_present(tmp_pa
     payload = json.loads(result.stdout)
     assert payload["opportunity"]["summary"] == "核心候选 1 只，观察候选 1 只；等待入场信号，不自动买入。"
     field_names = [field["name"] for field in payload["embed"]["fields"]]
-    assert "候选池（核心 1 / 观察 1）" in field_names
+    assert "核心池（1）" in field_names
+    assert "观察池（1）" in field_names
     values = "\n".join(field["value"] for field in payload["embed"]["fields"])
     assert "中芯国际(688981) 核心" in values
     assert "伟测科技(688372) 观察" in values

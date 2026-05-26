@@ -524,8 +524,25 @@ def risk_portfolio(
             max_sector_exposure_pct=max_sector_exposure_pct,
             limits=limits,
         )
+        holding_count = int(portfolio.get("holding_count", len(positions)) or 0)
         payload = {
             "status": "breached" if breaches else "ok",
+            "scope": "local_projection",
+            "summary": (
+                f"组合风控检查基于本地投影持仓：{holding_count} 只；"
+                "MX 模拟盘持仓需另查 atrade paper status --json。"
+            ),
+            "portfolio": {
+                "scope": "local_projection",
+                "holding_count": holding_count,
+                "total_market_cents": total_market,
+                "positions": positions,
+            },
+            "paper_account": {
+                "status": "not_checked",
+                "command": "atrade paper status --json",
+                "note": "risk portfolio 只检查本地投影持仓，不代表 MX 模拟盘账户为空。",
+            },
             "inputs": {
                 "daily_pnl_pct": daily_pnl_pct,
                 "consecutive_loss_days": consecutive_loss_days,

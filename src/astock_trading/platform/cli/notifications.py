@@ -21,6 +21,7 @@ from astock_trading.reporting.discord import (
     format_daily_inspection_embed,
     format_llm_summary_embed,
     format_manual_confirmation_embed,
+    format_manual_followup_embed,
     format_opportunity_embed,
     format_opportunity_watch_embed,
     format_propose_plan_embed,
@@ -283,6 +284,43 @@ def notify_opportunity(
         ok=ok,
         error=error,
         extra={"opportunity": opportunity},
+    )
+    json_or_text(payload, as_json)
+    if not dry_run and not ok:
+        raise typer.Exit(1)
+
+
+@notify_app.command("manual-followup")
+def notify_manual_followup(
+    skip_account: bool = typer.Option(False, "--skip-account", help="不请求 MX 模拟盘账户，只检查本地配置和事件证据"),
+    limit: int = typer.Option(100, "--limit", min=1, max=1000, help="最多扫描影子试运行事件数"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只生成卡片，不发送 Discord"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """生成只读人工复核自动汇总并推送 Discord。"""
+    from astock_trading.pipeline.auto_trade import build_auto_trade_readiness
+    from astock_trading.pipeline.context import build_context
+    from astock_trading.platform.manual_followup import build_manual_followup_report
+
+    ctx = build_context()
+    try:
+        auto_readiness = build_auto_trade_readiness(ctx, include_account=not skip_account)
+        manual_followup = build_manual_followup_report(
+            ctx.conn,
+            auto_readiness=auto_readiness,
+            limit=limit,
+        )
+    finally:
+        ctx.conn.close()
+
+    embed = format_manual_followup_embed(manual_followup)
+    ok, error = _send_or_dry_run(embed, "A股人工复核", dry_run)
+    payload = _notification_payload(
+        embed=embed,
+        dry_run=dry_run,
+        ok=ok,
+        error=error,
+        extra={"manual_followup": manual_followup},
     )
     json_or_text(payload, as_json)
     if not dry_run and not ok:

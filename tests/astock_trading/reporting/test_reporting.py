@@ -13,6 +13,7 @@ from astock_trading.reporting.discord import (
     format_scoring_embed, format_stop_alert_embed,
     format_propose_plan_embed, format_daily_inspection_embed,
     format_manual_confirmation_embed,
+    format_manual_followup_embed,
     format_opportunity_embed,
     format_opportunity_watch_embed,
     format_llm_summary_embed,
@@ -232,6 +233,63 @@ def test_format_opportunity_embed_highlights_watch_candidates_without_execution(
     assert "不自动交易" in values
 
 
+def test_format_opportunity_embed_splits_candidate_pool_tiers():
+    embed = format_opportunity_embed({
+        "date": "2026-05-26",
+        "status": "wait",
+        "summary": "已有候选，等待入场信号。",
+        "decision_brief": "核心候选 1，观察候选 1，强势观察 1。",
+        "execution_allowed": False,
+        "counts": {
+            "buy_intents": 0,
+            "core_candidates": 1,
+            "watch_candidates": 1,
+            "radar_candidates": 1,
+        },
+        "watch_candidates": [
+            {
+                "code": "688981",
+                "name": "中芯国际",
+                "pool_tier": "core",
+                "pool_tier_label": "核心",
+                "score": 6.4,
+                "entry_signal": True,
+                "primary_strategy_route_label": "资金趋势确认",
+                "note_label": "核心池",
+            },
+            {
+                "code": "002384",
+                "name": "东山精密",
+                "pool_tier": "watch",
+                "pool_tier_label": "观察",
+                "score": 5.3,
+                "entry_signal": False,
+                "note_label": "筛选刷新入池",
+            },
+        ],
+        "radar_candidates": [
+            {
+                "code": "600888",
+                "name": "新疆众和",
+                "pool_tier": "radar",
+                "pool_tier_label": "强势观察",
+                "score": 4.7,
+                "entry_signal": False,
+                "note_label": "低于观察线，保留跟踪",
+            }
+        ],
+    })
+
+    names = [field["name"] for field in embed["fields"]]
+    values = "\n".join(field["value"] for field in embed["fields"])
+    assert "核心池（1）" in names
+    assert "观察池（1）" in names
+    assert "强势观察（1）" in names
+    assert "中芯国际(688981)" in values
+    assert "东山精密(002384)" in values
+    assert "新疆众和(600888)" in values
+
+
 def test_format_opportunity_embed_highlights_radar_candidates_without_execution():
     embed = format_opportunity_embed({
         "date": "2026-05-22",
@@ -313,6 +371,61 @@ def test_format_opportunity_embed_highlights_positive_shadow_trials():
     assert "9.04%" in values
     assert "候选变化 观察 -> 核心" in values
     assert "atrade stock analyze 600584 --json" in values
+
+
+def test_format_manual_followup_embed_summarizes_automated_review():
+    embed = format_manual_followup_embed({
+        "date": "2026-05-25",
+        "status": "needs_health_check",
+        "summary": "先修运行/数据问题，暂停新增交易判断。",
+        "candidate_summary": {
+            "summary": "候选池 3 只：核心 0、观察 2、强势观察 1；当前入场信号 0 只。",
+        },
+        "counts": {
+            "positive_trial_candidates": 2,
+            "manual_actions": 1,
+        },
+        "candidate_reviews": [
+            {
+                "code": "600584",
+                "name": "长电科技",
+                "classification_label": "继续观察",
+                "return_pct": 19.94,
+                "current_pool_tier_label": "观察",
+                "current_score": 5.0,
+                "current_entry_signal": False,
+                "reason": "仍在观察层，且没有当前入场信号。",
+                "next_action": {"command": "atrade stock analyze 600584 --json"},
+            }
+        ],
+        "manual_actions": [
+            {
+                "label": "复核过期买入意向",
+                "command": "atrade manual-trades list --status stale --json",
+                "reason": "有买入意向已过期，需要决定是否结案。",
+            }
+        ],
+        "next_action": {
+            "label": "检查数据覆盖",
+            "command": "atrade data-sources diagnose --json",
+            "reason": "先修数据源再看新增交易。",
+        },
+        "guardrails": {
+            "read_only": True,
+            "writes_order": False,
+            "manual_confirmation_required_for_trade": True,
+        },
+    })
+
+    assert "人工复核自动汇总" in embed["title"]
+    values = "\n".join(field["value"] for field in embed["fields"])
+    assert "先修运行/数据问题" in values
+    assert "长电科技(600584)" in values
+    assert "继续观察" in values
+    assert "19.94%" in values
+    assert "atrade stock analyze 600584 --json" in values
+    assert "atrade manual-trades list --status stale --json" in values
+    assert "必须人工确认" in values
 
 
 def test_format_opportunity_embed_shows_stale_manual_confirmations():

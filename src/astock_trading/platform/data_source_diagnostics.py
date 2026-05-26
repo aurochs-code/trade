@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime
 import json
 from typing import Any, Optional
 
 from astock_trading.market.health import evaluate_data_source_health
+from astock_trading.platform.time import utc_now
 
 SOURCE_QUALITY_DIMENSIONS = (
     ("quote", "行情", "L1", "has_quote"),
@@ -408,7 +409,7 @@ def build_data_source_diagnosis(
     max_age_hours: Optional[int] = None,
 ) -> dict:
     """汇总全局门禁、provider 失败和最近筛选逐票覆盖率。"""
-    now = now or datetime.now(timezone.utc)
+    now = now or utc_now()
     health = evaluate_data_source_health(conn, now=now, max_age_hours=max_age_hours)
     provider_failures = health.get("provider_failures", {}) or {}
     source_quality = _latest_screener_source_quality(conn)

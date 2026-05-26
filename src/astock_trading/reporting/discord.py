@@ -695,6 +695,13 @@ def _pct_text(value: object) -> str:
     return f"{pct:.0f}%"
 
 
+def _pct_text_2(value: object) -> str:
+    pct = _to_float(value)
+    if abs(pct) <= 1:
+        pct *= 100
+    return f"{pct:.2f}%"
+
+
 def _dimension_summary(score: dict) -> str:
     labels = {
         "technical": "技",
@@ -1080,7 +1087,13 @@ def format_opportunity_embed(opportunity: dict) -> dict:
     counts = opportunity.get("counts", {}) or {}
     buy_intents = opportunity.get("buy_intents", []) or []
     stale_buy_intents = opportunity.get("stale_buy_intents", []) or []
-    watch_candidates = opportunity.get("watch_candidates", []) or []
+    mixed_candidates = opportunity.get("watch_candidates", []) or []
+    core_candidates = opportunity.get("core_candidates", []) or [
+        item for item in mixed_candidates if str(item.get("pool_tier") or "").lower() == "core"
+    ]
+    watch_candidates = [
+        item for item in mixed_candidates if str(item.get("pool_tier") or "").lower() != "core"
+    ]
     radar_candidates = opportunity.get("radar_candidates", []) or []
     positive_trials = opportunity.get("positive_trial_candidates", []) or []
     blockers = opportunity.get("blockers", []) or []
@@ -1135,9 +1148,18 @@ def format_opportunity_embed(opportunity: dict) -> dict:
             inline=False,
         ))
 
+    if core_candidates:
+        fields.append(_field(
+            f"核心池（{counts.get('core_candidates', len(core_candidates))}）",
+            "\n".join(_opportunity_candidate_lines(core_candidates[:5])),
+            inline=False,
+        ))
+    else:
+        fields.append(_field("核心池", "暂无核心候选；观察不等于买入意向。", inline=False))
+
     if watch_candidates:
         fields.append(_field(
-            _candidate_pool_field_name(counts),
+            f"观察池（{counts.get('watch_candidates', len(watch_candidates))}）",
             "\n".join(_opportunity_candidate_lines(watch_candidates[:5])),
             inline=False,
         ))
@@ -1228,6 +1250,81 @@ def format_opportunity_embed(opportunity: dict) -> dict:
     )
 
 
+def format_manual_followup_embed(payload: dict) -> dict:
+    """人工复核自动汇总 → Discord embed dict。"""
+    status = str(payload.get("status") or "unknown")
+    counts = payload.get("counts", {}) or {}
+    candidate_summary = payload.get("candidate_summary", {}) or {}
+    candidate_reviews = payload.get("candidate_reviews", []) or []
+    manual_actions = payload.get("manual_actions", []) or []
+    next_action = payload.get("next_action", {}) or {}
+    guardrails = payload.get("guardrails", {}) or {}
+    if status == "needs_health_check":
+        color = COLORS["stop_alert"]
+    elif status == "approval_required":
+        color = COLORS["manual_confirmation"]
+    else:
+        color = COLORS["info"]
+
+    fields = [
+        _field(
+            "复核结论",
+            "\n".join([
+                str(payload.get("summary") or "暂无需要人工处理的复核项。"),
+                str(candidate_summary.get("summary") or "候选池摘要暂不可用。"),
+            ]),
+            inline=False,
+        ),
+        _field(
+            "数量",
+            "影子正收益 {positive} / 人工动作 {actions}".format(
+                positive=counts.get("positive_trial_candidates", len(candidate_reviews)),
+                actions=counts.get("manual_actions", len(manual_actions)),
+            ),
+            inline=False,
+        ),
+    ]
+
+    if candidate_reviews:
+        fields.append(_field(
+            "候选复核",
+            "\n".join(_manual_followup_candidate_lines(candidate_reviews[:5])),
+            inline=False,
+        ))
+
+    if manual_actions:
+        fields.append(_field(
+            "需要你确认",
+            "\n".join(_manual_followup_action_lines(manual_actions[:5])),
+            inline=False,
+        ))
+
+    if next_action:
+        fields.append(_field(
+            "下一步",
+            "{label}\n命令：`{command}`\n原因：{reason}".format(
+                label=_label_cn(next_action.get("label", "只读复核")),
+                command=next_action.get("command", "atrade review manual-followup --json"),
+                reason=_finding_cn(next_action.get("reason", "不自动交易。")),
+            ),
+            inline=False,
+        ))
+
+    boundary = "自动复核只读；提交模拟盘委托、记录成交、改 profile 都必须人工确认。"
+    if guardrails:
+        order_text = "不提交委托" if not guardrails.get("writes_order") else "可能提交委托"
+        confirm_text = "必须人工确认" if guardrails.get("manual_confirmation_required_for_trade") else "未要求人工确认"
+        boundary = f"{boundary}\n边界：{order_text}；交易动作{confirm_text}。"
+    fields.append(_field("交易边界", boundary, inline=False))
+
+    return _embed(
+        title=f"人工复核自动汇总 - {payload.get('date', local_today_str())}",
+        color=color,
+        fields=fields,
+        footer="A-Stock Trading · manual_followup",
+    )
+
+
 def _candidate_pool_field_name(counts: dict) -> str:
     core_count = int(counts.get("core_candidates", 0) or 0)
     watch_count = int(counts.get("watch_candidates", 0) or 0)
@@ -1289,6 +1386,42 @@ def _opportunity_action_lines(actions: list[dict]) -> list[str]:
     return lines
 
 
+def _manual_followup_candidate_lines(items: list[dict]) -> list[str]:
+    lines = []
+    for item in items:
+        code = item.get("code", "")
+        name = item.get("name") or code
+        label = _label_cn(item.get("classification_label", "复核"))
+        ret = _pct_text_2(item.get("return_pct"))
+        tier = item.get("current_pool_tier_label") or _label_cn(item.get("current_pool_tier", "-"))
+        score = _to_float(item.get("current_score"))
+        entry = "有" if item.get("current_entry_signal") else "无"
+        reason = _finding_cn(item.get("reason", "只读复核，不自动交易。"))
+        command = (item.get("next_action", {}) or {}).get("command") or item.get("review_command") or (
+            f"atrade stock analyze {code} --json"
+        )
+        lines.append(
+            f"- {name}({code}) {label} / 影子收益 {ret}\n"
+            f"  层级 {tier} / 分数 {score:.1f} / 入场信号 {entry}\n"
+            f"  原因：{reason}\n"
+            f"  命令：`{command}`"
+        )
+    return lines
+
+
+def _manual_followup_action_lines(actions: list[dict]) -> list[str]:
+    lines = []
+    for action in actions:
+        label = _label_cn(action.get("label", "人工确认"))
+        command = action.get("command", "atrade review manual-followup --json")
+        reason = _finding_cn(action.get("reason", "必须人工确认。"))
+        risk = _label_cn(action.get("risk_level", "read_only"))
+        if action.get("requires_user_approval") or action.get("writes_order"):
+            risk = f"{risk} / 必须人工确认"
+        lines.append(f"{label}\n命令：`{command}`\n原因：{reason}\n风险：{risk}")
+    return lines
+
+
 def format_opportunity_watch_embed(monitor: dict) -> dict:
     """机会变化监控 → Discord embed dict。"""
     labels = monitor.get("change_labels", []) or []
@@ -1344,6 +1477,32 @@ def format_opportunity_watch_embed(monitor: dict) -> dict:
             ),
             inline=False,
         ))
+        mixed = opportunity.get("watch_candidates", []) or []
+        core_candidates = opportunity.get("core_candidates", []) or [
+            item for item in mixed if str(item.get("pool_tier") or "").lower() == "core"
+        ]
+        watch_candidates = opportunity.get("watch_only_candidates", []) or [
+            item for item in mixed if str(item.get("pool_tier") or "").lower() != "core"
+        ]
+        radar_candidates = opportunity.get("radar_candidates", []) or []
+        if core_candidates:
+            fields.append(_field(
+                "当前核心池",
+                "\n".join(_opportunity_candidate_lines(core_candidates[:5])),
+                inline=False,
+            ))
+        if watch_candidates:
+            fields.append(_field(
+                "当前观察池",
+                "\n".join(_opportunity_candidate_lines(watch_candidates[:5])),
+                inline=False,
+            ))
+        if radar_candidates:
+            fields.append(_field(
+                "当前强势观察",
+                "\n".join(_opportunity_candidate_lines(radar_candidates[:5])),
+                inline=False,
+            ))
         approval_gate = opportunity.get("approval_gate", {}) or {}
         if approval_gate.get("required"):
             fields.append(_field(

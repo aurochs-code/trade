@@ -364,7 +364,8 @@ def test_diagnose_health_treats_old_failed_runs_as_historical(tmp_path):
         conn.close()
 
 
-def test_diagnose_health_treats_recovered_failed_runs_as_non_actionable(tmp_path):
+def test_diagnose_health_treats_recovered_failed_runs_as_non_actionable(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASTOCK_TEST_NOW", "2026-05-22T15:00:00+08:00")
     db_path = tmp_path / "runtime.db"
     init_db(db_path)
     conn = connect(db_path)
@@ -658,6 +659,8 @@ def test_llm_context_close_markdown_includes_discord_card_contract(tmp_path):
     assert "### 7. 明日清单" in text
     assert "计划外的交易，先当风险处理" in text
     assert "对比只用于复盘早盘判断质量，不作为自动交易依据" in text
+    assert "本地投影持仓" in text
+    assert "MX 模拟盘持仓" in text
 
 
 def test_llm_context_close_includes_market_intel_comparison(tmp_path):
@@ -1374,6 +1377,30 @@ def test_diagnose_strategy_json_reports_parameter_profile_need(tmp_path):
         "short_continuation",
         "defensive_watch",
     }
+
+
+def test_diagnose_strategy_accepts_explicit_runtime_profile(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+    env = _cli_env(tmp_path)
+    env["ASTOCK_CONFIG_PROFILE"] = "trend_swing"
+
+    result = subprocess.run(
+        [str(cli), "diagnose", "strategy", "--json"],
+        cwd=root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["parameter_profiles"]["current_profile"] == "trend_swing"
+    assert payload["execution_profile"]["status"] == "ok"
+    assert "当前执行 profile 仍混合趋势波段、短线延续和回测预设" not in " ".join(payload["findings"])
+    assert "profile 已存在；继续用 strategy profiles 对比证据，不自动切换" in " ".join(
+        payload["recommendations"]
+    )
 
 
 def test_diagnose_strategy_reports_candidate_flow_and_simulation_blocker(tmp_path, monkeypatch):
@@ -2516,6 +2543,54 @@ def test_diagnose_schedule_reports_missed_intraday_catchup_jobs(tmp_path):
         "risk_level": "read_only",
         "command_contract_id": "diagnose_schedule",
     }
+
+
+def test_diagnose_schedule_reports_recent_failed_jobs(tmp_path):
+    db_path = tmp_path / "runtime.db"
+    jobs_path = tmp_path / "jobs.json"
+    init_db(db_path)
+    conn = connect(db_path)
+    jobs_path.write_text(
+        json.dumps({
+            "jobs": [
+                {
+                    "name": "A股盘前流水",
+                    "script": "a_stock_pipeline_morning_silent.sh",
+                    "schedule": {"display": "15 9 * * 1-5"},
+                    "enabled": True,
+                    "state": "scheduled",
+                    "last_run_at": "2026-05-25T09:15:16+08:00",
+                    "last_status": "error",
+                    "next_run_at": "2026-05-26T09:15:00+08:00",
+                },
+                {
+                    "name": "A股盘中风控与机会轮巡(合并)",
+                    "script": "a_stock_intraday_monitor_window.sh",
+                    "schedule": {"display": "*/5 9-14 * * 1-5"},
+                    "enabled": True,
+                    "state": "scheduled",
+                    "last_run_at": "2026-05-25T09:55:33+08:00",
+                    "last_status": "ok",
+                    "next_run_at": "2026-05-25T10:00:00+08:00",
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+    try:
+        payload = diagnose_schedule(
+            conn,
+            jobs_path=jobs_path,
+            now=datetime(2026, 5, 25, 1, 58, tzinfo=timezone.utc),
+        )
+    finally:
+        conn.close()
+
+    assert payload["diagnostic"] == "schedule"
+    assert payload["status"] == "warning"
+    assert payload["summary"] == "发现 1 个 A 股关键调度最近运行失败。"
+    assert [item["name"] for item in payload["failed_jobs"]] == ["A股盘前流水"]
+    assert payload["missed_jobs"] == []
 
 
 def test_diagnose_schedule_does_not_mark_jobs_created_after_schedule_as_missed(tmp_path):

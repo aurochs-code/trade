@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import typer
 
 from astock_trading.pipeline.context import build_context
 from astock_trading.platform.cli.common import json_or_text
 from astock_trading.platform.time import local_now_str, local_today
+from astock_trading.platform.watchlist_sync import (
+    build_watchlist_sync_plan,
+    load_candidate_pool_items,
+    load_local_position_items,
+    mx_position_items,
+    watchlist_items_from_mx_result,
+    watchlist_manage_action,
+)
 from astock_trading.reporting.market_formatters import format_market_intel_line
 
 
@@ -505,19 +514,7 @@ def watchlist(
     from astock_trading.pipeline.paper_account import _mx_call
 
     result = asyncio.run(_mx_call(lambda client: client.get_self_select()))
-    data = result.get("data", {})
-    all_results = data.get("allResults", {})
-    result_data = all_results.get("result", {})
-    data_list = result_data.get("dataList", [])
-    stocks = [
-        {
-            "code": item.get("SECURITY_CODE", ""),
-            "name": item.get("SECURITY_SHORT_NAME", ""),
-            "price": item.get("NEWEST_PRICE"),
-            "change_pct": item.get("CHG"),
-        }
-        for item in data_list
-    ]
+    stocks = watchlist_items_from_mx_result(result)
     json_or_text({"count": len(stocks), "stocks": stocks}, as_json)
 
 
@@ -531,3 +528,203 @@ def watchlist_manage(
 
     result = asyncio.run(_mx_call(lambda client: client.manage_self_select(action)))
     json_or_text(result, as_json)
+
+
+@market_intel_app.command("watchlist-sync")
+def watchlist_sync(
+    source: str = typer.Option("candidate-pool", "--source", help="同步来源，目前仅支持 candidate-pool"),
+    include_radar: bool = typer.Option(True, "--include-radar/--no-include-radar", help="是否把强势观察加入目标自选"),
+    preserve_holdings: bool = typer.Option(True, "--preserve-holdings/--no-preserve-holdings", help="保留 MX 模拟盘和本地投影持仓"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只生成计划，不修改 MX 自选"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="确认执行 MX 自选增删"),
+    operation_delay: float = typer.Option(1.5, "--operation-delay", help="每次 MX 自选写入后的等待秒数"),
+    max_retries: int = typer.Option(3, "--max-retries", help="遇到 MX 限频时每个操作最多重试次数"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """按最新候选池重建 MX 自选；默认只预演，执行必须加 --yes。"""
+    if source != "candidate-pool":
+        raise typer.BadParameter("--source 目前仅支持 candidate-pool")
+
+    include_tiers = ("core", "watch", "radar") if include_radar else ("core", "watch")
+    ctx = build_context()
+    try:
+        candidates = load_candidate_pool_items(ctx.conn, include_tiers=include_tiers)
+        local_positions = load_local_position_items(ctx.conn) if preserve_holdings else []
+    finally:
+        ctx.conn.close()
+
+    from astock_trading.pipeline.paper_account import PaperAccount, _mx_call
+
+    current_result = asyncio.run(_mx_call(lambda client: client.get_self_select()))
+    if not _mx_read_ok(current_result):
+        payload = _watchlist_sync_failure_payload(
+            dry_run=bool(dry_run or not yes),
+            include_radar=include_radar,
+            error="读取 MX 当前自选失败，已停止同步，避免按不完整状态误删或漏删自选。",
+            result=current_result,
+        )
+        json_or_text(payload, as_json)
+        raise typer.Exit(1)
+    current_watchlist = watchlist_items_from_mx_result(current_result)
+    paper_positions = []
+    if preserve_holdings:
+        positions_result = asyncio.run(_mx_call(lambda client: client.mock_positions()))
+        if not _mx_read_ok(positions_result, require_code=True):
+            payload = _watchlist_sync_failure_payload(
+                dry_run=bool(dry_run or not yes),
+                include_radar=include_radar,
+                error="读取 MX 模拟盘持仓失败，已停止同步，避免误删持仓自选。",
+                result=positions_result,
+            )
+            json_or_text(payload, as_json)
+            raise typer.Exit(1)
+        paper_positions = mx_position_items(PaperAccount._parse_positions(positions_result))
+    plan = build_watchlist_sync_plan(
+        candidates=candidates,
+        current_watchlist=current_watchlist,
+        mx_positions=paper_positions,
+        local_positions=local_positions,
+        preserve_holdings=preserve_holdings,
+    )
+    plan["dry_run"] = bool(dry_run or not yes)
+    plan["execution_allowed"] = bool(yes and not dry_run)
+    plan["command"] = "market-intel watchlist-sync"
+    plan["include_radar"] = include_radar
+
+    operations = []
+    if yes and not dry_run:
+        specs = [("remove", item) for item in plan["remove"]] + [("add", item) for item in plan["add"]]
+        delay = max(0.0, float(operation_delay or 0.0))
+        retries = max(0, int(max_retries or 0))
+        for index, (operation_action, item) in enumerate(specs):
+            operations.append(_run_watchlist_operation(
+                _mx_call,
+                operation_action,
+                item,
+                delay=delay,
+                max_retries=retries,
+            ))
+            if delay and index < len(specs) - 1:
+                time.sleep(delay)
+        failed = [item for item in operations if not item["ok"]]
+        plan["status"] = "failed" if failed else ("synced" if operations else "up_to_date")
+        plan["operations"] = operations
+        plan["failed_operations"] = failed
+    else:
+        plan["status"] = "dry_run"
+        plan["operations"] = [
+            _planned_watchlist_operation("remove", item)
+            for item in plan["remove"]
+        ] + [
+            _planned_watchlist_operation("add", item)
+            for item in plan["add"]
+        ]
+        plan["next_action"] = {
+            "label": "确认同步 MX 自选",
+            "command": "atrade market-intel watchlist-sync --source candidate-pool --preserve-holdings --yes --json",
+            "risk_level": "external_state_write",
+            "writes_order": False,
+            "requires_user_approval": True,
+        }
+
+    json_or_text(plan, as_json)
+    if plan["status"] == "failed":
+        raise typer.Exit(1)
+
+
+def _planned_watchlist_operation(action: str, item: dict) -> dict:
+    return {
+        "action": action,
+        "code": item.get("code", ""),
+        "name": item.get("name", ""),
+        "mx_action": watchlist_manage_action(action, item),
+        "ok": None,
+    }
+
+
+def _watchlist_operation_payload(action: str, item: dict, mx_action: str, result: dict) -> dict:
+    return {
+        "action": action,
+        "code": item.get("code", ""),
+        "name": item.get("name", ""),
+        "mx_action": mx_action,
+        "ok": _mx_write_ok(result),
+        "result": result,
+    }
+
+
+def _run_watchlist_operation(
+    mx_call,
+    action: str,
+    item: dict,
+    *,
+    delay: float,
+    max_retries: int,
+) -> dict:
+    mx_action = watchlist_manage_action(action, item)
+    attempts = []
+    for attempt in range(max_retries + 1):
+        result = asyncio.run(mx_call(lambda client, mx_action=mx_action: client.manage_self_select(mx_action)))
+        attempts.append(result)
+        if _mx_write_ok(result):
+            payload = _watchlist_operation_payload(action, item, mx_action, result)
+            payload["attempts"] = attempt + 1
+            return payload
+        if not _mx_rate_limited(result) or attempt >= max_retries:
+            payload = _watchlist_operation_payload(action, item, mx_action, result)
+            payload["attempts"] = attempt + 1
+            payload["attempt_results"] = attempts
+            return payload
+        time.sleep(max(5.0, delay * 4 * (attempt + 1)))
+
+    payload = _watchlist_operation_payload(action, item, mx_action, attempts[-1] if attempts else {})
+    payload["attempts"] = len(attempts)
+    payload["attempt_results"] = attempts
+    return payload
+
+
+def _mx_write_ok(result: dict) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if result.get("error"):
+        return False
+    code = result.get("code")
+    if code is None:
+        return True
+    return str(code) in {"0", "200"}
+
+
+def _mx_rate_limited(result: dict) -> bool:
+    if not isinstance(result, dict):
+        return False
+    return str(result.get("code") or result.get("status") or "") == "112"
+
+
+def _mx_read_ok(result: dict, *, require_code: bool = False) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if result.get("error"):
+        return False
+    code = result.get("code")
+    if code is None:
+        return not require_code
+    return str(code) in {"0", "200"}
+
+
+def _watchlist_sync_failure_payload(*, dry_run: bool, include_radar: bool, error: str, result: dict) -> dict:
+    return {
+        "status": "failed",
+        "command": "market-intel watchlist-sync",
+        "source": "candidate-pool",
+        "dry_run": dry_run,
+        "execution_allowed": False,
+        "include_radar": include_radar,
+        "error": error,
+        "mx_result": result,
+        "guardrails": {
+            "writes_order": False,
+            "real_trade": False,
+            "external_state": "mx_watchlist",
+            "stopped_before_external_write": True,
+        },
+    }

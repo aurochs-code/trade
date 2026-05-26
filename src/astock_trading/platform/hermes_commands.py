@@ -30,8 +30,7 @@ from astock_trading.platform.manual_trade_state import (
 )
 from astock_trading.platform.paths import default_state_dir
 from astock_trading.platform.pipeline_policy import filter_unrecovered_failed_runs
-from astock_trading.platform.time import MARKET_TZ, local_now_iso, local_today_str
-from astock_trading.platform.time import local_now
+from astock_trading.platform.time import MARKET_TZ, local_now, local_now_iso, local_today_str, utc_now
 
 ACTION_LABELS = {
     "BUY": "买入意向",
@@ -577,6 +576,8 @@ def build_opportunity_card(conn: Any, *, limit: int = 5) -> dict[str, Any]:
     buy_intents = list(digest.get("pending_manual_trade_items", []) or [])[:limit]
     stale_buy_intents = list(digest.get("stale_manual_trade_items", []) or [])[:limit]
     all_candidate_items = _candidate_pool_items(conn, limit=1000)
+    core_candidates = [item for item in all_candidate_items if item.get("pool_tier") == "core"][:limit]
+    watch_only_candidates = [item for item in all_candidate_items if item.get("pool_tier") == "watch"][:limit]
     candidates = [item for item in all_candidate_items if item.get("pool_tier") != "radar"][:limit]
     radar_candidates = [item for item in all_candidate_items if item.get("pool_tier") == "radar"][:limit]
     current_entry_signals = [
@@ -640,7 +641,9 @@ def build_opportunity_card(conn: Any, *, limit: int = 5) -> dict[str, Any]:
         "current_entry_signals": current_entry_signals,
         "buy_intents": buy_intents,
         "stale_buy_intents": stale_buy_intents,
+        "core_candidates": core_candidates,
         "watch_candidates": candidates,
+        "watch_only_candidates": watch_only_candidates,
         "radar_candidates": radar_candidates,
         "positive_trial_candidates": positive_trials,
         "active_positive_trial_candidates": active_positive_trials,
@@ -1976,7 +1979,7 @@ def _opportunity_next_window_date(scheduled_steps: list[dict[str, Any]]) -> date
         future_dates.append(next_run_local.date())
     if future_dates:
         return min(future_dates)
-    current = datetime.now(MARKET_TZ).date()
+    current = local_now().date()
     candidate = current + timedelta(days=1)
     while candidate.weekday() >= 5:
         candidate += timedelta(days=1)
@@ -2081,7 +2084,7 @@ def _positions(conn: Any) -> list[dict[str, Any]]:
 
 
 def _recent_failed_runs(conn: Any, *, days: int = 3) -> list[dict[str, Any]]:
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    cutoff = (utc_now() - timedelta(days=days)).isoformat()
     failed_rows = conn.execute(
         "SELECT run_id, run_type, started_at, error_message "
         "FROM run_log WHERE status = 'failed' AND started_at >= ? "

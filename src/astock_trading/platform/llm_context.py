@@ -288,7 +288,7 @@ DISCORD_CARD_TEMPLATES = {
 - 主要阻断原因：数据质量 / 入场信号不足 / 核心池为空 / 新鲜度不足
 
 ### 5. 持仓与风险
-- 当前持仓：空仓 / N 只
+- 当前持仓口径：本地投影持仓空仓 / N 只；MX 模拟盘持仓空仓 / N 只 / 暂无账户证据
 - 待人工确认事项：无 / N 条
 - 风险提醒：止损、数据异常、报告滞后、不一致项
 
@@ -344,7 +344,7 @@ DISCORD_CARD_TEMPLATES = {
 - 仍不可买原因：入场信号不足 / 风控否决 / 数据质量不足
 
 ### 6. 持仓与风险
-- 当前持仓：空仓 / N 只
+- 当前持仓口径：本地投影持仓空仓 / N 只；MX 模拟盘持仓空仓 / N 只 / 暂无账户证据
 - 今日浮盈亏：如有则展示
 - 风控事项：止损、移动止盈、异常波动、数据不一致
 - 需人工复核：具体事项
@@ -1571,6 +1571,7 @@ def _close_review_context(
     data_source_failures = _provider_failure_context(trade_plan, diagnostics)
     hot_bridge = _hot_stock_pool_bridge(market_intel, candidate_funnel["pool"]["rows"])
     comparison = _comparison_readiness(market_intel)
+    position_scope = _position_scope_context(conn, store)
     simulation_flow = _simulation_flow_context(conn)
     checklist = _tomorrow_checklist(
         data_source_failures=data_source_failures,
@@ -1583,6 +1584,7 @@ def _close_review_context(
         "date": _today_iso(),
         "data_source_failures": data_source_failures,
         "candidate_funnel": candidate_funnel,
+        "position_scope": position_scope,
         "simulation_flow": simulation_flow,
         "hot_stock_pool_bridge": hot_bridge,
         "comparison_readiness": comparison,
@@ -1591,9 +1593,43 @@ def _close_review_context(
             "收盘复盘必须明确未补齐的数据源，不要只写“数据降级”。",
             "候选池为空时必须引用候选漏斗和主要否决原因，区分暂无合格候选与行情缺失。",
             "必须说明模拟承接链路当前卡点：profile 审批、买入窗口、新鲜买入意向、影子试运行，不能只写“没有交易”。",
+            "持仓必须区分本地投影持仓和 MX 模拟盘持仓；本地投影空仓不能写成全账户空仓。",
             "热门股若未入池，只能写为召回线索或明日复核，不得升级为买入意向。",
             "盘前 vs 收盘数据不足时，写清缺失输入，不要强行做有效性判断。",
         ],
+    }
+
+
+def _position_scope_context(conn: Any, store: EventStore) -> dict:
+    """区分本地投影持仓和 MX 模拟盘账户，避免收盘摘要误写空仓。"""
+    try:
+        portfolio = ExecutionService(store, conn).get_portfolio()
+        positions = portfolio.get("positions", []) or []
+        local_projection = {
+            "scope": "local_projection",
+            "holding_count": int(portfolio.get("holding_count", len(positions)) or 0),
+            "total_market_cents": portfolio.get("total_market_cents", 0) or 0,
+            "positions": positions[:10],
+            "label": "本地投影持仓",
+        }
+    except Exception as exc:
+        local_projection = {
+            "scope": "local_projection",
+            "status": "unavailable",
+            "message": f"本地投影持仓读取失败：{exc}",
+            "holding_count": None,
+            "positions": [],
+            "label": "本地投影持仓",
+        }
+    return {
+        "local_projection": local_projection,
+        "paper_account": {
+            "status": "not_checked",
+            "label": "MX 模拟盘持仓",
+            "command": "atrade paper status --json",
+            "note": "收盘摘要如引用 MX 模拟盘持仓，必须来自 paper status 或巡检报告证据；不能用本地投影空仓覆盖。",
+        },
+        "reporting_rule": "本地投影空仓只能表述为本地投影空仓；没有 MX 账户证据时写 MX 模拟盘暂无账户证据。",
     }
 
 

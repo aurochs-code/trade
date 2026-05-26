@@ -264,6 +264,7 @@ def diagnose_schedule(
             "runtime_contract": runtime_contract,
             "tracked_jobs": [],
             "missed_jobs": [],
+            "failed_jobs": [],
             "disabled_jobs": [],
             "pending_first_run_jobs": [],
             "intraday_simulation": intraday_simulation,
@@ -293,6 +294,7 @@ def diagnose_schedule(
             "runtime_contract": runtime_contract,
             "tracked_jobs": [],
             "missed_jobs": [],
+            "failed_jobs": [],
             "disabled_jobs": [],
             "pending_first_run_jobs": [],
             "intraday_simulation": intraday_simulation,
@@ -312,6 +314,7 @@ def diagnose_schedule(
     ]
     runtime_contract = _schedule_runtime_contract(resolved_jobs_path, tracked_jobs)
     missed_jobs = [job for job in tracked_jobs if job.get("missed_today")]
+    failed_jobs = [job for job in tracked_jobs if _schedule_job_failed(job)]
     disabled_jobs = [job for job in tracked_jobs if not job.get("enabled") or job.get("state") == "paused"]
     pending_first_run_jobs = [job for job in tracked_jobs if job.get("pending_first_run")]
     intraday_simulation = _schedule_intraday_simulation_state(
@@ -323,12 +326,15 @@ def diagnose_schedule(
     runtime_contract_requires_review = runtime_contract.get("status") == "warning"
     status = "warning" if (
         missed_jobs
+        or failed_jobs
         or disabled_jobs
         or runtime_profile_requires_review
         or runtime_contract_requires_review
     ) else "ok"
     if missed_jobs:
         summary = f"发现 {len(missed_jobs)} 个 A 股关键盘中调度今天应运行但未运行。"
+    elif failed_jobs:
+        summary = f"发现 {len(failed_jobs)} 个 A 股关键调度最近运行失败。"
     elif disabled_jobs:
         summary = f"发现 {len(disabled_jobs)} 个 A 股关键盘中调度未启用或已暂停。"
     elif runtime_contract_requires_review:
@@ -356,6 +362,7 @@ def diagnose_schedule(
         "runtime_contract": runtime_contract,
         "tracked_jobs": tracked_jobs,
         "missed_jobs": missed_jobs,
+        "failed_jobs": failed_jobs,
         "disabled_jobs": disabled_jobs,
         "pending_first_run_jobs": pending_first_run_jobs,
         "intraday_simulation": intraday_simulation,
@@ -582,8 +589,8 @@ def diagnose_strategy(conn: Any) -> dict:
     recommendations = _recommendations_with_execution_profile(recommendations, execution_profile)
     if need_multiple_profiles:
         if profiles_available:
-            findings.append("当前执行 profile 仍混合趋势波段、短线延续和回测预设")
             if current_profile == "default":
+                findings.append("当前执行 profile 仍混合趋势波段、短线延续和回测预设")
                 recommendations.append(
                     "profile 已存在；执行任务如需切到 trend_swing，必须先人工确认 ASTOCK_CONFIG_PROFILE"
                 )
@@ -1935,6 +1942,11 @@ def _schedule_job_state(job: dict[str, Any], *, now: datetime) -> dict[str, Any]
         "pending_first_run": pending_first_run,
         "critical_for_intraday_simulation": str(job.get("script") or "") in INTRADAY_CATCHUP_SCRIPTS,
     }
+
+
+def _schedule_job_failed(job: dict[str, Any]) -> bool:
+    status = str(job.get("last_status") or "").strip().lower()
+    return status in {"error", "failed", "failure", "timeout", "cancelled"}
 
 
 def _schedule_display(job: dict[str, Any]) -> str:

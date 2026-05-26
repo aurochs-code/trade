@@ -12,6 +12,7 @@ from astock_trading.platform.cli.common import json_or_text
 RUNTIME_FOLLOW_UP_COMMANDS = [
     "atrade diagnose flow --json",
     "atrade opportunity --json",
+    "atrade review manual-followup --json",
     "atrade digest --json",
     "atrade paper auto-readiness --json",
     "atrade risk trial-guard --json",
@@ -55,6 +56,7 @@ def register_agent_context(app: typer.Typer) -> None:
                 "portfolio": "atrade status --json",
                 "opportunity": "atrade opportunity --json",
                 "opportunity_watch": "atrade opportunity-watch --json",
+                "manual_followup": "atrade review manual-followup --json",
                 "screener": "atrade screener candidates --json",
                 "screener_explain": "atrade screener explain --json",
                 "screener_iterate": "atrade screener iterate --json",
@@ -71,6 +73,10 @@ def register_agent_context(app: typer.Typer) -> None:
                 "market_hot_stocks": "atrade market-intel hot-stocks --json",
                 "market_northbound": "atrade market-intel northbound --json",
                 "market_fund_flow": "atrade market-intel fund-flow CODE --json",
+                "market_watchlist_sync": (
+                    "atrade market-intel watchlist-sync --source candidate-pool "
+                    "--preserve-holdings --dry-run --json"
+                ),
                 "record_buy": "atrade record-buy CODE SHARES PRICE --yes --json",
                 "record_sell": "atrade record-sell CODE SHARES PRICE --yes --json",
                 "manual_trades": "atrade manual-trades list --json",
@@ -444,6 +450,18 @@ def _command_catalog_entries() -> list[dict[str, Any]]:
             },
         ),
         _catalog_entry(
+            id="manual_followup",
+            title="人工复核自动汇总",
+            argv=["atrade", "review", "manual-followup", "--json"],
+            category="review",
+            description="聚合机会卡、影子试运行复盘和模拟承接预检，生成只读人工复核清单；不写状态、不下单。",
+            options={
+                "--skip-account": {"type": "flag", "default": False, "effect": "不请求 MX 账户"},
+                "--limit": {"type": "int", "default": 100, "min": 1, "max": 1000},
+                "--json": {"required_for_automation": True},
+            },
+        ),
+        _catalog_entry(
             id="notify_opportunity_watch",
             title="推送机会变化提醒",
             argv=["atrade", "notify", "opportunity-watch", "--json"],
@@ -455,6 +473,20 @@ def _command_catalog_entries() -> list[dict[str, Any]]:
                 "--dry-run": {"type": "flag", "default": False, "effect": "只生成卡片，不发送且不更新状态"},
                 "--state-file": {"placeholder": "PATH", "required": False},
                 "--reset-state": {"type": "flag", "default": False},
+                "--json": {"required_for_automation": True},
+            },
+        ),
+        _catalog_entry(
+            id="notify_manual_followup",
+            title="推送人工复核自动汇总",
+            argv=["atrade", "notify", "manual-followup", "--json"],
+            category="notification",
+            description="生成人工复核自动汇总并推送 Discord；不提交委托，不记录成交。",
+            risk_level="notification_write",
+            options={
+                "--dry-run": {"type": "flag", "default": False, "effect": "只生成卡片，不发送 Discord"},
+                "--skip-account": {"type": "flag", "default": False, "effect": "不请求 MX 账户"},
+                "--limit": {"type": "int", "default": 100, "min": 1, "max": 1000},
                 "--json": {"required_for_automation": True},
             },
         ),
@@ -710,6 +742,67 @@ def _command_catalog_entries() -> list[dict[str, Any]]:
             arguments={"CODE": {"description": "股票代码"}},
             options={
                 "--days": {"type": "int", "default": 5, "min": 1},
+                "--json": {"required_for_automation": True},
+            },
+        ),
+        _catalog_entry(
+            id="market_watchlist_sync_preview",
+            title="MX 自选同步预演",
+            argv=[
+                "atrade",
+                "market-intel",
+                "watchlist-sync",
+                "--source",
+                "candidate-pool",
+                "--preserve-holdings",
+                "--dry-run",
+                "--json",
+            ],
+            category="market_intel",
+            description=(
+                "按最新核心池、观察池和强势观察生成 MX 自选同步计划；"
+                "保留 MX 模拟盘持仓和本地持仓记录，不修改外部状态。"
+            ),
+            options={
+                "--source": {"allowed_values": ["candidate-pool"], "default": "candidate-pool"},
+                "--include-radar/--no-include-radar": {"type": "flag", "default": True},
+                "--preserve-holdings/--no-preserve-holdings": {"type": "flag", "default": True},
+                "--dry-run": {"type": "flag", "default": True, "effect": "只生成同步计划"},
+                "--operation-delay": {"type": "float", "default": 1.5, "effect": "执行时每次 MX 写入后的等待秒数"},
+                "--max-retries": {"type": "int", "default": 3, "effect": "遇到 MX 限频时每个操作最多重试次数"},
+                "--json": {"required_for_automation": True},
+            },
+        ),
+        _catalog_entry(
+            id="market_watchlist_sync_apply",
+            title="MX 自选同步执行",
+            argv=[
+                "atrade",
+                "market-intel",
+                "watchlist-sync",
+                "--source",
+                "candidate-pool",
+                "--preserve-holdings",
+                "--yes",
+                "--json",
+            ],
+            category="market_intel",
+            description=(
+                "人工确认后清理 MX 非持仓旧自选，并加入最新核心池、观察池和强势观察；"
+                "不会提交 MX 模拟盘订单。"
+            ),
+            writes_state=True,
+            writes_order=False,
+            requires_user_approval=True,
+            risk_level="external_state_write",
+            state_events=["mx.watchlist.updated"],
+            options={
+                "--source": {"allowed_values": ["candidate-pool"], "default": "candidate-pool"},
+                "--include-radar/--no-include-radar": {"type": "flag", "default": True},
+                "--preserve-holdings/--no-preserve-holdings": {"type": "flag", "default": True},
+                "--yes": {"required": True, "effect": "确认写入 MX 自选"},
+                "--operation-delay": {"type": "float", "default": 1.5, "effect": "每次 MX 写入后的等待秒数"},
+                "--max-retries": {"type": "int", "default": 3, "effect": "遇到 MX 限频时每个操作最多重试次数"},
                 "--json": {"required_for_automation": True},
             },
         ),
@@ -1036,6 +1129,7 @@ def _operator_attention() -> dict[str, Any]:
             "atrade commands --json",
             "atrade digest --json",
             "atrade opportunity --json",
+            "atrade review manual-followup --json",
         ],
         "guardrails": RUNTIME_GUARDRAILS,
     }

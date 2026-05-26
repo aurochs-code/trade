@@ -58,3 +58,27 @@ def review_shadow(
         json_or_text(payload, as_json)
     finally:
         conn.close()
+
+
+@review_app.command("manual-followup")
+def review_manual_followup(
+    skip_account: bool = typer.Option(False, "--skip-account", help="不请求 MX 模拟盘账户，只检查本地配置和事件证据"),
+    limit: int = typer.Option(100, "--limit", min=1, max=1000, help="最多扫描影子试运行事件数"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """汇总人工复核清单；只读，不写状态、不下单。"""
+    from astock_trading.pipeline.auto_trade import build_auto_trade_readiness
+    from astock_trading.pipeline.context import build_context
+    from astock_trading.platform.manual_followup import build_manual_followup_report
+
+    ctx = build_context()
+    try:
+        auto_readiness = build_auto_trade_readiness(ctx, include_account=not skip_account)
+        payload = build_manual_followup_report(
+            ctx.conn,
+            auto_readiness=auto_readiness,
+            limit=limit,
+        )
+    finally:
+        ctx.conn.close()
+    json_or_text(payload, as_json)
