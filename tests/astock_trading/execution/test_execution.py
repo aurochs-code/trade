@@ -110,6 +110,18 @@ class TestPositions:
         assert pos.shares == 100
         assert pos.avg_cost == 15.0
 
+    def test_open_position_uses_total_cost_basis_for_cost_price(self, pos_mgr):
+        pos = pos_mgr.open_position(
+            code="002156", name="通富微电", shares=300,
+            avg_cost_cents=7208, cost_basis_cents=2162910,
+            style="momentum", run_id="run_1",
+        )
+
+        assert pos.avg_cost_cents == 7208
+        assert pos.cost_basis_cents == 2162910
+        assert pos.avg_cost == pytest.approx(72.097)
+        assert pos.unrealized_pnl_cents == -510
+
     def test_close_position(self, pos_mgr):
         pos_mgr.open_position(
             code="002138", name="双环传动", shares=100,
@@ -120,6 +132,32 @@ class TestPositions:
 
         # Position should be gone
         assert pos_mgr.get_position("002138") is None
+
+    def test_close_position_realized_pnl_uses_cost_basis(self, pos_mgr):
+        pos_mgr.open_position(
+            code="002156", name="通富微电", shares=300,
+            avg_cost_cents=7208, cost_basis_cents=2162910,
+            style="momentum", run_id="run_1",
+        )
+        pnl = pos_mgr.close_position("002156", 300, 7152, "run_1", reason="manual")
+
+        assert pnl == 7152 * 300 - 2162910
+
+    def test_close_position_supports_partial_sell_with_prorated_cost_basis(self, pos_mgr):
+        pos_mgr.open_position(
+            code="002156", name="通富微电", shares=300,
+            avg_cost_cents=7208, cost_basis_cents=2162910,
+            style="momentum", run_id="run_1",
+        )
+
+        pnl = pos_mgr.close_position("002156", 100, 6600, "run_1", reason="risk_reduce")
+        pos = pos_mgr.get_position("002156")
+
+        assert pnl == -60970
+        assert pos is not None
+        assert pos.shares == 200
+        assert pos.cost_basis_cents == 1441940
+        assert pos.cost_price == pytest.approx(72.097)
 
     def test_get_positions(self, pos_mgr):
         pos_mgr.open_position("001", "A", 100, 1000, "slow_bull", "run_1")
@@ -155,6 +193,21 @@ class TestProjectionRebuild:
         assert len(rebuilt) == 1
         assert rebuilt[0].code == "002"
         assert rebuilt[0].shares == 200
+
+    def test_rebuild_preserves_partial_sell_remaining_position(self, pos_mgr, event_store, db):
+        pos_mgr.open_position(
+            code="002156", name="通富微电", shares=300,
+            avg_cost_cents=7208, cost_basis_cents=2162910,
+            style="momentum", run_id="run_1",
+        )
+        pos_mgr.close_position("002156", 100, 6600, "run_2", reason="risk_reduce")
+
+        rebuilt = PositionProjector(event_store, db).rebuild()
+
+        assert len(rebuilt) == 1
+        assert rebuilt[0].code == "002156"
+        assert rebuilt[0].shares == 200
+        assert rebuilt[0].cost_basis_cents == 1441940
 
     def test_rebuild_empty(self, event_store, db):
         projector = PositionProjector(event_store, db)
@@ -236,6 +289,26 @@ class TestExecutionService:
         assert audit["issues"] == []
         assert audit["order"]["status"] == "filled"
         assert audit["position"]["shares"] == 100
+
+    def test_manual_buy_fee_updates_cost_basis_and_portfolio_cost(self, svc):
+        svc.record_buy(
+            code="002156",
+            name="通富微电",
+            shares=300,
+            price_cents=7208,
+            fee_cents=510,
+            reason="manual_confirmed",
+            run_id="manual_buy_test",
+        )
+
+        pos = svc.get_position("002156")
+        portfolio = svc.get_portfolio()
+
+        assert pos is not None
+        assert pos.avg_cost_cents == 7208
+        assert pos.cost_basis_cents == 2162910
+        assert pos.avg_cost == pytest.approx(72.097)
+        assert portfolio["total_cost_cents"] == 2162910
 
     def test_manual_buy_records_hypothesis_and_outcome_evidence(self, svc, event_store):
         order = svc.record_buy(

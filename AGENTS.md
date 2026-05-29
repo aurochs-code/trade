@@ -96,6 +96,8 @@ Use JSON output for automation:
 - `atrade market-intel northbound --json`
 - `atrade market-intel fund-flow CODE --json`
 - `atrade record-buy CODE SHARES PRICE --yes --json`
+- `atrade record-buy CODE SHARES PRICE --cost-price COST_PRICE --yes --json`
+- `atrade adjust-position-cost CODE --cost-price COST_PRICE --yes --json`
 - `atrade record-sell CODE SHARES PRICE --yes --json`
 - `atrade review shadow --json`
 - `atrade review trades --json`

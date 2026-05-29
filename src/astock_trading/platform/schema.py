@@ -109,6 +109,7 @@ projection_positions = Table(
     Column("style", String(64), nullable=False),
     Column("shares", Integer, nullable=False),
     Column("avg_cost_cents", Integer, nullable=False),
+    Column("cost_basis_cents", Integer),
     Column("entry_date", String(32), nullable=False),
     Column("entry_day_low_cents", Integer),
     Column("stop_loss_cents", Integer),

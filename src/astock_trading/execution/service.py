@@ -10,7 +10,11 @@ from typing import Any, Optional, Protocol, runtime_checkable
 
 from astock_trading.execution.models import Order, OrderSide, Position
 from astock_trading.execution.orders import OrderManager
-from astock_trading.execution.positions import PositionManager, PositionProjector
+from astock_trading.execution.positions import (
+    PositionManager,
+    PositionProjector,
+    allocate_cost_basis_cents,
+)
 from astock_trading.platform.domain_events import (
     TRADE_HYPOTHESIS_RECORDED,
     TRADE_OUTCOME_RECORDED,
@@ -105,8 +109,8 @@ class ExecutionService:
     def get_portfolio(self) -> dict:
         """从投影表读取组合概览。"""
         positions = self.get_positions()
-        total_cost = sum(p.avg_cost_cents * p.shares for p in positions)
-        total_market = sum(p.current_price_cents * p.shares for p in positions)
+        total_cost = sum(p.effective_cost_basis_cents for p in positions)
+        total_market = sum((p.current_price_cents or p.avg_cost_cents) * p.shares for p in positions)
 
         return {
             "holding_count": len(positions),
@@ -149,7 +153,26 @@ class ExecutionService:
                     issues.append("position_cost_mismatch")
         elif order["side"] == "sell":
             if position is not None:
-                issues.append("position_still_open_after_sell")
+                trade_events = self._events.query(stream=f"trade:{order['code']}:{order_id}")
+                outcome = next(
+                    (
+                        e["payload"]
+                        for e in trade_events
+                        if e["event_type"] == TRADE_OUTCOME_RECORDED
+                    ),
+                    None,
+                )
+                expected_after = outcome.get("position_after") if outcome else None
+                if not expected_after:
+                    issues.append("position_still_open_after_sell")
+                elif position["shares"] != expected_after.get("shares"):
+                    issues.append("position_after_shares_mismatch")
+                elif (
+                    position.get("cost_basis_cents")
+                    and expected_after.get("cost_basis_cents")
+                    and position["cost_basis_cents"] != expected_after["cost_basis_cents"]
+                ):
+                    issues.append("position_after_cost_basis_mismatch")
         else:
             issues.append("unknown_order_side")
 
@@ -160,10 +183,15 @@ class ExecutionService:
         if "order.filled" not in event_types:
             issues.append("order_filled_event_missing")
 
-        position_event = "position.opened" if order["side"] == "buy" else "position.closed"
         position_events = self._events.query(stream=f"position:{order['code']}")
-        if not any(e["event_type"] == position_event for e in position_events):
-            issues.append(f"{position_event}_event_missing")
+        position_event_types = {e["event_type"] for e in position_events}
+        if order["side"] == "buy":
+            if "position.opened" not in position_event_types:
+                issues.append("position.opened_event_missing")
+        elif order["side"] == "sell":
+            required_event = "position.reduced" if position is not None else "position.closed"
+            if required_event not in position_event_types:
+                issues.append(f"{required_event}_event_missing")
 
         balance = self._conn.execute(
             "SELECT * FROM projection_balances WHERE scope = 'main'"
@@ -214,6 +242,7 @@ class ExecutionService:
             self._positions.open_position(
                 code=code, name=name, shares=shares,
                 avg_cost_cents=result["fill_price_cents"],
+                cost_basis_cents=result["fill_price_cents"] * shares + result.get("fee_cents", 0),
                 style=style, run_id=run_id,
             )
             self._notify_trade({
@@ -261,6 +290,7 @@ class ExecutionService:
                     code=code, shares=shares,
                     sell_price_cents=result["fill_price_cents"],
                     run_id=run_id, reason=reason,
+                    sell_fee_cents=result.get("fee_cents", 0),
                 )
             self._notify_trade({
                 "side": "sell", "code": code, "name": name,
@@ -286,7 +316,7 @@ class ExecutionService:
     ) -> Order:
         """
         手动录入已成交的卖出记录（绕过 broker）。
-        走事件化流程：order.created → order.filled → position.closed。
+        走事件化流程：order.created → order.filled → position.reduced/position.closed。
         fill_order 会同步更新现金（gross - fee）。
         """
         if run_id:
@@ -301,17 +331,19 @@ class ExecutionService:
         if pos is None:
             raise ValueError(f"持仓不存在：{code}")
 
-        if shares != pos.shares:
-            raise ValueError(
-                f"部分卖出暂不支持。当前持仓 {pos.shares} 股，传入了 {shares} 股。"
-                f"请传入 shares={pos.shares}（全仓）来卖出。"
-            )
-
         if shares <= 0:
             raise ValueError(f"shares 必须 > 0，当前为 {shares}")
 
+        if shares > pos.shares:
+            raise ValueError(f"卖出股数不能超过当前持仓：{shares} > {pos.shares}")
+
         if price_cents <= 0:
             raise ValueError(f"price_cents 必须 > 0，当前为 {price_cents}")
+        sold_cost_basis_cents = allocate_cost_basis_cents(
+            pos.effective_cost_basis_cents,
+            pos.shares,
+            shares,
+        )
 
         order = self._orders.create_order(
             code=code, name=name, side=OrderSide.SELL,
@@ -346,6 +378,7 @@ class ExecutionService:
             code=code, shares=shares,
             sell_price_cents=price_cents,
             run_id=rid, reason=reason or "manual",
+            sell_fee_cents=fee_cents,
         )
         self._record_trade_outcome(
             order_id=order.order_id,
@@ -360,6 +393,7 @@ class ExecutionService:
             source_event_id=source_event_id,
             source_score_event_id=source_score_event_id,
             position_after=self._positions.get_position(code),
+            cost_basis_cents=sold_cost_basis_cents,
             realized_pnl_cents=realized_pnl_cents,
         )
 
@@ -384,6 +418,7 @@ class ExecutionService:
         source_event_id: str = "",
         source_score_event_id: str = "",
         hypothesis: dict | None = None,
+        cost_basis_cents: int | None = None,
     ) -> Order:
         """
         手动录入已成交的买入记录（绕过 broker）。
@@ -401,6 +436,11 @@ class ExecutionService:
 
         if price_cents <= 0:
             raise ValueError(f"price_cents 必须 > 0，当前为 {price_cents}")
+        effective_cost_basis_cents = (
+            cost_basis_cents
+            if cost_basis_cents and cost_basis_cents > 0
+            else price_cents * shares + fee_cents
+        )
 
         from astock_trading.strategy.models import Style
         _style_map = {"growth": Style.MOMENTUM, "slow_bull": Style.SLOW_BULL, "momentum": Style.MOMENTUM}
@@ -419,6 +459,7 @@ class ExecutionService:
             shares=shares,
             price_cents=price_cents,
             fee_cents=fee_cents,
+            cost_basis_cents=effective_cost_basis_cents,
             reason=reason or "manual",
             run_id=rid,
             source_event_id=source_event_id,
@@ -438,6 +479,7 @@ class ExecutionService:
         position = self._positions.open_position(
             code=code, name=name or code, shares=shares,
             avg_cost_cents=price_cents,
+            cost_basis_cents=effective_cost_basis_cents,
             style=style_enum,
             run_id=rid,
         )
@@ -449,6 +491,7 @@ class ExecutionService:
             shares=shares,
             fill_price_cents=price_cents,
             fee_cents=fee_cents,
+            cost_basis_cents=effective_cost_basis_cents,
             reason=reason or "manual",
             run_id=rid,
             source_event_id=source_event_id,
@@ -463,6 +506,35 @@ class ExecutionService:
         })
 
         return order
+
+    def adjust_position_cost_basis(
+        self,
+        code: str,
+        cost_basis_cents: int,
+        reason: str = "",
+        run_id: str = "",
+    ) -> dict:
+        """按券商成本价/总成本校准本地持仓成本。"""
+        if run_id:
+            rid = run_id
+        else:
+            import uuid
+            rid = f"position_cost_adjust_{code}_{uuid.uuid4().hex[:8]}"
+        before = self._positions.get_position(code)
+        if before is None:
+            raise ValueError(f"持仓不存在：{code}")
+        event_id, after = self._positions.adjust_cost_basis(
+            code=code,
+            cost_basis_cents=cost_basis_cents,
+            run_id=rid,
+            reason=reason or "manual_cost_adjustment",
+        )
+        return {
+            "event_id": event_id,
+            "run_id": rid,
+            "position_before": before,
+            "position_after": after,
+        }
 
     # ------------------------------------------------------------------
     # 重建
@@ -494,6 +566,7 @@ class ExecutionService:
         shares: int,
         price_cents: int,
         fee_cents: int,
+        cost_basis_cents: int | None = None,
         reason: str,
         run_id: str,
         source_event_id: str = "",
@@ -512,6 +585,8 @@ class ExecutionService:
             "source_score_event_id": source_score_event_id,
             "hypothesis": _normalize_hypothesis(hypothesis, reason),
         }
+        if cost_basis_cents is not None:
+            payload["cost_basis_cents"] = cost_basis_cents
         return self._events.append(
             stream=f"trade:{code}:{order_id}",
             stream_type="trade",
@@ -530,6 +605,7 @@ class ExecutionService:
         shares: int,
         fill_price_cents: int,
         fee_cents: int,
+        cost_basis_cents: int | None = None,
         reason: str,
         run_id: str,
         source_event_id: str = "",
@@ -551,6 +627,8 @@ class ExecutionService:
             "source_score_event_id": source_score_event_id,
             "position_after": position_after.to_dict() if position_after else None,
         }
+        if cost_basis_cents is not None:
+            payload["cost_basis_cents"] = cost_basis_cents
         if realized_pnl_cents is not None:
             payload["realized_pnl_cents"] = realized_pnl_cents
         return self._events.append(

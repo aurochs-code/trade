@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from typer.testing import CliRunner
 
 from astock_trading.platform.cli.screener import _scan_limit
@@ -355,7 +356,7 @@ def test_doctor_json_via_bin_trade(tmp_path):
 
     payload = json.loads(result.stdout)
     assert payload["status"] == "ok"
-    assert payload["db"]["schema_version"] == 4
+    assert payload["db"]["schema_version"] == 5
     assert payload["config"]["version"].startswith("v")
     assert "installed" in payload["mcp"]
     assert payload["timezone"] == "Asia/Shanghai"
@@ -1348,7 +1349,7 @@ def test_db_status_initializes_schema_version_via_bin_trade(tmp_path):
     )
 
     payload = json.loads(result.stdout)
-    assert payload["schema_version"] == 4
+    assert payload["schema_version"] == 5
 
 
 def test_history_signal_json_via_bin_trade(tmp_path):
@@ -1650,6 +1651,13 @@ def test_agent_command_catalog_json_via_bin_trade():
     assert by_id["market_watchlist_sync_apply"]["options"]["--max-retries"]["default"] == 3
     assert by_id["record_buy"]["writes_state"] is True
     assert by_id["record_buy"]["requires_user_approval"] is True
+    assert by_id["record_buy"]["options"]["--cost-price"]["type"] == "float"
+    assert by_id["adjust_position_cost"]["command"] == (
+        "atrade adjust-position-cost CODE --cost-price COST_PRICE --yes --json"
+    )
+    assert by_id["adjust_position_cost"]["writes_state"] is True
+    assert by_id["adjust_position_cost"]["requires_user_approval"] is True
+    assert by_id["adjust_position_cost"]["state_events"] == ["position.cost_basis_adjusted"]
 
 
 def test_notify_manual_confirmation_dry_run_json(tmp_path):
@@ -2470,6 +2478,98 @@ def test_record_buy_json_via_bin_trade(tmp_path):
     assert payload["position_after"]["code"] == "002138"
 
 
+def test_record_buy_json_accepts_broker_cost_price(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+    env = _cli_env(tmp_path)
+
+    result = subprocess.run(
+        [
+            str(cli),
+            "record-buy",
+            "002156",
+            "300",
+            "72.080",
+            "--name",
+            "通富微电",
+            "--cost-price",
+            "72.097",
+            "--yes",
+            "--json",
+        ],
+        cwd=root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["position_after"]["avg_cost_cents"] == 7208
+    assert payload["position_after"]["cost_basis_cents"] == 2162910
+    assert payload["position_after"]["cost_price"] == pytest.approx(72.097)
+
+    status = subprocess.run(
+        [str(cli), "status", "--json"],
+        cwd=root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    portfolio = json.loads(status.stdout)
+    assert portfolio["total_cost_cents"] == 2162910
+
+
+def test_adjust_position_cost_json_via_bin_trade(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+    env = _cli_env(tmp_path)
+
+    subprocess.run(
+        [
+            str(cli),
+            "record-buy",
+            "002156",
+            "300",
+            "72.080",
+            "--name",
+            "通富微电",
+            "--yes",
+            "--json",
+        ],
+        cwd=root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = subprocess.run(
+        [
+            str(cli),
+            "adjust-position-cost",
+            "002156",
+            "--cost-price",
+            "72.097",
+            "--reason",
+            "同步券商成本价",
+            "--yes",
+            "--json",
+        ],
+        cwd=root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "adjusted"
+    assert payload["position_before"]["cost_basis_cents"] == 2162400
+    assert payload["position_after"]["cost_basis_cents"] == 2162910
+    assert payload["position_after"]["cost_price"] == pytest.approx(72.097)
+
+
 def test_record_buy_json_accepts_decision_signal_and_manual_reason_aliases(tmp_path):
     from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
@@ -2569,6 +2669,65 @@ def test_record_sell_json_via_bin_trade(tmp_path):
     assert payload["audit"]["ok"] is True
     assert payload["position_before"]["code"] == "002138"
     assert payload["position_after"] is None
+
+
+def test_record_sell_json_supports_partial_sell_via_bin_trade(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+    env = _cli_env(tmp_path)
+
+    subprocess.run(
+        [
+            str(cli),
+            "record-buy",
+            "002156",
+            "300",
+            "72.080",
+            "--name",
+            "通富微电",
+            "--style",
+            "momentum",
+            "--cost-price",
+            "72.097",
+            "--yes",
+            "--json",
+        ],
+        cwd=root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = subprocess.run(
+        [
+            str(cli),
+            "record-sell",
+            "002156",
+            "100",
+            "66.000",
+            "--reason",
+            "跌破风控线先减仓",
+            "--yes",
+            "--json",
+        ],
+        cwd=root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "recorded"
+    assert payload["side"] == "sell"
+    assert payload["code"] == "002156"
+    assert payload["shares"] == 100
+    assert payload["realized_pnl_cents"] == -60970
+    assert payload["position_before"]["shares"] == 300
+    assert payload["position_after"]["shares"] == 200
+    assert payload["position_after"]["cost_basis_cents"] == 1441940
+    assert payload["position_after"]["cost_price"] == pytest.approx(72.097)
+    assert payload["audit"]["ok"] is True
 
 
 def test_review_shadow_json_reports_paper_real_deviation_via_bin_trade(tmp_path):

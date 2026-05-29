@@ -78,33 +78,80 @@ class ProjectionUpdater:
                 p = ev["payload"]
 
                 if et == "position.opened":
+                    cost_basis_cents = p.get("cost_basis_cents") or p["avg_cost_cents"] * p["shares"]
                     pos_data = {
                         "code": p["code"],
                         "name": p.get("name", p["code"]),
                         "style": p.get("style", "unknown"),
                         "shares": p["shares"],
                         "avg_cost_cents": p["avg_cost_cents"],
+                        "cost_basis_cents": cost_basis_cents,
                         "entry_date": ev.get("occurred_at", "")[:10],
                         "entry_day_low_cents": p.get("entry_day_low_cents", 0),
                         "highest_since_entry_cents": p.get("avg_cost_cents", 0),
                         "current_price_cents": p.get("avg_cost_cents", 0),
+                        "unrealized_pnl_cents": p.get("avg_cost_cents", 0) * p["shares"] - cost_basis_cents,
                         "updated_at": ev.get("occurred_at", ""),
                     }
+                elif et == "position.cost_basis_adjusted" and pos_data:
+                    pos_data["cost_basis_cents"] = p.get("cost_basis_cents") or pos_data["cost_basis_cents"]
+                    pos_data["unrealized_pnl_cents"] = (
+                        (pos_data["current_price_cents"] or pos_data["avg_cost_cents"]) * pos_data["shares"]
+                        - pos_data["cost_basis_cents"]
+                    )
+                    pos_data["updated_at"] = ev.get("occurred_at", "")
+                elif et == "position.reduced" and pos_data:
+                    remaining_shares = int(
+                        p.get("remaining_shares", pos_data["shares"] - int(p.get("shares", 0)))
+                    )
+                    if remaining_shares <= 0:
+                        pos_data = None
+                        continue
+                    sold_cost_basis_cents = p.get("cost_basis_cents")
+                    remaining_cost_basis_cents = p.get("remaining_cost_basis_cents")
+                    if remaining_cost_basis_cents is None:
+                        if sold_cost_basis_cents is None:
+                            sold_cost_basis_cents = (
+                                pos_data["cost_basis_cents"] * int(p.get("shares", 0))
+                                + pos_data["shares"] // 2
+                            ) // pos_data["shares"]
+                        remaining_cost_basis_cents = (
+                            pos_data["cost_basis_cents"] - int(sold_cost_basis_cents)
+                        )
+                    current_price_cents = int(
+                        p.get("remaining_current_price_cents")
+                        or p.get("sell_price_cents")
+                        or pos_data["current_price_cents"]
+                        or pos_data["avg_cost_cents"]
+                    )
+                    pos_data["shares"] = remaining_shares
+                    pos_data["cost_basis_cents"] = int(remaining_cost_basis_cents)
+                    pos_data["current_price_cents"] = current_price_cents
+                    pos_data["highest_since_entry_cents"] = max(
+                        pos_data["highest_since_entry_cents"],
+                        current_price_cents,
+                    )
+                    pos_data["unrealized_pnl_cents"] = (
+                        current_price_cents * remaining_shares - pos_data["cost_basis_cents"]
+                    )
+                    pos_data["updated_at"] = ev.get("occurred_at", "")
                 elif et == "position.closed":
                     pos_data = None
 
             if pos_data:
                 self._conn.execute(
                     """INSERT OR REPLACE INTO projection_positions
-                       (code, name, style, shares, avg_cost_cents, entry_date,
+                       (code, name, style, shares, avg_cost_cents, cost_basis_cents, entry_date,
                         entry_day_low_cents, highest_since_entry_cents,
-                        current_price_cents, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        current_price_cents, unrealized_pnl_cents, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (pos_data["code"], pos_data["name"], pos_data["style"],
                      pos_data["shares"], pos_data["avg_cost_cents"],
+                     pos_data["cost_basis_cents"],
                      pos_data["entry_date"], pos_data["entry_day_low_cents"],
                      pos_data["highest_since_entry_cents"],
-                     pos_data["current_price_cents"], pos_data["updated_at"]),
+                     pos_data["current_price_cents"],
+                     pos_data["unrealized_pnl_cents"], pos_data["updated_at"]),
                 )
                 count += 1
 

@@ -59,7 +59,7 @@ def _portfolio(conn: Any) -> dict:
     positions = [
         _row_dict(row)
         for row in conn.execute(
-            """SELECT code, name, style, shares, avg_cost_cents, entry_date,
+            """SELECT code, name, style, shares, avg_cost_cents, cost_basis_cents, entry_date,
                       current_price_cents, unrealized_pnl_cents, currency, updated_at
                FROM projection_positions
                ORDER BY entry_date, code

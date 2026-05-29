@@ -135,6 +135,20 @@ atrade record-buy 002138 100 15.00 --yes --json \
   --review-after-days 3
 ```
 
+如果券商 App 显示的持仓成本价已经摊入费用，买入补录时追加
+`--cost-price`，持仓收益会按券商总成本口径计算：
+
+```bash
+atrade record-buy 002156 300 72.080 --cost-price 72.097 --yes --json
+```
+
+如果买入已补录完成，后续才发现本地成本价和券商不一致，使用成本校准命令
+追加修正事件；该命令只改本地持仓成本，不提交任何订单：
+
+```bash
+atrade adjust-position-cost 002156 --cost-price 72.097 --reason "同步券商成本价" --yes --json
+```
+
 `record-buy` / `record-sell` 会额外写入 `trade.hypothesis.recorded` 和
 `trade.outcome.recorded`，用于把交易前假设、成交后结果和后续复盘证据串起来。
 

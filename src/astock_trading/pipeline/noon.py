@@ -141,7 +141,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
 
     # 0. 始终刷新持仓价格（不受幂等影响），日报发送前确保数据最新
     from astock_trading.pipeline.helpers import refresh_position_prices
-    refresh_position_prices(ctx)
+    refresh_position_prices(ctx, run_id=run_id)
 
     # 1. 大盘
     market_state, index_data = asyncio.run(ctx.market_svc.collect_market_state(run_id))

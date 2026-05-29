@@ -75,6 +75,7 @@ class Position:
     shares: int
     avg_cost_cents: int
     entry_date: str
+    cost_basis_cents: int = 0
     entry_day_low_cents: int = 0
     stop_loss_cents: int = 0
     take_profit_cents: int = 0
@@ -85,8 +86,24 @@ class Position:
     currency: str = "CNY"  # "CNY" | "HKD"
 
     @property
+    def effective_cost_basis_cents(self) -> int:
+        if self.cost_basis_cents > 0:
+            return self.cost_basis_cents
+        return self.avg_cost_cents * self.shares
+
+    @property
     def avg_cost(self) -> float:
+        if self.shares > 0:
+            return self.effective_cost_basis_cents / self.shares / 100
         return self.avg_cost_cents / 100
+
+    @property
+    def trade_price(self) -> float:
+        return self.avg_cost_cents / 100
+
+    @property
+    def cost_price(self) -> float:
+        return self.avg_cost
 
     @property
     def current_price(self) -> float:
@@ -96,6 +113,13 @@ class Position:
     def unrealized_pnl(self) -> float:
         return self.unrealized_pnl_cents / 100
 
+    @property
+    def unrealized_pnl_pct(self) -> float:
+        cost_basis = self.effective_cost_basis_cents
+        if cost_basis <= 0:
+            return 0.0
+        return self.unrealized_pnl_cents / cost_basis * 100
+
     def to_dict(self) -> dict:
         return {
             "code": self.code,
@@ -103,6 +127,9 @@ class Position:
             "style": self.style,
             "shares": self.shares,
             "avg_cost_cents": self.avg_cost_cents,
+            "trade_price": self.trade_price,
+            "cost_basis_cents": self.effective_cost_basis_cents,
+            "cost_price": self.cost_price,
             "entry_date": self.entry_date,
             "entry_day_low_cents": self.entry_day_low_cents,
             "stop_loss_cents": self.stop_loss_cents,
@@ -110,6 +137,7 @@ class Position:
             "highest_since_entry_cents": self.highest_since_entry_cents,
             "current_price_cents": self.current_price_cents,
             "unrealized_pnl_cents": self.unrealized_pnl_cents,
+            "unrealized_pnl_pct": self.unrealized_pnl_pct,
         }
 
 

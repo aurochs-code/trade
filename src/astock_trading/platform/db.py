@@ -16,7 +16,7 @@ from typing import Optional
 from astock_trading.platform.database import Database, DatabaseSettings
 
 _BASE_SCHEMA_VERSION = 1
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 # ---------------------------------------------------------------------------
 # Schema DDL
@@ -135,6 +135,7 @@ CREATE TABLE IF NOT EXISTS projection_positions (
     style           TEXT NOT NULL,
     shares          INTEGER NOT NULL,
     avg_cost_cents  INTEGER NOT NULL,
+    cost_basis_cents INTEGER,
     entry_date      TEXT NOT NULL,
     entry_day_low_cents INTEGER,
     stop_loss_cents INTEGER,
@@ -265,7 +266,14 @@ def _runtime_database() -> Database:
 
 def _ensure_runtime_schema_version(conn) -> None:
     _ensure_schema_version_table(conn)
-    if get_schema_version(conn) < _SCHEMA_VERSION:
+    current_version = get_schema_version(conn)
+    if current_version == 0:
+        _set_schema_version(conn, _BASE_SCHEMA_VERSION)
+        current_version = _BASE_SCHEMA_VERSION
+    current_version = _apply_migrations(conn, current_version)
+    if current_version >= 5 and not _column_exists(conn, "projection_positions", "cost_basis_cents"):
+        _migrate_to_v5(conn)
+    if current_version < _SCHEMA_VERSION:
         _set_schema_version(conn, _SCHEMA_VERSION)
 
 
@@ -306,6 +314,17 @@ def _ensure_schema_version_table(conn: sqlite3.Connection) -> None:
 
 
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    dialect = getattr(conn, "dialect", "")
+    if str(dialect).startswith("mysql"):
+        row = conn.execute(
+            """SELECT COUNT(*)
+               FROM information_schema.columns
+               WHERE table_schema = DATABASE()
+                 AND table_name = ?
+                 AND column_name = ?""",
+            (table, column),
+        ).fetchone()
+        return bool(row and row[0])
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     return any(row["name"] == column for row in rows)
 
@@ -352,10 +371,24 @@ def _migrate_to_v4(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_v5(conn: sqlite3.Connection) -> None:
+    if not _column_exists(conn, "projection_positions", "cost_basis_cents"):
+        conn.execute(
+            "ALTER TABLE projection_positions "
+            "ADD COLUMN cost_basis_cents INTEGER"
+        )
+    conn.execute(
+        """UPDATE projection_positions
+           SET cost_basis_cents = avg_cost_cents * shares
+           WHERE cost_basis_cents IS NULL OR cost_basis_cents = 0"""
+    )
+
+
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_to_v2,
     3: _migrate_to_v3,
     4: _migrate_to_v4,
+    5: _migrate_to_v5,
 }
 
 
@@ -378,10 +411,7 @@ def init_db(db_path: Optional[Path] = None):
         db.create_schema()
         conn = db.connect()
         try:
-            _ensure_schema_version_table(conn)
-            current_version = get_schema_version(conn)
-            if current_version < _SCHEMA_VERSION:
-                _set_schema_version(conn, _SCHEMA_VERSION)
+            _ensure_runtime_schema_version(conn)
             return db.settings.url
         finally:
             conn.close()
@@ -397,6 +427,8 @@ def init_db(db_path: Optional[Path] = None):
             current_version = _BASE_SCHEMA_VERSION
 
         current_version = _apply_migrations(conn, current_version)
+        if current_version >= 5 and not _column_exists(conn, "projection_positions", "cost_basis_cents"):
+            _migrate_to_v5(conn)
         if current_version < _SCHEMA_VERSION:
             _set_schema_version(conn, _SCHEMA_VERSION)
         return path

@@ -20,6 +20,19 @@ def _now_iso() -> str:
     return utc_now_iso()
 
 
+def _position_cost_basis_cents(row: Any) -> int:
+    if "cost_basis_cents" in row.keys() and row["cost_basis_cents"]:
+        return row["cost_basis_cents"]
+    return row["avg_cost_cents"] * row["shares"]
+
+
+def _position_cost_price(row: Any) -> float:
+    shares = row["shares"] or 0
+    if shares <= 0:
+        return row["avg_cost_cents"] / 100
+    return _position_cost_basis_cents(row) / shares / 100
+
+
 class ReportGenerator:
     """报告生成器 — 只读消费事实和投影。"""
 
@@ -74,12 +87,12 @@ class ReportGenerator:
         lines.append("|------|------|------|------|------|------|------|--------|")
 
         for r in rows:
-            cost = r["avg_cost_cents"] / 100
+            cost = _position_cost_price(r)
             price = (r["current_price_cents"] or 0) / 100
-            pnl = ((r["current_price_cents"] or 0) - r["avg_cost_cents"]) * r["shares"] / 100
+            pnl = ((r["current_price_cents"] or 0) * r["shares"] - _position_cost_basis_cents(r)) / 100
             lines.append(
                 f"| {r['code']} | {r['name']} | {r['style']} "
-                f"| {r['shares']} | {cost:.2f} | {price:.2f} "
+                f"| {r['shares']} | {cost:.3f} | {price:.2f} "
                 f"| {pnl:+.0f} | {r['entry_date']} |"
             )
 

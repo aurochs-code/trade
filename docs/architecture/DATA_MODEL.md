@@ -29,7 +29,7 @@ market_bars (symbol+bar_date+period PK, open/high/low/close_cents, volume, amoun
 ## 投影表（全部可删可重建）
 
 ```sql
-projection_positions (code PK, name, style, shares, avg_cost_cents, entry_date, ...)
+projection_positions (code PK, name, style, shares, avg_cost_cents, cost_basis_cents, entry_date, ...)
 projection_orders (order_id PK, code, side, shares, price_cents, status, broker, ...)
 projection_balances (scope PK, cash_cents, total_asset_cents, weekly_buy_count, ...)
 projection_candidate_pool (code+pool_tier PK, name, score, added_at, streak_days, note)

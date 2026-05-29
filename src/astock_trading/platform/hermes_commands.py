@@ -2077,7 +2077,7 @@ def _latest_code_event(store: EventStore, event_type: str, code: str) -> dict[st
 
 def _positions(conn: Any) -> list[dict[str, Any]]:
     rows = conn.execute(
-        "SELECT code, name, shares, avg_cost_cents, current_price_cents, unrealized_pnl_cents "
+        "SELECT code, name, shares, avg_cost_cents, cost_basis_cents, current_price_cents, unrealized_pnl_cents "
         "FROM projection_positions ORDER BY updated_at DESC LIMIT 20"
     ).fetchall()
     return [dict(row) for row in rows]

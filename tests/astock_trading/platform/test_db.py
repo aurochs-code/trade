@@ -18,12 +18,13 @@ def test_init_db_sets_latest_schema_version(tmp_path):
     conn = connect(db_path)
     try:
         version = get_schema_version(conn)
-        assert version == 4
+        assert version == 5
 
         columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(projection_positions)")
         }
         assert "currency" in columns
+        assert "cost_basis_cents" in columns
         stream_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(event_streams)")
         }
@@ -65,7 +66,7 @@ def test_runtime_db_uses_sqlalchemy_url(monkeypatch, tmp_path):
     init_db()
     conn = connect()
     try:
-        assert get_schema_version(conn) == 4
+        assert get_schema_version(conn) == 5
         conn.execute(
             "INSERT INTO event_log "
             "(event_id, stream, stream_type, stream_version, event_type, payload_json, metadata_json, occurred_at) "
@@ -143,12 +144,13 @@ def test_init_db_migrates_v1_projection_positions(tmp_path):
     conn = connect(db_path)
     try:
         version = get_schema_version(conn)
-        assert version == 4
+        assert version == 5
 
         columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(projection_positions)")
         }
         assert "currency" in columns
+        assert "cost_basis_cents" in columns
         stream_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(event_streams)")
         }

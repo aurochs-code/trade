@@ -1,6 +1,7 @@
 """Test all four pipelines with mock data (no network)."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 import pandas as pd
@@ -116,6 +117,99 @@ def _assert_market_history_snapshot(ctx, run_id: str, phase: str) -> None:
     assert {row["phase"] for row in rows} == {phase}
     market_payload = json.loads(next(row["payload_json"] for row in rows if row["snapshot_type"] == "market"))
     assert market_payload["signal"] in {"GREEN", "YELLOW", "RED", "CLEAR"}
+
+
+class TestPositionPriceRefresh:
+    def test_update_position_price_uses_portable_timestamp_sql(self):
+        class FakeResult:
+            def __init__(self, row):
+                self._row = row
+
+            def fetchone(self):
+                return self._row
+
+        class FakeConn:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                if "highest_since_entry_cents" in sql:
+                    return FakeResult({
+                        "highest_since_entry_cents": 7208,
+                        "current_price_cents": 7208,
+                        "avg_cost_cents": 7208,
+                        "cost_basis_cents": 2162910,
+                        "shares": 300,
+                    })
+                if "avg_cost_cents" in sql:
+                    return FakeResult({
+                        "avg_cost_cents": 7208,
+                        "cost_basis_cents": 2162910,
+                        "shares": 300,
+                    })
+                return FakeResult(None)
+
+        from astock_trading.pipeline.helpers import _update_position_price
+
+        conn = FakeConn()
+        _update_position_price(SimpleNamespace(conn=conn), "002156", 71.52)
+
+        update_sql, update_params = conn.calls[-1]
+        assert "datetime(" not in update_sql
+        assert "updated_at = ?" in update_sql
+        assert update_params[:3] == (7152, 7208, -17310)
+        assert update_params[-1] == "002156"
+
+    def test_refresh_uses_intraday_quote_for_position_pnl(self, ctx, monkeypatch):
+        ctx.exec_svc.record_buy(
+            code="002156",
+            name="通富微电",
+            shares=300,
+            price_cents=7208,
+            fee_cents=510,
+            reason="manual",
+            run_id="manual_buy",
+        )
+
+        async def fake_collect_intraday_batch(codes, run_id=None):
+            assert codes == [{"code": "002156", "name": "通富微电"}]
+            return [StockSnapshot(
+                code="002156",
+                name="通富微电",
+                quote=StockQuote(
+                    code="002156",
+                    name="通富微电",
+                    price=71.52,
+                    open=72.97,
+                    high=78.56,
+                    low=71.43,
+                    close=71.52,
+                    volume=283496432,
+                    amount=21114037308.55,
+                    change_pct=-5.13,
+                ),
+            )]
+
+        async def fail_full_snapshot(*args, **kwargs):
+            raise AssertionError("持仓刷新应优先走轻量行情接口")
+
+        monkeypatch.setattr(ctx.market_svc, "collect_intraday_batch", fake_collect_intraday_batch)
+        monkeypatch.setattr(ctx.market_svc, "collect_batch", fail_full_snapshot)
+
+        from astock_trading.pipeline.helpers import refresh_position_prices
+
+        refreshed = refresh_position_prices(ctx, run_id="run_close")
+        row = ctx.conn.execute(
+            """SELECT current_price_cents, unrealized_pnl_cents
+               FROM projection_positions
+               WHERE code = ?""",
+            ("002156",),
+        ).fetchone()
+
+        assert refreshed == {"002156": 71.52}
+        assert row["current_price_cents"] == 7152
+        assert row["unrealized_pnl_cents"] == -17310
 
 
 class TestMorningPipeline:

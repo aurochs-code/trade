@@ -97,6 +97,7 @@ TERM_CN = {
     "manual trade": "人工确认交易",
     "manual trades": "人工确认交易",
     "record-buy": "买入记录命令",
+    "adjust-position-cost": "持仓成本校准命令",
     "record-sell": "卖出记录命令",
     "BUY": "买入意向",
     "SELL": "卖出意向",
@@ -233,6 +234,7 @@ GLOSSARY_ORDER = [
     "manual_trades",
     "portfolio",
     "record-buy",
+    "adjust-position-cost",
     "record-sell",
     "market_intel",
     "sector_heatmap",
@@ -345,7 +347,7 @@ DISCORD_CARD_TEMPLATES = {
 
 ### 6. 持仓与风险
 - 当前持仓口径：本地投影持仓空仓 / N 只；MX 模拟盘持仓空仓 / N 只 / 暂无账户证据
-- 今日浮盈亏：如有则展示
+- 持仓盈亏口径：今日已实现 / 当前未实现 / 合计分开展示；发生减仓时不得只按剩余股数写总盈亏
 - 风控事项：止损、移动止盈、异常波动、数据不一致
 - 需人工复核：具体事项
 
@@ -456,7 +458,7 @@ def _summary_guardrails(mode: str) -> list[str]:
         "只基于本上下文总结，不要臆测外部事实。",
         "每个判断段落必须引用 evidence_id；没有证据编号的内容只能写“暂无可用数据”。",
         "证据编号必须引用同一数据段或同一标的的编号，不要跨段借用。",
-        "不要调用、建议自动调用或伪造 record-buy / record-sell。",
+        "不要调用、建议自动调用或伪造 record-buy / record-sell / adjust-position-cost。",
         "明确区分：观察、核心池、买入意向；观察不等于买入。",
         "热门板块、热门新闻、热门股只作为市场背景和复盘线索，不等于买入依据。",
         "数据质量降级时，不要提高执行信心。",
@@ -1596,7 +1598,94 @@ def _close_review_context(
             "持仓必须区分本地投影持仓和 MX 模拟盘持仓；本地投影空仓不能写成全账户空仓。",
             "热门股若未入池，只能写为召回线索或明日复核，不得升级为买入意向。",
             "盘前 vs 收盘数据不足时，写清缺失输入，不要强行做有效性判断。",
+            "持仓盈亏必须区分今日已实现盈亏、当前持仓未实现盈亏和两者合计；发生减仓时不能只按剩余股数概括总亏损。",
         ],
+    }
+
+
+def _portfolio_context(conn: Any, store: EventStore) -> dict:
+    portfolio = ExecutionService(store, conn).get_portfolio()
+    portfolio["pnl_summary"] = _portfolio_pnl_summary(portfolio, store)
+    return portfolio
+
+
+def _portfolio_pnl_summary(portfolio: dict, store: EventStore) -> dict:
+    """汇总今日已实现盈亏与当前持仓未实现盈亏，避免减仓后只看剩余股数。"""
+    outcome_events = store.query(
+        event_type="trade.outcome.recorded",
+        since=_today_start_iso(),
+        limit=500,
+    )
+    realized_by_code: dict[str, int] = {}
+    sold_cost_basis_by_code: dict[str, int] = {}
+    realized_events_by_code: dict[str, list[dict]] = {}
+    for event in outcome_events:
+        payload = event.get("payload", {}) or {}
+        if payload.get("side") != "sell":
+            continue
+        if "realized_pnl_cents" not in payload:
+            continue
+        code = str(payload.get("code") or "").strip()
+        if not code:
+            continue
+        realized_pnl_cents = int(payload.get("realized_pnl_cents") or 0)
+        cost_basis_cents = int(payload.get("cost_basis_cents") or 0)
+        realized_by_code[code] = realized_by_code.get(code, 0) + realized_pnl_cents
+        sold_cost_basis_by_code[code] = sold_cost_basis_by_code.get(code, 0) + cost_basis_cents
+        realized_events_by_code.setdefault(code, []).append({
+            "event_id": event.get("event_id", ""),
+            "event_type": event.get("event_type", ""),
+            "occurred_at": event.get("occurred_at", ""),
+            "code": code,
+            "shares": payload.get("shares", 0),
+            "fill_price_cents": payload.get("fill_price_cents", 0),
+            "realized_pnl_cents": realized_pnl_cents,
+            "cost_basis_cents": cost_basis_cents,
+        })
+
+    positions = list(portfolio.get("positions", []) or [])
+    positions_by_code = {str(item.get("code") or ""): item for item in positions}
+    codes = sorted(set(positions_by_code) | set(realized_by_code))
+    by_code: list[dict] = []
+    for code in codes:
+        position = positions_by_code.get(code) or {}
+        shares = int(position.get("shares") or 0)
+        current_cost_basis_cents = int(
+            position.get("cost_basis_cents")
+            or (int(position.get("avg_cost_cents") or 0) * shares)
+        )
+        unrealized_pnl_cents = int(position.get("unrealized_pnl_cents") or 0)
+        realized_pnl_cents = int(realized_by_code.get(code, 0))
+        sold_cost_basis_cents = int(sold_cost_basis_by_code.get(code, 0))
+        total_cost_basis_cents = current_cost_basis_cents + sold_cost_basis_cents
+        combined_pnl_cents = realized_pnl_cents + unrealized_pnl_cents
+        by_code.append({
+            "code": code,
+            "name": position.get("name", ""),
+            "current_shares": shares,
+            "current_cost_basis_cents": current_cost_basis_cents,
+            "sold_cost_basis_cents": sold_cost_basis_cents,
+            "total_cost_basis_cents": total_cost_basis_cents,
+            "realized_pnl_cents": realized_pnl_cents,
+            "unrealized_pnl_cents": unrealized_pnl_cents,
+            "combined_pnl_cents": combined_pnl_cents,
+            "combined_pnl_pct": (
+                combined_pnl_cents / total_cost_basis_cents * 100
+                if total_cost_basis_cents > 0
+                else 0.0
+            ),
+            "realized_events": realized_events_by_code.get(code, []),
+        })
+
+    return {
+        "scope": "today_realized_plus_current_unrealized",
+        "rule": "今日已实现盈亏和当前持仓未实现盈亏必须分开展示；合计 = 今日已实现 + 当前未实现。",
+        "today_realized_pnl_cents": sum(realized_by_code.values()),
+        "current_unrealized_pnl_cents": int(portfolio.get("unrealized_pnl_cents") or 0),
+        "realized_plus_unrealized_pnl_cents": (
+            sum(realized_by_code.values()) + int(portfolio.get("unrealized_pnl_cents") or 0)
+        ),
+        "by_code": by_code,
     }
 
 
@@ -1783,7 +1872,7 @@ def build_llm_context(conn: Any, *, mode: str) -> dict:
         "market_intel": market_intel_section,
         "portfolio": _safe_section(
             "portfolio",
-            lambda: ExecutionService(store, conn).get_portfolio(),
+            lambda: _portfolio_context(conn, store),
         ),
         "manual_trades": _safe_section(
             "manual_trades",

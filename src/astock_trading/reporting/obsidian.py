@@ -31,6 +31,19 @@ from astock_trading.reporting.screening_result import render_screening_result
 _logger = logging.getLogger(__name__)
 
 
+def _position_cost_basis_cents(row: Any) -> int:
+    if "cost_basis_cents" in row.keys() and row["cost_basis_cents"]:
+        return row["cost_basis_cents"]
+    return row["avg_cost_cents"] * row["shares"]
+
+
+def _position_cost_price(row: Any) -> float:
+    shares = row["shares"] or 0
+    if shares <= 0:
+        return row["avg_cost_cents"] / 100
+    return _position_cost_basis_cents(row) / shares / 100
+
+
 _CANDIDATE_NOTE_LABELS = {
     "requires_entry_strategy_route": "缺少有效策略路线，暂留观察",
     "below_watch_retained": "低于观察线，保留强势观察",
@@ -163,7 +176,7 @@ class ObsidianProjector:
         if not rows:
             lines.append("当前无持仓。")
         else:
-            total_cost = sum(r["avg_cost_cents"] * r["shares"] for r in rows) / 100
+            total_cost = sum(_position_cost_basis_cents(r) for r in rows) / 100
             total_market = sum((r["current_price_cents"] or r["avg_cost_cents"]) * r["shares"] for r in rows) / 100
             total_pnl = total_market - total_cost
 
@@ -183,12 +196,12 @@ class ObsidianProjector:
                 out.append("| 代码 | 名称 | 风格 | 股数 | 成本 | 现价 | 盈亏 | 入场日 |")
                 out.append("|------|------|------|------|------|------|------|--------|")
                 for r in pos_rows:
-                    cost = r["avg_cost_cents"] / 100
+                    cost = _position_cost_price(r)
                     price = (r["current_price_cents"] or r["avg_cost_cents"]) / 100
-                    pnl = (price - cost) * r["shares"]
+                    pnl = price * r["shares"] - (_position_cost_basis_cents(r) / 100)
                     out.append(
                         f"| {r['code']} | {r['name']} | {r['style']} "
-                        f"| {r['shares']} | ¥{cost:.2f} | ¥{price:.2f} "
+                        f"| {r['shares']} | ¥{cost:.3f} | ¥{price:.2f} "
                         f"| ¥{pnl:+,.0f} | {r['entry_date']} |"
                     )
                 out.append("")
@@ -204,12 +217,12 @@ class ObsidianProjector:
                 lines.append("| 代码 | 名称 | 风格 | 股数 | 成本 | 现价 | 盈亏 | 入场日 |")
                 lines.append("|------|------|------|------|------|------|------|--------|")
                 for r in all_rows:
-                    cost = r["avg_cost_cents"] / 100
+                    cost = _position_cost_price(r)
                     price = (r["current_price_cents"] or r["avg_cost_cents"]) / 100
-                    pnl = (price - cost) * r["shares"]
+                    pnl = price * r["shares"] - (_position_cost_basis_cents(r) / 100)
                     lines.append(
                         f"| {r['code']} | {r['name']} | {r['style']} "
-                        f"| {r['shares']} | ¥{cost:.2f} | ¥{price:.2f} "
+                        f"| {r['shares']} | ¥{cost:.3f} | ¥{price:.2f} "
                         f"| ¥{pnl:+,.0f} | {r['entry_date']} |"
                     )
 

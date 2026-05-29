@@ -428,8 +428,12 @@ atrade db check --json
 2. `BUY` 触发 `manual_trade.requested`
 3. Discord / 报告展示为“买入意向”或“待人工确认”
 4. 人工确认后使用 `atrade record-buy CODE SHARES PRICE --yes --json`
+   记录成交；如券商 App 显示含费用成本价，追加 `--cost-price COST_PRICE`
 5. 本地写入 `order.*`、`position.*`，再重建投影
-6. `ExecutionService.audit_manual_trade_consistency(order_id)` 可审计本地记录是否一致
+6. 如果已补录持仓后才发现券商成本价不同，使用
+   `atrade adjust-position-cost CODE --cost-price COST_PRICE --yes --json`
+   追加 `position.cost_basis_adjusted` 校准本地总成本，不下单
+7. `ExecutionService.audit_manual_trade_consistency(order_id)` 可审计本地记录是否一致
 
 待确认买入意向超过 `manual_confirmation.pending_max_age_hours`，或已经错过
 `auto_trade.buy_window`，会被视为“过期待复核”。它仍保留在事件链里，但不再作为

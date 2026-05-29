@@ -590,6 +590,49 @@ def test_llm_context_json_runs_from_outside_checkout(tmp_path):
     assert payload["term_glossary"]
 
 
+def test_llm_context_close_splits_realized_and_unrealized_after_partial_sell(tmp_path):
+    from astock_trading.execution.service import ExecutionService
+    from astock_trading.platform.llm_context import build_llm_context
+
+    db_path = tmp_path / "runtime.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        store = EventStore(conn)
+        svc = ExecutionService(store, conn)
+        svc.record_buy(
+            code="002156",
+            name="通富微电",
+            shares=300,
+            price_cents=7208,
+            cost_basis_cents=2162910,
+            reason="人工买入",
+            run_id="manual_buy_test",
+        )
+        svc.record_sell(
+            code="002156",
+            shares=100,
+            price_cents=6600,
+            reason="跌破风控线先减仓",
+            run_id="manual_sell_test",
+        )
+        conn.commit()
+
+        payload = build_llm_context(conn, mode="close")
+    finally:
+        conn.close()
+
+    portfolio = payload["sections"]["portfolio"]["data"]
+    summary = portfolio["pnl_summary"]
+    assert summary["today_realized_pnl_cents"] == -60970
+    assert summary["current_unrealized_pnl_cents"] == -121940
+    assert summary["realized_plus_unrealized_pnl_cents"] == -182910
+    assert summary["by_code"][0]["code"] == "002156"
+    assert summary["by_code"][0]["realized_pnl_cents"] == -60970
+    assert summary["by_code"][0]["unrealized_pnl_cents"] == -121940
+    assert summary["by_code"][0]["combined_pnl_cents"] == -182910
+
+
 def test_llm_context_markdown_localizes_internal_terms(tmp_path):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
@@ -661,6 +704,7 @@ def test_llm_context_close_markdown_includes_discord_card_contract(tmp_path):
     assert "对比只用于复盘早盘判断质量，不作为自动交易依据" in text
     assert "本地投影持仓" in text
     assert "MX 模拟盘持仓" in text
+    assert "发生减仓时不得只按剩余股数写总盈亏" in text
 
 
 def test_llm_context_close_includes_market_intel_comparison(tmp_path):
