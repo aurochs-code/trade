@@ -16,7 +16,7 @@ from typing import Optional
 from astock_trading.platform.database import Database, DatabaseSettings
 
 _BASE_SCHEMA_VERSION = 1
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 
 # ---------------------------------------------------------------------------
 # Schema DDL
@@ -107,6 +107,8 @@ CREATE TABLE IF NOT EXISTS market_observations (
 
 CREATE INDEX IF NOT EXISTS idx_market_obs_symbol
     ON market_observations(symbol, kind, observed_at);
+CREATE INDEX IF NOT EXISTS idx_market_obs_kind_observed
+    ON market_observations(kind, observed_at);
 
 CREATE TABLE IF NOT EXISTS market_bars (
     symbol          TEXT NOT NULL,
@@ -273,6 +275,10 @@ def _ensure_runtime_schema_version(conn) -> None:
     current_version = _apply_migrations(conn, current_version)
     if current_version >= 5 and not _column_exists(conn, "projection_positions", "cost_basis_cents"):
         _migrate_to_v5(conn)
+    if current_version >= 6 and not _index_exists(
+        conn, "market_observations", "idx_market_obs_kind_observed"
+    ):
+        _migrate_to_v6(conn)
     if current_version < _SCHEMA_VERSION:
         _set_schema_version(conn, _SCHEMA_VERSION)
 
@@ -327,6 +333,22 @@ def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
         return bool(row and row[0])
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     return any(row["name"] == column for row in rows)
+
+
+def _index_exists(conn: sqlite3.Connection, table: str, index: str) -> bool:
+    dialect = getattr(conn, "dialect", "")
+    if str(dialect).startswith("mysql"):
+        row = conn.execute(
+            """SELECT COUNT(*)
+               FROM information_schema.statistics
+               WHERE table_schema = DATABASE()
+                 AND table_name = ?
+                 AND index_name = ?""",
+            (table, index),
+        ).fetchone()
+        return bool(row and row[0])
+    rows = conn.execute(f"PRAGMA index_list({table})").fetchall()
+    return any(row["name"] == index for row in rows)
 
 
 def _set_schema_version(conn: sqlite3.Connection, version: int) -> None:
@@ -384,11 +406,20 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_v6(conn: sqlite3.Connection) -> None:
+    if not _index_exists(conn, "market_observations", "idx_market_obs_kind_observed"):
+        conn.execute(
+            "CREATE INDEX idx_market_obs_kind_observed "
+            "ON market_observations(kind, observed_at)"
+        )
+
+
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_to_v2,
     3: _migrate_to_v3,
     4: _migrate_to_v4,
     5: _migrate_to_v5,
+    6: _migrate_to_v6,
 }
 
 
@@ -429,6 +460,10 @@ def init_db(db_path: Optional[Path] = None):
         current_version = _apply_migrations(conn, current_version)
         if current_version >= 5 and not _column_exists(conn, "projection_positions", "cost_basis_cents"):
             _migrate_to_v5(conn)
+        if current_version >= 6 and not _index_exists(
+            conn, "market_observations", "idx_market_obs_kind_observed"
+        ):
+            _migrate_to_v6(conn)
         if current_version < _SCHEMA_VERSION:
             _set_schema_version(conn, _SCHEMA_VERSION)
         return path

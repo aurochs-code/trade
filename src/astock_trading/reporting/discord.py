@@ -38,6 +38,7 @@ SIGNAL_EMOJI = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴", "CLEAR": "⚪"
 SIGNAL_CN = {"GREEN": "偏强", "YELLOW": "震荡", "RED": "转弱", "CLEAR": "观望"}
 ACTION_CN = {
     "BUY": "买入意向",
+    "TRIAL_BUY": "试买意向",
     "SELL": "卖出意向",
     "WATCH": "观察",
     "CLEAR": "清仓",

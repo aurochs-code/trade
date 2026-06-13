@@ -2,13 +2,14 @@
 
 import pytest
 
-from astock_trading.strategy.decider import Decider
+from astock_trading.strategy.decider import Decider, build_decider_from_config
 from astock_trading.strategy.models import (
     Action,
     DataQuality,
     MarketSignal,
     MarketState,
     ScoreResult,
+    StrategyRouteEvidence,
     Style,
 )
 
@@ -24,6 +25,7 @@ def _make_score(total: float = 7.0, veto: bool = False, **kw) -> ScoreResult:
         entry_signal=kw.get("entry_signal", False),
         data_quality=kw.get("data_quality", DataQuality.OK),
         data_missing_fields=kw.get("data_missing_fields", []),
+        strategy_routes=kw.get("strategy_routes", []),
     )
 
 
@@ -72,8 +74,18 @@ def test_red_market_blocks_buy(decider):
     market = MarketState(signal=MarketSignal.RED, multiplier=0.0)
     d = decider.decide(score, market)
 
-    assert d.action == Action.WATCH
+    assert d.action == Action.TRIAL_BUY
     assert d.market_multiplier == 0.0
+    assert "试买意向" in " ".join(d.notes)
+
+
+def test_red_market_low_score_stays_watch(decider):
+    score = _make_score(5.4)
+    market = MarketState(signal=MarketSignal.RED, multiplier=0.0)
+    d = decider.decide(score, market)
+
+    assert d.action == Action.WATCH
+    assert d.position_pct == 0.0
 
 
 def test_yellow_market_reduces_position(decider):
@@ -146,7 +158,7 @@ def test_weekly_limit_under(decider):
 
 
 def test_entry_signal_gate_blocks_high_score_buy():
-    """A high score without a configured entry signal remains WATCH."""
+    """A high score without a configured entry signal becomes a non-executable trial buy."""
     decider = Decider(
         buy_threshold=5.5,
         watch_threshold=5.0,
@@ -157,8 +169,82 @@ def test_entry_signal_gate_blocks_high_score_buy():
 
     d = decider.decide(score, market)
 
-    assert d.action == Action.WATCH
+    assert d.action == Action.TRIAL_BUY
+    assert d.position_pct == 0.0
     assert "入场信号未触发" in " ".join(d.notes)
+
+
+def test_entry_signal_near_buy_line_becomes_trial_buy():
+    """入场信号成立但总分略低于买入线时，应给不可执行的试买意向。"""
+    decider = Decider(
+        buy_threshold=6.0,
+        watch_threshold=5.0,
+        require_entry_signal_for_buy=True,
+        min_data_quality_for_buy="ok",
+        max_missing_fields_for_buy=0,
+        trial_buy_entry_signal_threshold=5.5,
+    )
+    score = _make_score(
+        5.6,
+        entry_signal=True,
+        data_quality=DataQuality.OK,
+        data_missing_fields=[],
+    )
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+
+    d = decider.decide(score, market)
+
+    assert d.action == Action.TRIAL_BUY
+    assert d.position_pct == 0.0
+    assert "入场信号已触发" in " ".join(d.notes)
+    assert "正式买入线" in " ".join(d.notes)
+
+
+def test_low_score_entry_signal_stays_watch():
+    """入场信号不能把低于试买线的标的抬成试买意向。"""
+    decider = Decider(
+        buy_threshold=6.0,
+        watch_threshold=5.0,
+        require_entry_signal_for_buy=True,
+        min_data_quality_for_buy="ok",
+        max_missing_fields_for_buy=0,
+        trial_buy_entry_signal_threshold=5.5,
+    )
+    score = _make_score(
+        5.2,
+        entry_signal=True,
+        data_quality=DataQuality.OK,
+        data_missing_fields=[],
+    )
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+
+    d = decider.decide(score, market)
+
+    assert d.action == Action.WATCH
+    assert d.position_pct == 0.0
+
+
+def test_build_decider_from_config_reads_trial_buy_thresholds():
+    """配置可单独调试买推荐层，正式买入线不被放宽。"""
+    decider = build_decider_from_config(
+        {
+            "scoring": {
+                "thresholds": {"buy": 6.0, "watch": 5.0, "reject": 4.0},
+                "decision_gates": {
+                    "require_entry_signal_for_buy": True,
+                    "trial_buy_threshold": 6.0,
+                    "trial_buy_entry_signal_threshold": 5.5,
+                    "min_data_quality_for_buy": "ok",
+                    "max_missing_fields_for_buy": 0,
+                },
+            },
+            "risk": {"position": {"single_max": 0.2, "total_max": 0.6}},
+        }
+    )
+
+    assert decider.buy_threshold == 6.0
+    assert decider.trial_buy_threshold == 6.0
+    assert decider.trial_buy_entry_signal_threshold == 5.5
 
 
 def test_data_quality_gate_blocks_buy_when_too_many_fields_missing():
@@ -196,3 +282,112 @@ def test_min_data_quality_gate_blocks_buy():
 
     assert d.action == Action.WATCH
     assert "数据质量" in " ".join(d.notes)
+
+
+def test_watch_route_near_buy_line_becomes_trial_buy():
+    """软路线成立且接近试买线时，可降级为不可自动承接的试买意向。"""
+    decider = Decider(
+        buy_threshold=6.0,
+        watch_threshold=5.0,
+        require_entry_signal_for_buy=True,
+        min_data_quality_for_buy="ok",
+        max_missing_fields_for_buy=0,
+        trial_buy_entry_signal_threshold=5.5,
+    )
+    score = _make_score(
+        5.6,
+        entry_signal=False,
+        data_quality=DataQuality.OK,
+        data_missing_fields=[],
+        strategy_routes=[
+            StrategyRouteEvidence(
+                route="trend_watch",
+                display_name="趋势观察",
+                family="trend_swing",
+                confidence=0.62,
+                entry_signal=False,
+                status="watch",
+                route_score=0.75,
+                matched_conditions=["above_ma20", "ma20_slope", "momentum_5d"],
+                missing_conditions=["volume_ratio"],
+            )
+        ],
+    )
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+
+    d = decider.decide(score, market)
+
+    assert d.action == Action.TRIAL_BUY
+    assert d.position_pct == 0.0
+    assert "观察路线" in " ".join(d.notes)
+    assert "试买意向不形成可自动承接买入意向" in " ".join(d.notes)
+
+
+def test_low_score_watch_route_stays_watch():
+    """观察路线不能把低于试买线的标的抬成试买意向。"""
+    decider = Decider(
+        buy_threshold=6.0,
+        watch_threshold=5.0,
+        require_entry_signal_for_buy=True,
+        min_data_quality_for_buy="ok",
+        max_missing_fields_for_buy=0,
+        trial_buy_entry_signal_threshold=5.5,
+    )
+    score = _make_score(
+        5.2,
+        entry_signal=False,
+        data_quality=DataQuality.OK,
+        data_missing_fields=[],
+        strategy_routes=[
+            StrategyRouteEvidence(
+                route="trend_watch",
+                display_name="趋势观察",
+                family="trend_swing",
+                confidence=0.62,
+                entry_signal=False,
+                status="watch",
+                route_score=0.75,
+            )
+        ],
+    )
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+
+    d = decider.decide(score, market)
+
+    assert d.action == Action.WATCH
+    assert d.position_pct == 0.0
+
+
+def test_watch_route_with_error_data_quality_stays_watch():
+    """观察路线仍受数据质量门槛约束。"""
+    decider = Decider(
+        buy_threshold=6.0,
+        watch_threshold=5.0,
+        require_entry_signal_for_buy=True,
+        min_data_quality_for_buy="ok",
+        max_missing_fields_for_buy=0,
+        trial_buy_entry_signal_threshold=5.5,
+    )
+    score = _make_score(
+        5.8,
+        entry_signal=False,
+        data_quality=DataQuality.ERROR,
+        data_missing_fields=[],
+        strategy_routes=[
+            StrategyRouteEvidence(
+                route="trend_watch",
+                display_name="趋势观察",
+                family="trend_swing",
+                confidence=0.62,
+                entry_signal=False,
+                status="watch",
+                route_score=0.75,
+            )
+        ],
+    )
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+
+    d = decider.decide(score, market)
+
+    assert d.action == Action.WATCH
+    assert d.position_pct == 0.0

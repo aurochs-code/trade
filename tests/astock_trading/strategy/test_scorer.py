@@ -145,6 +145,9 @@ def test_detects_flow_confirmed_trend_when_relative_volume_is_low(scorer):
     assert route.display_name == "资金趋势确认"
     assert route.family == "trend_swing"
     assert route.entry_signal is True
+    assert route.status == "entry"
+    assert route.route_score == 1.0
+    assert "flow_strength" in route.matched_conditions
     assert route.evidence["volume_ratio"] == 0.92
     assert route.evidence["main_net_inflow"] == 3_330_975_094
 
@@ -168,6 +171,36 @@ def test_detects_shrink_pullback_strategy_route(scorer):
     assert routes["shrink_pullback"].evidence["volume_ratio"] == 0.85
 
 
+def test_detects_pullback_to_ma20_entry_with_constructive_volume(scorer):
+    s = _make_snapshot(
+        name="回踩转强候选",
+        quote=StockQuote(
+            code="688359", name="回踩转强候选", price=18.4,
+            open=18.1, high=18.8, low=17.9, close=18.4,
+            volume=6200000, amount=6.4e8, change_pct=1.3,
+        ),
+        technical=TechnicalIndicators(
+            ma5=18.6, ma10=18.2, ma20=17.9, ma60=16.8,
+            above_ma20=True, volume_ratio=1.4, rsi=46.0,
+            golden_cross=False, ma20_slope=0.012,
+            momentum_5d=1.6, daily_volatility=0.024,
+            deviation_rate=2.8, change_pct=1.3,
+        ),
+        flow=FundFlow(net_inflow_1d=120_000_000, northbound_net_positive=False),
+    )
+
+    result = scorer.score(s)
+
+    assert result.entry_signal is True
+    assert result.primary_strategy_route == "pullback_to_ma20"
+    route = result.strategy_routes[0]
+    assert route.display_name == "均线回踩转强"
+    assert route.family == "trend_swing"
+    assert route.entry_signal is True
+    assert route.evidence["volume_ratio"] == 1.4
+    assert route.evidence["main_net_inflow"] == 120_000_000
+
+
 def test_detects_trend_watch_route_when_volume_ratio_is_missing(scorer):
     s = _make_snapshot(
         technical=TechnicalIndicators(
@@ -186,8 +219,15 @@ def test_detects_trend_watch_route_when_volume_ratio_is_missing(scorer):
     route = result.strategy_routes[0]
     assert route.display_name == "趋势观察"
     assert route.entry_signal is False
+    assert route.status == "watch"
+    assert route.route_score >= 0.6
+    assert "above_ma20" in route.matched_conditions
+    assert "volume_ratio" in route.missing_conditions
     assert route.evidence["volume_ratio"] == 0.0
     assert "volume_ratio_missing_blocks_entry" in route.notes
+    payload = result.to_dict()
+    assert payload["strategy_routes"][0]["status"] == "watch"
+    assert payload["route_diagnostics"][0]["route"] == "trend_watch"
 
 
 def test_configured_volume_floor_allows_trend_golden_cross_entry():
@@ -247,6 +287,35 @@ def test_dragon_head_route_uses_confirmed_sector_strength(scorer):
     assert dragon.evidence["sector_confirmation"] == "confirmed"
     assert dragon.evidence["industry_name"] == "机器人"
     assert dragon.evidence["relative_strength_pct"] == 4.5
+
+
+def test_dragon_head_route_without_sector_is_watch_not_entry(scorer):
+    s = _make_snapshot(
+        name="强势但缺板块",
+        quote=StockQuote(
+            code="300002", name="强势但缺板块", price=20.0,
+            open=18.8, high=20.1, low=18.7, close=20.0,
+            volume=12000000, amount=1.8e9, change_pct=7.5,
+        ),
+        technical=TechnicalIndicators(
+            ma5=20.0, ma10=18.8, ma20=17.5, ma60=15.0,
+            above_ma20=True, volume_ratio=2.2, rsi=68.0,
+            golden_cross=True, ma20_slope=0.025,
+            momentum_5d=9.0, daily_volatility=0.04,
+            deviation_rate=8.0, change_pct=7.5,
+        ),
+        sector=None,
+    )
+
+    result = scorer.score(s)
+    dragon = next(route for route in result.strategy_routes if route.route == "dragon_head")
+
+    assert dragon.entry_signal is False
+    assert dragon.status == "watch"
+    assert dragon.confidence == 0.6
+    assert dragon.route_score >= 0.6
+    assert "sector_strength" in dragon.missing_conditions
+    assert "sector_data_missing_downgrades_route" in dragon.notes
 
 
 def test_veto_below_ma20(scorer):

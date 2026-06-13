@@ -21,6 +21,7 @@ class Style(str, Enum):
 
 class Action(str, Enum):
     BUY = "BUY"
+    TRIAL_BUY = "TRIAL_BUY"
     SELL = "SELL"
     HOLD = "HOLD"
     WATCH = "WATCH"
@@ -81,6 +82,16 @@ class StrategyRouteEvidence:
     evidence: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     entry_signal: bool = False
+    status: str = ""
+    route_score: float = 0.0
+    matched_conditions: list[str] = field(default_factory=list)
+    missing_conditions: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.status:
+            object.__setattr__(self, "status", "entry" if self.entry_signal else "watch")
+        if self.route_score <= 0 and self.entry_signal:
+            object.__setattr__(self, "route_score", 1.0)
 
     def to_dict(self) -> dict:
         return {
@@ -91,6 +102,40 @@ class StrategyRouteEvidence:
             "evidence": self.evidence,
             "notes": self.notes,
             "entry_signal": self.entry_signal,
+            "status": self.status,
+            "route_score": self.route_score,
+            "matched_conditions": self.matched_conditions,
+            "missing_conditions": self.missing_conditions,
+        }
+
+
+@dataclass(frozen=True)
+class StrategyRouteDiagnostic:
+    """Condition-level route diagnosis for matched and near-matched routes."""
+
+    route: str
+    display_name: str
+    family: str
+    status: str
+    route_score: float
+    matched_conditions: list[str] = field(default_factory=list)
+    missing_conditions: list[str] = field(default_factory=list)
+    entry_signal: bool = False
+    confidence: float = 0.0
+    notes: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "route": self.route,
+            "display_name": self.display_name,
+            "family": self.family,
+            "status": self.status,
+            "route_score": self.route_score,
+            "matched_conditions": self.matched_conditions,
+            "missing_conditions": self.missing_conditions,
+            "entry_signal": self.entry_signal,
+            "confidence": self.confidence,
+            "notes": self.notes,
         }
 
 
@@ -110,6 +155,7 @@ class ScoreResult:
     data_quality: DataQuality = DataQuality.OK
     data_missing_fields: list[str] = field(default_factory=list)
     strategy_routes: list[StrategyRouteEvidence] = field(default_factory=list)
+    route_diagnostics: list[StrategyRouteDiagnostic] = field(default_factory=list)
     primary_strategy_route: Optional[str] = None
     scored_at: datetime = field(default_factory=datetime.now)
 
@@ -137,6 +183,9 @@ class ScoreResult:
             "data_missing_fields": self.data_missing_fields,
             "dimensions": [dimension.to_dict() for dimension in self.dimensions],
             "strategy_routes": [route.to_dict() for route in self.strategy_routes],
+            "route_diagnostics": [
+                diagnostic.to_dict() for diagnostic in self.route_diagnostics
+            ],
             "primary_strategy_route": self.primary_strategy_route,
         }
 

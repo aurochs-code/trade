@@ -34,6 +34,7 @@ from astock_trading.platform.time import MARKET_TZ, local_now, local_now_iso, lo
 
 ACTION_LABELS = {
     "BUY": "买入意向",
+    "TRIAL_BUY": "试买意向",
     "SELL": "卖出意向",
     "WATCH": "观察",
     "CLEAR": "观望",
@@ -1638,6 +1639,7 @@ def _display_text(text: str) -> str:
         "requires_entry_strategy_route": "缺少有效策略路线",
         "entry_signal": "入场信号",
         "BUY": "买入意向",
+        "TRIAL_BUY": "试买意向",
         "WATCH": "观察",
         "CLEAR": "观望",
     }

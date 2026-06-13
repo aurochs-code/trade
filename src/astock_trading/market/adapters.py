@@ -55,6 +55,13 @@ from .protocols import (
     ScreenerProvider,
     SentimentProvider,
 )
+from .tushare_adapters import (
+    TushareClient,
+    TushareFinancialAdapter,
+    TushareFlowAdapter,
+    TushareMarketAdapter,
+    tushare_provider_diagnostic,
+)
 
 __all__ = [
     "AStockSignalAdapter",
@@ -77,6 +84,11 @@ __all__ = [
     "ScreenerProvider",
     "SentimentProvider",
     "TencentFinancialAdapter",
+    "TushareClient",
+    "TushareFinancialAdapter",
+    "TushareFlowAdapter",
+    "TushareMarketAdapter",
     "is_hk_code",
     "normalize_hk_code",
+    "tushare_provider_diagnostic",
 ]

@@ -235,7 +235,7 @@ def _pool_thresholds(ctx) -> dict[str, float]:
     }
 
 
-DEFAULT_REFRESH_SCAN_LIMIT = 80
+DEFAULT_REFRESH_SCAN_LIMIT = 10
 
 
 def _scan_limit(cfg: dict, explicit_limit: Optional[int], *, refresh_pool: bool = False) -> int:
@@ -665,6 +665,7 @@ def _build_scoring_candidates(
 CORE_ROUTE_BLOCKER = "requires_entry_strategy_route"
 ACTION_CN = {
     "BUY": "买入意向",
+    "TRIAL_BUY": "试买意向",
     "SELL": "卖出意向",
     "WATCH": "观察",
     "CLEAR": "观望",

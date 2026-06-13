@@ -198,6 +198,18 @@ class ConfigRegistry:
             min_position = gates.get("min_position_pct_for_buy")
             if min_position is not None and min_position < 0:
                 errors.append("scoring.decision_gates.min_position_pct_for_buy must be >= 0")
+            trial_buy = gates.get("trial_buy_threshold")
+            if trial_buy is not None and thresholds and not (watch <= trial_buy <= buy):
+                errors.append(
+                    "scoring.decision_gates.trial_buy_threshold "
+                    "must be between watch and buy thresholds"
+                )
+            trial_entry = gates.get("trial_buy_entry_signal_threshold")
+            if trial_entry is not None and thresholds and not (watch <= trial_entry <= buy):
+                errors.append(
+                    "scoring.decision_gates.trial_buy_entry_signal_threshold "
+                    "must be between watch and buy thresholds"
+                )
 
         # Risk: stop_loss must be positive
         risk = strategy.get("risk", {})

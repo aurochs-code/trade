@@ -83,6 +83,7 @@ market_observations = Table(
     Column("payload_json", JSON, nullable=False),
     UniqueConstraint("source", "kind", "symbol", "observed_at", name="uq_market_obs"),
     Index("idx_market_obs_symbol", "symbol", "kind", "observed_at"),
+    Index("idx_market_obs_kind_observed", "kind", "observed_at"),
 )
 
 market_bars = Table(

@@ -6,6 +6,7 @@ from astock_trading.platform.db import connect, init_db
 
 
 def test_build_market_service_uses_common_provider_order(tmp_path):
+    from astock_trading.market.akshare_adapters import MXMarketAdapter
     from astock_trading.market.baostock_adapters import BaoStockMarketAdapter
     from astock_trading.market.hk_adapters import AkShareHKFinancialAdapter, AkShareHKMarketAdapter
     from astock_trading.market.service import MarketService
@@ -20,9 +21,34 @@ def test_build_market_service_uses_common_provider_order(tmp_path):
         conn.close()
 
     assert isinstance(service, MarketService)
+    assert isinstance(service._market[0], MXMarketAdapter)
     assert any(isinstance(provider, AkShareHKMarketAdapter) for provider in service._market)
     assert any(isinstance(provider, BaoStockMarketAdapter) for provider in service._market)
     assert any(isinstance(provider, AkShareHKFinancialAdapter) for provider in service._financial)
+
+
+def test_build_market_service_prioritizes_tushare_when_token_present(tmp_path, monkeypatch):
+    from astock_trading.market.akshare_adapters import MXMarketAdapter
+    from astock_trading.market.tushare_adapters import (
+        TushareFinancialAdapter,
+        TushareFlowAdapter,
+        TushareMarketAdapter,
+    )
+    from astock_trading.platform.service_factory import build_market_service
+
+    monkeypatch.setenv("ASTOCK_TUSHARE_TOKEN", "secret-token")
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        service = build_market_service(conn)
+    finally:
+        conn.close()
+
+    assert isinstance(service._market[0], MXMarketAdapter)
+    assert isinstance(service._market[1], TushareMarketAdapter)
+    assert isinstance(service._financial[0], TushareFinancialAdapter)
+    assert isinstance(service._flow[0], TushareFlowAdapter)
 
 
 def test_pipeline_context_uses_shared_market_service_builder(tmp_path, monkeypatch):

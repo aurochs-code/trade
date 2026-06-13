@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import fields
 from typing import Optional
 
-from astock_trading.market.models import StockSnapshot
+from astock_trading.market.models import StockSnapshot, TechnicalIndicators
 from astock_trading.strategy.continuation_filters import ContinuationQualifier
 from astock_trading.strategy.continuation_models import ContinuationFilterConfig, ContinuationScoreConfig
 from astock_trading.strategy.continuation_scorer import ContinuationScorer
@@ -19,6 +19,7 @@ from astock_trading.strategy.models import (
     DimensionScore,
     ScoreResult,
     ScoringWeights,
+    StrategyRouteDiagnostic,
     StrategyRouteEvidence,
     Style,
 )
@@ -76,7 +77,7 @@ class Scorer:
 
         style, style_conf = self._classify_style(snapshot)
         data_quality, missing = self._assess_quality(snapshot, fund)
-        strategy_routes = self._detect_strategy_routes(snapshot)
+        strategy_routes, route_diagnostics = self._detect_strategy_routes(snapshot)
         entry_signal = self._check_entry(snapshot, tech) or any(
             route.entry_signal for route in strategy_routes
         )
@@ -96,6 +97,7 @@ class Scorer:
             data_quality=data_quality,
             data_missing_fields=missing,
             strategy_routes=strategy_routes,
+            route_diagnostics=route_diagnostics,
             primary_strategy_route=strategy_routes[0].route if strategy_routes else None,
         )
 
@@ -291,13 +293,17 @@ class Scorer:
     # 策略路线证据
     # ------------------------------------------------------------------
 
-    def _detect_strategy_routes(self, s: StockSnapshot) -> list[StrategyRouteEvidence]:
+    def _detect_strategy_routes(
+        self,
+        s: StockSnapshot,
+    ) -> tuple[list[StrategyRouteEvidence], list[StrategyRouteDiagnostic]]:
         """Map deterministic indicator patterns to reusable strategy routes."""
         t = s.technical
         if not t:
-            return []
+            return [], []
 
         routes: list[StrategyRouteEvidence] = []
+        diagnostics: list[StrategyRouteDiagnostic] = []
         rsi_max = float(self.entry_cfg.get("rsi_max", 70))
         close_near_high = _close_near_high(s)
         liquidity_amount = float(s.quote.amount if s.quote else 0.0)
@@ -327,30 +333,52 @@ class Scorer:
             ))
 
         flow_net = float(s.flow.net_inflow_1d or 0.0) if s.flow else 0.0
+        flow_amount_ratio = flow_net / liquidity_amount if liquidity_amount > 0 else 0.0
         volume_confirm_min = float(self.entry_cfg.get("volume_ratio_min", 1.5))
-        if (
-            t.golden_cross
-            and t.above_ma20
-            and 0.8 <= t.volume_ratio < volume_confirm_min
-            and 30 <= t.rsi < rsi_max
-            and t.ma20_slope >= 0.01
-            and t.momentum_5d >= 5.0
-            and t.deviation_rate <= 10.0
-            and t.change_pct < 8.0
-            and liquidity_amount >= 5e8
-            and flow_net >= 5e8
-        ):
+        flow_conditions = {
+            "recent_golden_cross": _recent_golden_cross(t),
+            "above_ma20": t.above_ma20,
+            "relative_volume_pullback": 0.8 <= t.volume_ratio < volume_confirm_min,
+            "rsi_range": 30 <= t.rsi < rsi_max,
+            "ma20_slope": t.ma20_slope >= 0.01,
+            "momentum_5d": t.momentum_5d >= 5.0,
+            "deviation_risk": t.deviation_rate <= 10.0,
+            "change_pct_risk": t.change_pct < 8.0,
+            "liquidity": liquidity_amount >= 5e8,
+            "flow_strength": _flow_strength_confirmed(flow_net, liquidity_amount),
+        }
+        flow_matched, flow_missing = _condition_lists(flow_conditions)
+        flow_route_score = _route_score(flow_matched, flow_conditions)
+        flow_critical_ok = all(
+            flow_conditions[name]
+            for name in (
+                "recent_golden_cross",
+                "above_ma20",
+                "relative_volume_pullback",
+                "ma20_slope",
+                "flow_strength",
+            )
+        )
+        flow_entry_signal = flow_critical_ok and not flow_missing
+        flow_watch_signal = flow_critical_ok and len(flow_missing) <= 1 and flow_route_score >= 0.6
+        if flow_entry_signal or flow_watch_signal:
             routes.append(StrategyRouteEvidence(
                 route="flow_confirmed_trend",
                 display_name="资金趋势确认",
                 family="trend_swing",
-                confidence=0.88,
-                entry_signal=True,
+                confidence=0.88 if flow_entry_signal else 0.66,
+                entry_signal=flow_entry_signal,
+                status="entry" if flow_entry_signal else "watch",
+                route_score=flow_route_score,
+                matched_conditions=flow_matched,
+                missing_conditions=flow_missing,
                 evidence={
                     "golden_cross": t.golden_cross,
+                    "recent_golden_cross": flow_conditions["recent_golden_cross"],
                     "volume_ratio": round(t.volume_ratio, 2),
                     "volume_ratio_required": round(volume_confirm_min, 2),
                     "main_net_inflow": round(flow_net, 2),
+                    "flow_amount_ratio": round(flow_amount_ratio, 4),
                     "amount": round(liquidity_amount, 2),
                     "momentum_5d": round(t.momentum_5d, 2),
                     "rsi": round(t.rsi, 2),
@@ -386,6 +414,45 @@ class Scorer:
                     "above_ma20": t.above_ma20,
                 },
                 notes=["borrowed_from_daily_stock_analysis:volume_breakout"],
+            ))
+
+        pullback_volume_max = float(self.entry_cfg.get("pullback_volume_ratio_max", 1.6))
+        pullback_rsi_max = min(rsi_max, float(self.entry_cfg.get("pullback_rsi_max", 68)))
+        if (
+            s.flow is not None
+            and t.above_ma20
+            and t.ma5 >= t.ma20 > t.ma60 > 0
+            and 0.8 <= t.volume_ratio <= pullback_volume_max
+            and 40 <= t.rsi <= pullback_rsi_max
+            and -1.0 <= t.deviation_rate <= 4.5
+            and t.ma20_slope >= 0.005
+            and t.momentum_5d >= 0.0
+            and -0.5 <= t.change_pct <= 4.0
+            and liquidity_amount >= 3e8
+            and flow_net >= 0
+        ):
+            routes.append(StrategyRouteEvidence(
+                route="pullback_to_ma20",
+                display_name="均线回踩转强",
+                family="trend_swing",
+                confidence=0.86,
+                entry_signal=True,
+                evidence={
+                    "volume_ratio": round(t.volume_ratio, 2),
+                    "volume_ratio_max": round(pullback_volume_max, 2),
+                    "rsi": round(t.rsi, 2),
+                    "deviation_rate": round(t.deviation_rate, 2),
+                    "ma20_slope": round(t.ma20_slope, 4),
+                    "momentum_5d": round(t.momentum_5d, 2),
+                    "change_pct": round(t.change_pct, 2),
+                    "amount": round(liquidity_amount, 2),
+                    "main_net_inflow": round(flow_net, 2),
+                    "ma_relation": "ma5>=ma20>ma60",
+                },
+                notes=[
+                    "trend_pullback_recovered_near_ma20",
+                    "paper_execution_still_requires_core_buy_window_and_risk_gates",
+                ],
             ))
 
         if (
@@ -452,6 +519,18 @@ class Scorer:
                 family="trend_swing",
                 confidence=0.62,
                 entry_signal=False,
+                status="watch",
+                route_score=0.88,
+                matched_conditions=[
+                    "above_ma20",
+                    "ma20_above_ma60",
+                    "trend_structure",
+                    "ma20_slope",
+                    "momentum_5d",
+                    "rsi_range",
+                    "deviation_risk",
+                ],
+                missing_conditions=["volume_ratio"],
                 evidence={
                     "golden_cross": t.golden_cross,
                     "volume_ratio": round(t.volume_ratio, 2),
@@ -466,25 +545,48 @@ class Scorer:
                 ],
             ))
 
-        if (
-            t.above_ma20
-            and liquidity_amount >= 5e8
-            and t.volume_ratio >= 1.5
-            and t.momentum_5d >= 5.0
-            and t.change_pct >= 3.0
-            and t.deviation_rate <= 10.0
-        ):
+        dragon_conditions = {
+            "above_ma20": t.above_ma20,
+            "liquidity": liquidity_amount >= 5e8,
+            "volume_ratio": t.volume_ratio >= 1.5,
+            "momentum_5d": t.momentum_5d >= 5.0,
+            "change_pct": t.change_pct >= 3.0,
+            "deviation_risk": t.deviation_rate <= 10.0,
+            "sector_strength": bool(s.sector and s.sector.confirmed),
+        }
+        dragon_matched, dragon_missing = _condition_lists(dragon_conditions)
+        dragon_shape_ok = all(
+            dragon_conditions[name]
+            for name in (
+                "above_ma20",
+                "liquidity",
+                "volume_ratio",
+                "momentum_5d",
+                "change_pct",
+                "deviation_risk",
+            )
+        )
+        if dragon_shape_ok:
             sector = s.sector
             sector_confirmed = bool(sector and sector.confirmed)
             notes = ["borrowed_from_daily_stock_analysis:dragon_head"]
-            if not sector_confirmed:
+            if sector is None:
+                notes.append("sector_data_missing_downgrades_route")
+            elif not sector_confirmed:
                 notes.append("requires_sector_strength_confirmation")
-            routes.append(StrategyRouteEvidence(
+            dragon_status = "entry" if sector_confirmed else ("watch" if sector is None else "blocked")
+            dragon_confidence = 0.9 if sector_confirmed else (0.6 if sector is None else 0.0)
+            dragon_entry_signal = sector_confirmed
+            dragon_route = StrategyRouteEvidence(
                 route="dragon_head",
                 display_name="龙头策略",
                 family="sector_momentum",
-                confidence=0.9 if sector_confirmed else 0.7,
-                entry_signal=sector_confirmed,
+                confidence=dragon_confidence,
+                entry_signal=dragon_entry_signal,
+                status=dragon_status,
+                route_score=_route_score(dragon_matched, dragon_conditions),
+                matched_conditions=dragon_matched,
+                missing_conditions=dragon_missing,
                 evidence={
                     "amount": round(liquidity_amount, 2),
                     "volume_ratio": round(t.volume_ratio, 2),
@@ -498,10 +600,14 @@ class Scorer:
                     "relative_strength_pct": sector.relative_strength_pct if sector else 0.0,
                 },
                 notes=notes,
-            ))
+            )
+            if dragon_status != "blocked":
+                routes.append(dragon_route)
+            else:
+                diagnostics.append(_route_diagnostic(dragon_route))
 
         routes.sort(key=lambda route: route.confidence, reverse=True)
-        return routes
+        return routes, [_route_diagnostic(route) for route in routes] + diagnostics
 
     # ------------------------------------------------------------------
     # 风格判定
@@ -576,6 +682,45 @@ def _close_near_high(s: StockSnapshot) -> bool:
     if not q or q.high <= 0:
         return False
     return q.close >= q.high * 0.98
+
+
+def _recent_golden_cross(t: TechnicalIndicators) -> bool:
+    return bool(t.golden_cross or (t.ma5 >= t.ma10 >= t.ma20 > 0))
+
+
+def _flow_strength_confirmed(flow_net: float, amount: float) -> bool:
+    if flow_net >= 3e8:
+        return True
+    if amount <= 0:
+        return False
+    return flow_net >= 1e8 and flow_net / amount >= 0.05
+
+
+def _condition_lists(conditions: dict[str, bool]) -> tuple[list[str], list[str]]:
+    matched = [name for name, passed in conditions.items() if passed]
+    missing = [name for name, passed in conditions.items() if not passed]
+    return matched, missing
+
+
+def _route_score(matched_conditions: list[str], conditions: dict[str, bool]) -> float:
+    if not conditions:
+        return 0.0
+    return round(len(matched_conditions) / len(conditions), 2)
+
+
+def _route_diagnostic(route: StrategyRouteEvidence) -> StrategyRouteDiagnostic:
+    return StrategyRouteDiagnostic(
+        route=route.route,
+        display_name=route.display_name,
+        family=route.family,
+        status=route.status,
+        route_score=route.route_score,
+        matched_conditions=list(route.matched_conditions),
+        missing_conditions=list(route.missing_conditions),
+        entry_signal=route.entry_signal,
+        confidence=route.confidence,
+        notes=list(route.notes),
+    )
 
 
 def _dataclass_from_config(cls, values: dict | None):

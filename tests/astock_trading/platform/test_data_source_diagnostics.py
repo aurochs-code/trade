@@ -73,6 +73,28 @@ def test_build_data_source_diagnosis_includes_latest_screener_source_quality(tmp
         conn.close()
 
 
+def test_build_data_source_diagnosis_reports_paid_primary_provider_policy(tmp_path, monkeypatch):
+    db_path = tmp_path / "diagnose.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    monkeypatch.setenv("ASTOCK_TUSHARE_TOKEN", "secret-token")
+    try:
+        payload = build_data_source_diagnosis(conn)
+
+        policy = payload["provider_policy"]
+        assert policy["market"]["primary_providers"] == ["MXMarketAdapter", "TushareMarketAdapter"]
+        assert "AkShareMarketAdapter" in policy["market"]["fallback_providers"]
+        assert policy["financial"]["primary_providers"] == ["TushareFinancialAdapter"]
+        assert "TencentFinancialAdapter" in policy["financial"]["fallback_providers"]
+        assert policy["fund_flow"]["primary_providers"] == ["TushareFlowAdapter"]
+        assert "BaiduFundFlowAdapter" in policy["fund_flow"]["fallback_providers"]
+        assert payload["optional_providers"]["tushare"]["enabled"] is True
+        assert payload["optional_providers"]["tushare"]["token_present"] is True
+        assert "secret-token" not in str(payload)
+    finally:
+        conn.close()
+
+
 def test_data_source_diagnosis_does_not_block_new_trades_for_weekend_stale_gate_sources(tmp_path):
     db_path = tmp_path / "diagnose.db"
     init_db(db_path)

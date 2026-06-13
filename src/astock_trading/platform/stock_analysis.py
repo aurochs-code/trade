@@ -541,6 +541,7 @@ def build_stock_analysis_payload(
 def _action_label(action: str) -> str:
     labels = {
         "BUY": "买入意向",
+        "TRIAL_BUY": "试买意向",
         "SELL": "卖出意向",
         "WATCH": "观察",
         "NO_TRADE": "不操作",
@@ -730,6 +731,15 @@ def _stock_analysis_next_action(
                 risk_level="state_write",
             ),
         }
+    if decision.action.value == "TRIAL_BUY":
+        return {
+            "type": "trial_buy_risk_guard",
+            "label": "计算试买仓位上限",
+            "command": "atrade risk trial-guard --json",
+            "reason": "当前是试买意向；系统只给低置信小仓判断，不写成交、不提交模拟盘订单。",
+            "safe_to_auto_apply": True,
+            **_stock_analysis_action_contract("risk_trial_guard"),
+        }
     pool_tier = str((candidate_pool or {}).get("pool_tier") or "")
     if pool_tier == "core" and score.entry_signal:
         if profile_action := _stock_analysis_profile_review_action(execution_readiness):
@@ -845,6 +855,9 @@ def _findings(
         entry_blockers = _entry_signal_blockers(snapshot)
         if entry_blockers:
             findings.append("入场阻断：" + "；".join(entry_blockers))
+        route_gap = _route_gap_finding(score)
+        if route_gap:
+            findings.append(route_gap)
     if score.data_missing_fields:
         findings.append("缺失数据字段：" + "，".join(score.data_missing_fields))
     if candidate_pool is None:
@@ -893,6 +906,67 @@ def _entry_signal_blockers(snapshot: StockSnapshot) -> list[str]:
     return blockers
 
 
+def _route_gap_finding(score: ScoreResult) -> str | None:
+    diagnostics = list(score.route_diagnostics or [])
+    if not diagnostics:
+        diagnostics = list(score.strategy_routes or [])
+    if not diagnostics:
+        return None
+
+    primary_route = str(score.primary_strategy_route or "")
+
+    def sort_key(item: Any) -> tuple[int, int, float]:
+        route = str(_route_field(item, "route", "") or "")
+        status = str(_route_field(item, "status", "") or "")
+        try:
+            route_score = float(_route_field(item, "route_score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            route_score = 0.0
+        primary_rank = 0 if primary_route and route == primary_route else 1
+        status_rank = 0 if status in {"watch", "blocked"} else 1
+        return primary_rank, status_rank, -route_score
+
+    for item in sorted(diagnostics, key=sort_key):
+        missing = [str(value) for value in (_route_field(item, "missing_conditions", []) or [])]
+        if not missing:
+            continue
+        display_name = str(_route_field(item, "display_name", "") or "策略路线")
+        try:
+            route_score = float(_route_field(item, "route_score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            route_score = 0.0
+        missing_labels = "，".join(_route_condition_label(value) for value in missing)
+        return f"路线缺口：{display_name} 命中率 {route_score:.0%}，还缺 {missing_labels}"
+    return None
+
+
+def _route_field(route: object, field: str, default: object = None) -> object:
+    if isinstance(route, dict):
+        return route.get(field, default)
+    return getattr(route, field, default)
+
+
+def _route_condition_label(condition: str) -> str:
+    labels = {
+        "recent_golden_cross": "近期金叉/均线结构",
+        "golden_cross": "金叉",
+        "above_ma20": "站上 MA20",
+        "relative_volume_pullback": "相对量能回踩",
+        "volume_ratio": "量比确认",
+        "volume_ratio_min": "量比下限",
+        "flow_strength": "资金强度",
+        "liquidity": "成交额流动性",
+        "rsi_range": "RSI 区间",
+        "ma20_slope": "MA20 斜率",
+        "momentum_5d": "5 日动量",
+        "deviation_risk": "乖离率风险",
+        "change_pct_risk": "当日涨幅风险",
+        "change_pct": "当日强度",
+        "sector_strength": "板块强度确认",
+    }
+    return labels.get(condition, condition)
+
+
 def _recommendations(
     decision: DecisionIntent,
     candidate_pool_consistency: dict | None = None,
@@ -902,6 +976,8 @@ def _recommendations(
         base.append("先刷新候选池证据，再把旧候选池层级作为模拟承接依据")
     if decision.action.value == "BUY":
         return base + ["买入意向只作为候选信号；继续复核价格、流动性和组合风险。"]
+    if decision.action.value == "TRIAL_BUY":
+        return base + ["试买意向不会触发自动下单；它表示系统给出低置信小仓判断，并应继续记录影子表现。"]
     if decision.action.value == "WATCH":
         return base + ["继续观察，等待评分、入场信号和市场门控同时对齐。"]
     return base + ["评分、否决项或市场环境改善前，不新增仓位。"]

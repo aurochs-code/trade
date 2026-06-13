@@ -55,6 +55,7 @@ def test_refresh_scan_limit_uses_operational_budget_without_narrowing_run_scan()
     assert _scan_limit(cfg, None, refresh_pool=False) == 300
     assert _scan_limit(cfg, None, refresh_pool=True) == 80
     assert _scan_limit(cfg, 120, refresh_pool=True) == 120
+    assert _scan_limit({"market_scan_limit": 300}, None, refresh_pool=True) == 10
 
 
 def test_candidate_rows_include_latest_entry_signal_and_strategy_route(tmp_path):

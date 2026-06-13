@@ -22,6 +22,10 @@ class ContinuationQualifier:
 
         q = snapshot.quote
         t = snapshot.technical
+        required_quote_fields = (q.open, q.high, q.low, q.close, q.amount, q.change_pct)
+        if any(value is None for value in required_quote_fields):
+            return ContinuationFilterResult(False, ["missing_quote_fields"])
+
         if q.high < q.low:
             close_near_high = 0.0
         elif q.high == q.low:

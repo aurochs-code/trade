@@ -356,7 +356,7 @@ def test_doctor_json_via_bin_trade(tmp_path):
 
     payload = json.loads(result.stdout)
     assert payload["status"] == "ok"
-    assert payload["db"]["schema_version"] == 5
+    assert payload["db"]["schema_version"] == 6
     assert payload["config"]["version"].startswith("v")
     assert "installed" in payload["mcp"]
     assert payload["timezone"] == "Asia/Shanghai"
@@ -1349,7 +1349,7 @@ def test_db_status_initializes_schema_version_via_bin_trade(tmp_path):
     )
 
     payload = json.loads(result.stdout)
-    assert payload["schema_version"] == 5
+    assert payload["schema_version"] == 6
 
 
 def test_history_signal_json_via_bin_trade(tmp_path):

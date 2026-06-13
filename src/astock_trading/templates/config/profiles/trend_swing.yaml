@@ -15,6 +15,8 @@ strategy:
       max_missing_fields_for_buy: 0
       critical_missing_fields_for_buy: []
       min_position_pct_for_buy: 0.01
+      trial_buy_threshold: 6.0
+      trial_buy_entry_signal_threshold: 5.5
   screening:
     market_scan_limit: 300
   pool_management:

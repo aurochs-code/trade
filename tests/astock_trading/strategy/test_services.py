@@ -208,6 +208,47 @@ class TestStrategyService:
         assert manual_payload["primary_strategy_route"] == "flow_confirmed_trend"
         assert manual_payload["primary_strategy_route_label"] == "资金趋势确认"
 
+    def test_trial_buy_decision_does_not_request_manual_trade(self, event_store):
+        score = ScoreResult(
+            code="002384",
+            name="东山精密",
+            total=6.2,
+            dimensions=[
+                DimensionScore("technical", 2.0, 3.0, "技术偏强"),
+                DimensionScore("fundamental", 1.2, 3.0, "基本面可用"),
+                DimensionScore("flow", 1.5, 2.0, "资金较强"),
+                DimensionScore("sentiment", 1.5, 2.0, "情绪中性"),
+            ],
+            entry_signal=False,
+            style=Style.MOMENTUM,
+            style_confidence=0.8,
+            data_quality=DataQuality.OK,
+        )
+
+        class StaticScorer:
+            def score_batch(self, snapshots):
+                return [score]
+
+        decider = Decider(
+            buy_threshold=6.0,
+            watch_threshold=5.0,
+            require_entry_signal_for_buy=True,
+        )
+        svc = StrategyService(StaticScorer(), decider, event_store)
+
+        decisions = svc.evaluate(
+            [_make_snapshot("002384", "东山精密")],
+            MarketState(signal=MarketSignal.RED, multiplier=0.0),
+            run_id="run_trial_buy",
+            config_version="v_test",
+        )
+
+        assert decisions[0].action == Action.TRIAL_BUY
+        decision_payload = event_store.query(event_type="decision.suggested")[0]["payload"]
+        assert decision_payload["action"] == "TRIAL_BUY"
+        assert decision_payload["position_pct"] == 0.0
+        assert event_store.query(event_type="manual_trade.requested") == []
+
     def test_degraded_score_keeps_previous_valid_score_as_reference_only(self, event_store):
         previous_event_id = event_store.append(
             stream="strategy:002138",

@@ -40,10 +40,20 @@ class Decider:
         max_missing_fields_for_buy: int | None = None,
         critical_missing_fields_for_buy: list[str] | tuple[str, ...] | None = None,
         min_position_pct_for_buy: float = 0.01,
+        trial_buy_threshold: float | None = None,
+        trial_buy_entry_signal_threshold: float | None = None,
     ):
         self.buy_threshold = buy_threshold
         self.watch_threshold = watch_threshold
         self.reject_threshold = reject_threshold
+        self.trial_buy_threshold = (
+            buy_threshold if trial_buy_threshold is None else trial_buy_threshold
+        )
+        self.trial_buy_entry_signal_threshold = (
+            max(watch_threshold, buy_threshold - 0.5)
+            if trial_buy_entry_signal_threshold is None
+            else trial_buy_entry_signal_threshold
+        )
         self.single_max_pct = single_max_pct
         self.total_max_pct = total_max_pct
         self.weekly_max = weekly_max
@@ -79,6 +89,17 @@ class Decider:
         # Market signal block
         if market.signal in (MarketSignal.RED, MarketSignal.CLEAR):
             notes.append(f"大盘 {market.signal.value}，禁止新开仓")
+            if self._trial_buy_allowed(score):
+                notes.append("评分和数据质量支持小仓试买意向，但不形成可自动承接买入意向")
+                return DecisionIntent(
+                    code=score.code, name=score.name,
+                    action=Action.TRIAL_BUY, confidence=score.total,
+                    score=score.total,
+                    position_pct=0.0,
+                    market_signal=market.signal,
+                    market_multiplier=0.0,
+                    notes=notes,
+                )
             return DecisionIntent(
                 code=score.code, name=score.name,
                 action=Action.WATCH, confidence=score.total,
@@ -100,6 +121,19 @@ class Decider:
 
             buy_blocks = self._buy_block_reasons(score, position_pct)
             if buy_blocks:
+                if self._trial_buy_allowed(score, buy_blocks=buy_blocks):
+                    return DecisionIntent(
+                        code=score.code, name=score.name,
+                        action=Action.TRIAL_BUY,
+                        confidence=score.total,
+                        score=score.total,
+                        position_pct=0.0,
+                        market_signal=market.signal,
+                        market_multiplier=market.multiplier,
+                        notes=notes + buy_blocks + [
+                            "评分和数据质量支持小仓试买意向，但不形成可自动承接买入意向"
+                        ],
+                    )
                 return DecisionIntent(
                     code=score.code, name=score.name,
                     action=Action.WATCH,
@@ -122,6 +156,23 @@ class Decider:
                 notes=notes,
             )
         elif score.total >= self.watch_threshold:
+            if weekly_buy_count < self.weekly_max and self._trial_buy_allowed(score):
+                if score.entry_signal and score.total < self.buy_threshold:
+                    trial_reason = "入场信号已触发但评分未达到正式买入线，列为试买意向"
+                elif self._watch_route_reaches_trial_line(score):
+                    trial_reason = "观察路线证据接近入场要求但尚未触发入场信号，列为试买意向"
+                else:
+                    trial_reason = "评分达到试买线但未达到正式买入线，列为试买意向"
+                return DecisionIntent(
+                    code=score.code, name=score.name,
+                    action=Action.TRIAL_BUY,
+                    confidence=score.total,
+                    score=score.total,
+                    position_pct=0.0,
+                    market_signal=market.signal,
+                    market_multiplier=market.multiplier,
+                    notes=notes + [trial_reason, "试买意向不形成可自动承接买入意向"],
+                )
             return DecisionIntent(
                 code=score.code, name=score.name,
                 action=Action.WATCH,
@@ -188,6 +239,50 @@ class Decider:
 
         return reasons
 
+    def _trial_buy_allowed(
+        self,
+        score: ScoreResult,
+        *,
+        buy_blocks: list[str] | None = None,
+    ) -> bool:
+        """Return true for soft setups that deserve a non-executable trial signal."""
+        score_reaches_trial_line = score.total >= self.trial_buy_threshold
+        entry_signal_reaches_trial_line = (
+            score.entry_signal
+            and score.total >= self.trial_buy_entry_signal_threshold
+        )
+        watch_route_reaches_trial_line = self._watch_route_reaches_trial_line(score)
+        if (
+            not score_reaches_trial_line
+            and not entry_signal_reaches_trial_line
+            and not watch_route_reaches_trial_line
+        ):
+            return False
+
+        score_quality = _quality_value(score.data_quality)
+        if _quality_rank(score_quality) < _quality_rank(self.min_data_quality_for_buy):
+            return False
+
+        missing = list(score.data_missing_fields or [])
+        if (
+            self.max_missing_fields_for_buy is not None
+            and len(missing) > self.max_missing_fields_for_buy
+        ):
+            return False
+
+        if self.critical_missing_fields_for_buy.intersection(missing):
+            return False
+
+        blocks = buy_blocks or []
+        if not blocks:
+            return True
+        return all("入场信号未触发" in reason for reason in blocks)
+
+    def _watch_route_reaches_trial_line(self, score: ScoreResult) -> bool:
+        if score.total < self.trial_buy_entry_signal_threshold:
+            return False
+        return any(_is_trial_watch_route(route) for route in score.strategy_routes)
+
 
 def _quality_value(value: str | DataQuality) -> str:
     if isinstance(value, DataQuality):
@@ -200,6 +295,21 @@ def _quality_value(value: str | DataQuality) -> str:
 
 def _quality_rank(value: str | DataQuality) -> int:
     return _DATA_QUALITY_RANK.get(_quality_value(value), _DATA_QUALITY_RANK[DataQuality.DEGRADED.value])
+
+
+def _route_value(route: object, field: str, default: object = None) -> object:
+    if isinstance(route, dict):
+        return route.get(field, default)
+    return getattr(route, field, default)
+
+
+def _is_trial_watch_route(route: object) -> bool:
+    status = str(_route_value(route, "status", "") or "")
+    try:
+        route_score = float(_route_value(route, "route_score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        route_score = 0.0
+    return status == "watch" and route_score >= 0.6
 
 
 def build_decider_from_config(cfg: dict) -> Decider:
@@ -220,4 +330,6 @@ def build_decider_from_config(cfg: dict) -> Decider:
         max_missing_fields_for_buy=gates.get("max_missing_fields_for_buy"),
         critical_missing_fields_for_buy=gates.get("critical_missing_fields_for_buy", []),
         min_position_pct_for_buy=gates.get("min_position_pct_for_buy", 0.01),
+        trial_buy_threshold=gates.get("trial_buy_threshold"),
+        trial_buy_entry_signal_threshold=gates.get("trial_buy_entry_signal_threshold"),
     )

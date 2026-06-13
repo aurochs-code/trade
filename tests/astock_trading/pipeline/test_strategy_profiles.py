@@ -146,7 +146,11 @@ def test_compare_strategy_profiles_reports_profile_evidence_and_records_event(tm
     assert trend["decision_counts"]["BUY"] == 1
     assert trend["trade_review"]["sample_count"] == 1
     assert trend["trade_review"]["avg_return_pct"] == 0.04
+    assert trend["key_parameters"]["trial_buy_threshold"] == 6.0
+    assert trend["key_parameters"]["trial_buy_entry_signal_threshold"] == 5.5
     assert defensive["key_parameters"]["buy_threshold"] == 6.8
+    assert defensive["key_parameters"]["trial_buy_threshold"] == 6.8
+    assert defensive["key_parameters"]["trial_buy_entry_signal_threshold"] == 6.3
     assert defensive["evidence_status"] == "no_profile_runs"
     assert payload["recorded_event_id"]
     assert events[0]["payload"]["guardrails"]["auto_switch_profile"] is False

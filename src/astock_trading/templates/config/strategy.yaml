@@ -9,7 +9,7 @@ screening:
   mx_query: "站上20日均线，股价5元到200元，上市天数大于60天，非ST，今日未涨停，近20日平均成交额大于5000万元，市值大于50亿元"
   mx_select_type: "A股"
   market_scan_limit: 300       # 手工 screener run 的粗筛广度
-  refresh_scan_limit: 80       # 调度 refresh 的逐票深度评分预算；需要全量时显式传 --limit
+  refresh_scan_limit: 10       # 调度 refresh 的逐票深度评分预算；需要全量时显式传 --limit
   screener_query_timeout_seconds: 30 # 粗筛源搜索超时，超时返回 JSON 失败而不是卡住调度
   screener_scoring_timeout_seconds: 90 # 逐票评分/采集总超时，超时不刷新候选池
   snapshot_timeout_seconds: 20 # 单票深度采集总超时，避免慢 provider 拖住调度刷新
@@ -43,6 +43,8 @@ entry_signal:
     type: golden_cross         # 金叉
   volume_ratio_min: 1.5        # 量比 > 1.5
   rsi_max: 70                  # RSI < 70（防接盘）
+  pullback_volume_ratio_max: 1.6  # 均线回踩转强路线的量比上限
+  pullback_rsi_max: 68         # 均线回踩转强路线的 RSI 上限
   rsi_period: 14               # RSI 周期
   # C版新增过滤条件
   deviation_max: 10.0          # 乖离率 < 10%（C版）
@@ -187,6 +189,8 @@ scoring:
     max_missing_fields_for_buy: 0
     critical_missing_fields_for_buy: []
     min_position_pct_for_buy: 0.01
+    trial_buy_threshold: 6.0
+    trial_buy_entry_signal_threshold: 5.5
 
   veto:
     - below_ma20
