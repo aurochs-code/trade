@@ -83,6 +83,7 @@ market_observations = Table(
     Column("payload_json", JSON, nullable=False),
     UniqueConstraint("source", "kind", "symbol", "observed_at", name="uq_market_obs"),
     Index("idx_market_obs_symbol", "symbol", "kind", "observed_at"),
+    Index("idx_market_obs_kind_observed", "kind", "observed_at"),
 )
 
 market_bars = Table(
@@ -99,6 +100,84 @@ market_bars = Table(
     Column("amount_cents", BigInteger, nullable=False),
     Column("source", String(128), nullable=False),
     Column("fetched_at", String(64), nullable=False),
+)
+
+market_price_bars = Table(
+    "market_price_bars",
+    metadata,
+    Column("symbol", String(64), primary_key=True),
+    Column("bar_date", String(32), primary_key=True),
+    Column("period", String(32), primary_key=True, default="daily"),
+    Column("adjustflag", String(8), primary_key=True, default="2"),
+    Column("source", String(128), primary_key=True),
+    Column("open_cents", Integer, nullable=False),
+    Column("high_cents", Integer, nullable=False),
+    Column("low_cents", Integer, nullable=False),
+    Column("close_cents", Integer, nullable=False),
+    Column("volume", BigInteger, nullable=False),
+    Column("amount_cents", BigInteger, nullable=False),
+    Column("change_pct", Float),
+    Column("fetched_at", String(64), nullable=False),
+    Column("raw_json", JSON),
+    Index("idx_market_price_symbol_date", "symbol", "bar_date"),
+    Index("idx_market_price_date", "bar_date"),
+)
+
+market_financials = Table(
+    "market_financials",
+    metadata,
+    Column("symbol", String(64), primary_key=True),
+    Column("report_year", Integer, primary_key=True),
+    Column("report_quarter", Integer, primary_key=True),
+    Column("source", String(128), primary_key=True),
+    Column("report_date", String(32), nullable=False),
+    Column("available_date", String(32), nullable=False),
+    Column("roe", Float),
+    Column("roe_3y_ago", Float),
+    Column("revenue_growth", Float),
+    Column("net_profit_growth", Float),
+    Column("operating_cash_flow", Float),
+    Column("pe_ttm", Float),
+    Column("pb", Float),
+    Column("debt_ratio", Float),
+    Column("fetched_at", String(64), nullable=False),
+    Column("raw_json", JSON),
+    Index("idx_market_financials_available", "symbol", "available_date"),
+    Index("idx_market_financials_report", "symbol", "report_year", "report_quarter"),
+)
+
+market_fund_flows = Table(
+    "market_fund_flows",
+    metadata,
+    Column("symbol", String(64), primary_key=True),
+    Column("trade_date", String(32), primary_key=True),
+    Column("source", String(128), primary_key=True),
+    Column("net_inflow_1d", Float),
+    Column("net_inflow_5d", Float),
+    Column("main_force_ratio", Float),
+    Column("northbound_net", Float),
+    Column("consecutive_outflow_days", Integer),
+    Column("fetched_at", String(64), nullable=False),
+    Column("raw_json", JSON),
+    Index("idx_market_fund_flows_symbol_date", "symbol", "trade_date"),
+)
+
+market_data_coverage = Table(
+    "market_data_coverage",
+    metadata,
+    Column("coverage_key", String(128), primary_key=True),
+    Column("domain", String(64), nullable=False),
+    Column("symbol", String(64), nullable=False),
+    Column("start_date", String(32)),
+    Column("end_date", String(32)),
+    Column("period", String(32)),
+    Column("adjustflag", String(8)),
+    Column("source", String(128), nullable=False),
+    Column("row_count", Integer, nullable=False, default=0),
+    Column("status", String(32), nullable=False),
+    Column("fetched_at", String(64), nullable=False),
+    Column("error_json", JSON),
+    Index("idx_market_data_coverage_lookup", "domain", "symbol", "source"),
 )
 
 projection_positions = Table(

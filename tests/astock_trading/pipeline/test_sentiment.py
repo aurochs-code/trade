@@ -1,11 +1,15 @@
 """Tests for pipeline/sentiment.py — hash, classification, and caching"""
 
+from types import SimpleNamespace
+
+from astock_trading.platform.db import connect, init_db
 
 from astock_trading.pipeline.sentiment import (
     _classify_item,
     _classify_watch_item,
     _classify_opencli_watch_item,
     _extract_brief,
+    _sentiment_watch_stocks,
     _item_hash,
 )
 
@@ -214,3 +218,41 @@ class TestExtractBrief:
     def test_empty_text(self):
         assert _extract_brief("") == ""
         assert _extract_brief(None) == ""
+
+
+def test_sentiment_watch_stocks_includes_positions_and_all_candidate_tiers(tmp_path):
+    db_path = tmp_path / "sentiment.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        conn.executemany(
+            """INSERT INTO projection_candidate_pool
+               (code, pool_tier, name, score, added_at, last_scored_at, streak_days, note)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                ("002384", "core", "东山精密", 7.8, "2026-06-13", "2026-06-13", 1, "core"),
+                ("688498", "watch", "源杰科技", 7.2, "2026-06-13", "2026-06-13", 1, "watch"),
+                ("300750", "radar", "宁德时代", 6.9, "2026-06-13", "2026-06-13", 1, "radar"),
+            ],
+        )
+        ctx = SimpleNamespace(
+            conn=conn,
+            exec_svc=SimpleNamespace(
+                get_positions=lambda: [
+                    SimpleNamespace(code="600519", name="贵州茅台"),
+                    SimpleNamespace(code="002384", name="东山精密持仓名"),
+                ]
+            ),
+            cfg={"sentiment": {"candidate_pool_limit": 10}},
+        )
+
+        watch_stocks = _sentiment_watch_stocks(ctx)
+    finally:
+        conn.close()
+
+    assert watch_stocks == {
+        "600519": "贵州茅台",
+        "002384": "东山精密持仓名",
+        "688498": "源杰科技",
+        "300750": "宁德时代",
+    }

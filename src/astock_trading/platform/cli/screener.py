@@ -235,7 +235,7 @@ def _pool_thresholds(ctx) -> dict[str, float]:
     }
 
 
-DEFAULT_REFRESH_SCAN_LIMIT = 80
+DEFAULT_REFRESH_SCAN_LIMIT = 10
 
 
 def _scan_limit(cfg: dict, explicit_limit: Optional[int], *, refresh_pool: bool = False) -> int:
@@ -665,6 +665,7 @@ def _build_scoring_candidates(
 CORE_ROUTE_BLOCKER = "requires_entry_strategy_route"
 ACTION_CN = {
     "BUY": "买入意向",
+    "TRIAL_BUY": "试买意向",
     "SELL": "卖出意向",
     "WATCH": "观察",
     "CLEAR": "观望",
@@ -1627,6 +1628,8 @@ def _run_screener(
     as_json: bool,
     *,
     refresh_pool: bool = False,
+    dry_run: bool = False,
+    scoring_timeout_seconds: Optional[float] = None,
 ) -> None:
     ctx = build_context()
     try:
@@ -1637,7 +1640,11 @@ def _run_screener(
         score_limit = _scan_limit(cfg, limit, refresh_pool=refresh_pool)
         command_name = "screener refresh" if refresh_pool else "screener run"
         search_timeout = _screener_query_timeout(cfg)
-        scoring_timeout = _screener_scoring_timeout(cfg)
+        scoring_timeout = (
+            float(scoring_timeout_seconds)
+            if scoring_timeout_seconds is not None
+            else _screener_scoring_timeout(cfg)
+        )
 
         try:
             raw_results = _search_screener_results(q, search_timeout)
@@ -1703,6 +1710,9 @@ def _run_screener(
         if not stock_list:
             payload = {
                 "query": q,
+                "mode": "dry_run" if dry_run else "write",
+                "writes_state": not dry_run,
+                "candidate_pool_refreshed": False,
                 "screened": len(raw_results),
                 "score_limit": score_limit,
                 "scored": [],
@@ -1742,6 +1752,28 @@ def _run_screener(
         source_quality = _build_source_quality_summary(snapshots, scores)
         threshold = _watch_threshold(ctx, watch_threshold)
         report_thresholds = _screening_report_thresholds(ctx, threshold)
+        if dry_run:
+            payload = {
+                "query": q,
+                "run_id": run_id,
+                "mode": "dry_run",
+                "writes_state": False,
+                "candidate_pool_refreshed": False,
+                "screened": len(raw_results),
+                "score_limit": score_limit,
+                "threshold": threshold,
+                "report_thresholds": report_thresholds,
+                "scored": scores,
+                "added_to_watch": [],
+                "recall_candidates": {
+                    "hot_stocks": len(hot_recall),
+                    "recent_signals": len(recent_signal_recall),
+                },
+                "candidate_source_counts": candidate_source_counts,
+                "source_quality": source_quality,
+            }
+            json_or_text(payload, as_json)
+            return
         if refresh_pool:
             pool_changes = _apply_candidate_pool_refresh(ctx, scores, run_id)
             added = [item for item in pool_changes["watched"] if item.get("from") is None]
@@ -1771,6 +1803,8 @@ def _run_screener(
         payload = {
             "query": q,
             "run_id": run_id,
+            "mode": "write",
+            "writes_state": True,
             "history_group_id": history_group_id,
             "screened": len(raw_results),
             "score_limit": score_limit,
@@ -1797,10 +1831,19 @@ def screener_run(
     query: str = typer.Option("", "--query", "-q", help="选股条件；空值使用配置默认条件"),
     limit: Optional[int] = typer.Option(None, "--limit", help="最多评分数量；默认读取 strategy.screening.market_scan_limit"),
     watch_threshold: Optional[float] = typer.Option(None, "--watch-threshold", help="自动加入观察池的最低分；默认读取配置"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只评分和输出结果，不写候选池、报告或历史归档"),
+    scoring_timeout_seconds: Optional[float] = typer.Option(None, "--scoring-timeout-seconds", help="逐票评分超时秒数；默认读取配置，0 表示不启用 CLI 超时"),
     as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
 ):
     """执行选股筛选、评分，并把高分结果加入观察池。"""
-    _run_screener(query, limit, watch_threshold, as_json)
+    _run_screener(
+        query,
+        limit,
+        watch_threshold,
+        as_json,
+        dry_run=dry_run,
+        scoring_timeout_seconds=scoring_timeout_seconds,
+    )
 
 
 @screener_app.command("refresh")
@@ -1808,10 +1851,18 @@ def screener_refresh(
     query: str = typer.Option("", "--query", "-q", help="选股条件；空值使用配置默认条件"),
     limit: Optional[int] = typer.Option(None, "--limit", help="最多评分数量；默认读取 strategy.screening.refresh_scan_limit"),
     watch_threshold: Optional[float] = typer.Option(None, "--watch-threshold", help="自动加入观察池的最低分；默认读取配置"),
+    scoring_timeout_seconds: Optional[float] = typer.Option(None, "--scoring-timeout-seconds", help="逐票评分超时秒数；默认读取配置，0 表示不启用 CLI 超时"),
     as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
 ):
     """刷新候选池：筛选、评分，并把达标结果写入候选池事件和投影。"""
-    _run_screener(query, limit, watch_threshold, as_json, refresh_pool=True)
+    _run_screener(
+        query,
+        limit,
+        watch_threshold,
+        as_json,
+        refresh_pool=True,
+        scoring_timeout_seconds=scoring_timeout_seconds,
+    )
 
 
 @screener_app.command("explain")

@@ -23,6 +23,10 @@ from astock_trading.market.adapters import (
     MXSentimentAdapter,
     OpenCliFinanceAdapter,
     TencentFinancialAdapter,
+    TushareClient,
+    TushareFinancialAdapter,
+    TushareFlowAdapter,
+    TushareMarketAdapter,
 )
 from astock_trading.market.service import MarketService
 from astock_trading.market.store import MarketStore
@@ -108,22 +112,38 @@ def load_config_snapshot(conn: Any) -> tuple[Optional[ConfigSnapshot], dict]:
 def build_market_service(conn: Any, store: Optional[MarketStore] = None) -> MarketService:
     """Build the canonical market service provider chain."""
     market_store = store or MarketStore(conn)
+    tushare_client = TushareClient.from_env()
+    tushare_market_providers = (
+        [TushareMarketAdapter(client=tushare_client)] if tushare_client.enabled else []
+    )
+    tushare_financial_providers = (
+        [TushareFinancialAdapter(client=tushare_client)] if tushare_client.enabled else []
+    )
+    tushare_flow_providers = (
+        [TushareFlowAdapter(client=tushare_client)] if tushare_client.enabled else []
+    )
     return MarketService(
         market_providers=[
+            MXMarketAdapter(),
+            *tushare_market_providers,
             AStockSignalAdapter(),
             OpenCliFinanceAdapter(),
-            MXMarketAdapter(),
             MootdxMarketAdapter(),
             AkShareHKMarketAdapter(),
             AkShareMarketAdapter(),
             BaoStockMarketAdapter(),
         ],
         financial_providers=[
+            *tushare_financial_providers,
             TencentFinancialAdapter(),
             AkShareHKFinancialAdapter(),
             AkShareFinancialAdapter(),
         ],
-        flow_providers=[BaiduFundFlowAdapter(), AkShareFlowAdapter()],
+        flow_providers=[
+            *tushare_flow_providers,
+            BaiduFundFlowAdapter(),
+            AkShareFlowAdapter(),
+        ],
         sentiment_providers=[MXSentimentAdapter()],
         store=market_store,
     )
@@ -142,6 +162,7 @@ def build_strategy_service(event_store: EventStore, cfg: dict) -> StrategyServic
         veto_rules=cfg.get("scoring", {}).get("veto", []),
         entry_cfg=cfg.get("entry_signal", {}),
         continuation_cfg=cfg.get("continuation", {}),
+        score_adjustments=cfg.get("scoring", {}).get("score_adjustments", {}),
     )
     decider = build_decider_from_config(cfg)
     return StrategyService(
@@ -149,6 +170,7 @@ def build_strategy_service(event_store: EventStore, cfg: dict) -> StrategyServic
         decider,
         event_store,
         manual_trade_notifier=notify_manual_confirmation_requested,
+        false_breakout_cfg=cfg.get("risk", {}).get("false_breakout_cooldown", {}),
     )
 
 

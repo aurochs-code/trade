@@ -4,7 +4,7 @@ from datetime import date
 
 from astock_trading.risk.models import RiskParams
 from astock_trading.risk.rules import check_exit_signals, check_portfolio_risk, get_risk_params
-from astock_trading.risk.sizing import calc_position_size
+from astock_trading.risk.sizing import calc_position_size, volatility_adjusted_stop_loss
 from astock_trading.strategy.models import Style
 
 
@@ -138,6 +138,27 @@ def test_position_size_yellow_market():
         price=15.0, market_multiplier=0.5,
     )
     assert ps.pct <= 0.10 + 0.001  # 20% * 0.5 = 10%
+
+
+def test_position_size_shrinks_high_volatility_candidates():
+    ps = calc_position_size(
+        total_capital=500000,
+        current_exposure_pct=0.0,
+        price=25.0,
+        market_multiplier=1.0,
+        single_max_pct=0.20,
+        daily_atr_pct=0.05,
+        target_vol_pct=0.02,
+    )
+
+    assert ps.pct <= 0.08 + 0.001
+    assert ps.shares % 100 == 0
+
+
+def test_volatility_adjusted_stop_loss_uses_two_atr_with_floor_and_cap():
+    assert volatility_adjusted_stop_loss(base_stop_loss=0.08, daily_atr_pct=0.015) == 0.05
+    assert volatility_adjusted_stop_loss(base_stop_loss=0.08, daily_atr_pct=0.04) == 0.08
+    assert volatility_adjusted_stop_loss(base_stop_loss=0.08, daily_atr_pct=0.20) == 0.12
 
 
 # ── sector concentration tests (#15) ──

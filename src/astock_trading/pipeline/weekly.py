@@ -199,6 +199,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
             "buy_count": buy_count, "sell_count": sell_count,
             "win_rate": win_rate, "profit_loss_ratio": profit_loss_ratio,
             "net_pnl_cents": net_pnl_cents,
+            "paper_stats": paper_stats,
             "positions": [{"name": p.name, "code": p.code, "shares": p.shares}
                           for p in positions],
         })
@@ -391,6 +392,22 @@ def _paper_stats_from_events(events: list[dict]) -> dict | None:
     if not paper_events:
         return None
 
+    paper_events = sorted(paper_events, key=lambda event: event.get("occurred_at", ""))
+    route_by_code: dict[str, str] = {}
+    by_route: dict[str, dict] = {}
+
+    def route_bucket(route: str) -> dict:
+        return by_route.setdefault(route, {
+            "route": route,
+            "buy_count": 0,
+            "sell_count": 0,
+            "net_pnl_cents": 0,
+            "win_count": 0,
+            "loss_count": 0,
+            "win_rate": 0.0,
+            "pnl_data_quality": "ok",
+        })
+
     buy_count = sum(1 for event in paper_events if event.get("payload", {}).get("side") == "buy")
     sell_events = [event for event in paper_events if event.get("payload", {}).get("side") == "sell"]
     realized_values = [
@@ -398,11 +415,77 @@ def _paper_stats_from_events(events: list[dict]) -> dict | None:
         for event in sell_events
         if "realized_pnl_cents" in event.get("payload", {})
     ]
+    for event in paper_events:
+        payload = event.get("payload", {}) or {}
+        side = payload.get("side")
+        code = str(payload.get("code") or "")
+        route = _paper_event_route(payload)
+        if side == "buy":
+            if code:
+                route_by_code[code] = route
+            route_bucket(route)["buy_count"] += 1
+            continue
+
+        if side != "sell":
+            continue
+        if route == "未知路线" and code:
+            route = route_by_code.get(code, route)
+        bucket = route_bucket(route)
+        bucket["sell_count"] += 1
+        if "realized_pnl_cents" not in payload:
+            bucket["pnl_data_quality"] = "missing_realized_pnl"
+            continue
+        pnl = int(payload.get("realized_pnl_cents") or 0)
+        bucket["net_pnl_cents"] += pnl
+        if pnl > 0:
+            bucket["win_count"] += 1
+        elif pnl < 0:
+            bucket["loss_count"] += 1
+
+    route_rows = []
+    for bucket in by_route.values():
+        closed = bucket["win_count"] + bucket["loss_count"]
+        bucket["win_rate"] = bucket["win_count"] / closed if closed else 0.0
+        route_rows.append(bucket)
+    route_rows.sort(
+        key=lambda item: (
+            item["net_pnl_cents"],
+            item["sell_count"],
+            item["buy_count"],
+        ),
+        reverse=True,
+    )
+
     return {
         "buy_count": buy_count,
         "sell_count": len(sell_events),
         "net_pnl_cents": sum(realized_values),
+        "by_route": route_rows,
         "pnl_data_quality": (
             "ok" if len(realized_values) == len(sell_events) else "missing_realized_pnl"
         ),
     }
+
+
+def _paper_event_route(payload: dict) -> str:
+    label = payload.get("primary_strategy_route_label")
+    if label:
+        return str(label)
+    route = str(payload.get("primary_strategy_route") or "")
+    if not route:
+        return "未知路线"
+    return _ROUTE_LABELS.get(route, route)
+
+
+_ROUTE_LABELS = {
+    "flow_confirmed_trend": "资金趋势确认",
+    "volume_breakout": "放量突破",
+    "pullback_to_ma20": "均线回踩转强",
+    "short_continuation": "短续接力",
+    "ma_golden_cross": "均线金叉",
+    "dragon_head": "龙头策略",
+    "shrink_pullback": "缩量回踩",
+    "relative_strength_overheat": "强势过热观察",
+    "trend_cooling_off": "趋势冷却观察",
+    "trend_watch": "趋势观察",
+}

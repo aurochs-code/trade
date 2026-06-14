@@ -23,6 +23,7 @@ from astock_trading.strategy.models import (
     MarketState,
     ScoreResult,
     Style,
+    StrategyRouteDiagnostic,
     StrategyRouteEvidence,
 )
 
@@ -492,6 +493,102 @@ def test_build_stock_analysis_payload_guides_core_buy_to_auto_readiness():
     }
 
 
+def test_build_stock_analysis_payload_surfaces_trial_buy_intent():
+    snapshot = StockSnapshot(
+        code="002384",
+        name="东山精密",
+        quote=StockQuote(
+            code="002384",
+            name="东山精密",
+            price=223.99,
+            open=220.0,
+            high=232.02,
+            low=219.22,
+            close=223.99,
+            volume=117493472,
+            amount=183095697.72,
+            change_pct=0.0,
+        ),
+        technical=TechnicalIndicators(
+            ma5=211.62,
+            ma10=215.61,
+            ma20=214.02,
+            ma60=158.49,
+            above_ma20=True,
+            volume_ratio=1.22,
+            rsi=46.2,
+            golden_cross=False,
+            ma20_slope=0.0222,
+            momentum_5d=-4.64,
+            daily_volatility=0.0665,
+            deviation_rate=-1.45,
+        ),
+    )
+    score = ScoreResult(
+        code="002384",
+        name="东山精密",
+        total=6.1,
+        dimensions=[
+            DimensionScore("technical", 1.8, 3.0, "技术偏强"),
+            DimensionScore("fundamental", 1.2, 3.0, "基本面可用"),
+            DimensionScore("flow", 1.5, 2.0, "资金较强"),
+            DimensionScore("sentiment", 1.6, 2.0, "情绪偏强"),
+        ],
+        entry_signal=False,
+        style=Style.MOMENTUM,
+        style_confidence=0.67,
+        data_quality=DataQuality.OK,
+    )
+    decision = DecisionIntent(
+        code="002384",
+        name="东山精密",
+        action=Action.TRIAL_BUY,
+        confidence=6.1,
+        score=6.1,
+        position_pct=0.0,
+        market_signal=MarketSignal.RED,
+        market_multiplier=0.0,
+        notes=["大盘 RED，禁止新开仓；降级为试买意向"],
+    )
+
+    payload = build_stock_analysis_payload(
+        identifier="002384",
+        resolved={"code": "002384", "name": "东山精密", "source": "local_cache"},
+        snapshot=snapshot,
+        score=score,
+        decision=decision,
+        market_state=MarketState(signal=MarketSignal.RED, multiplier=0.0, detail={}),
+        profile="trend_swing",
+        config_version="v1",
+        candidate_pool={
+            "code": "002384",
+            "name": "东山精密",
+            "pool_tier": "watch",
+            "score": 5.9,
+            "last_scored_at": "2026-06-03",
+        },
+    )
+
+    assert payload["action"] == "TRIAL_BUY"
+    assert payload["action_label"] == "试买意向"
+    assert payload["execution_allowed"] is False
+    assert "试买意向" in payload["summary"]
+    assert payload["next_action"] == {
+        "type": "trial_buy_risk_guard",
+        "label": "计算试买仓位上限",
+        "command": "atrade risk trial-guard --json",
+        "reason": "当前是试买意向；系统只给低置信小仓判断，不写成交、不提交模拟盘订单。",
+        "safe_to_auto_apply": True,
+        "writes_state": False,
+        "writes_environment": False,
+        "writes_order": False,
+        "requires_user_approval": False,
+        "risk_level": "read_only",
+        "command_contract_id": "risk_trial_guard",
+    }
+    assert "试买意向不会触发自动下单" in payload["recommendations"][1]
+
+
 def test_build_stock_analysis_payload_keeps_core_entry_signal_when_execution_gate_blocks_buy():
     snapshot = StockSnapshot(
         code="002384",
@@ -920,3 +1017,112 @@ def test_build_stock_analysis_payload_explains_missing_entry_signal_causes():
     assert "RSI 过热" in blocker
     assert "乖离率过高" in blocker
     assert "当日涨幅较大" in blocker
+
+
+def test_build_stock_analysis_payload_explains_route_missing_conditions():
+    snapshot = StockSnapshot(
+        code="600584",
+        name="长电科技",
+        quote=StockQuote(
+            code="600584",
+            name="长电科技",
+            price=72.88,
+            open=70.0,
+            high=73.0,
+            low=69.5,
+            close=72.88,
+            volume=1000000,
+            amount=72880000,
+            change_pct=2.4,
+        ),
+        technical=TechnicalIndicators(
+            ma5=72.0,
+            ma10=70.5,
+            ma20=68.0,
+            ma60=60.0,
+            above_ma20=True,
+            volume_ratio=0.0,
+            rsi=58.0,
+            golden_cross=True,
+            ma20_slope=0.02,
+            momentum_5d=5.5,
+            daily_volatility=0.03,
+            deviation_rate=6.0,
+            change_pct=2.4,
+        ),
+    )
+    score = ScoreResult(
+        code="600584",
+        name="长电科技",
+        total=5.8,
+        dimensions=[
+            DimensionScore("technical", 1.7, 3.0, "趋势观察"),
+            DimensionScore("fundamental", 1.2, 3.0, "基本面可用"),
+            DimensionScore("flow", 1.5, 2.0, "资金较强"),
+            DimensionScore("sentiment", 1.4, 3.0, "中性"),
+        ],
+        entry_signal=False,
+        style=Style.MOMENTUM,
+        style_confidence=0.7,
+        data_quality=DataQuality.OK,
+        strategy_routes=[
+            StrategyRouteEvidence(
+                route="trend_watch",
+                display_name="趋势观察",
+                family="trend_swing",
+                confidence=0.62,
+                entry_signal=False,
+                status="watch",
+                route_score=0.75,
+                matched_conditions=["above_ma20", "ma20_slope", "momentum_5d"],
+                missing_conditions=["volume_ratio"],
+            )
+        ],
+        route_diagnostics=[
+            StrategyRouteDiagnostic(
+                route="trend_watch",
+                display_name="趋势观察",
+                family="trend_swing",
+                status="watch",
+                route_score=0.75,
+                matched_conditions=["above_ma20", "ma20_slope", "momentum_5d"],
+                missing_conditions=["volume_ratio"],
+                entry_signal=False,
+                confidence=0.62,
+            )
+        ],
+        primary_strategy_route="trend_watch",
+    )
+    decision = DecisionIntent(
+        code="600584",
+        name="长电科技",
+        action=Action.WATCH,
+        confidence=5.8,
+        score=5.8,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+        market_multiplier=1.0,
+    )
+
+    payload = build_stock_analysis_payload(
+        identifier="600584",
+        resolved={"code": "600584", "name": "长电科技", "source": "local_cache"},
+        snapshot=snapshot,
+        score=score,
+        decision=decision,
+        market_state=MarketState(signal=MarketSignal.GREEN, multiplier=1.0, detail={}),
+        profile="trend_swing",
+        config_version="v1",
+        candidate_pool={
+            "code": "600584",
+            "name": "长电科技",
+            "pool_tier": "watch",
+            "score": 5.8,
+            "last_scored_at": "2026-05-22",
+        },
+    )
+
+    assert payload["score"]["route_diagnostics"][0]["missing_conditions"] == ["volume_ratio"]
+    route_gap = next(item for item in payload["findings"] if item.startswith("路线缺口："))
+    assert "趋势观察" in route_gap
+    assert "量比确认" in route_gap

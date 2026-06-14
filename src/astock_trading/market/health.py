@@ -82,16 +82,24 @@ def _payload_count(payload_json: Optional[str]) -> int:
 
 
 def _latest_for_kinds(conn, kinds: tuple[str, ...]) -> Optional[dict]:
-    placeholders = ",".join("?" for _ in kinds)
-    row = conn.execute(
-        f"""SELECT source, kind, symbol, observed_at, payload_json
-            FROM market_observations
-            WHERE kind IN ({placeholders})
-            ORDER BY observed_at DESC
-            LIMIT 1""",
-        kinds,
-    ).fetchone()
-    return dict(row) if row else None
+    latest: Optional[dict] = None
+    for kind in kinds:
+        row = conn.execute(
+            """SELECT source, kind, symbol, observed_at, payload_json
+               FROM market_observations
+               WHERE kind = ?
+               ORDER BY observed_at DESC
+               LIMIT 1""",
+            (kind,),
+        ).fetchone()
+        if not row:
+            continue
+        candidate = dict(row)
+        if latest is None or _parse_dt(candidate["observed_at"]) > _parse_dt(
+            latest["observed_at"]
+        ):
+            latest = candidate
+    return latest
 
 
 def _candidate_pool_health(

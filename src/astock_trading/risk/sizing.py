@@ -14,6 +14,8 @@ def calc_position_size(
     market_multiplier: float = 1.0,
     single_max_pct: float = 0.20,
     total_max_pct: float = 0.60,
+    daily_atr_pct: float = 0.0,
+    target_vol_pct: float = 0.02,
 ) -> PositionSize:
     """
     纯函数：计算建议仓位。
@@ -29,7 +31,8 @@ def calc_position_size(
     if market_multiplier <= 0 or price <= 0:
         return PositionSize(shares=0, amount=0, pct=0, market_multiplier=market_multiplier)
 
-    base_pct = single_max_pct * market_multiplier
+    vol_adjustment = _volatility_adjustment(daily_atr_pct, target_vol_pct)
+    base_pct = single_max_pct * market_multiplier * vol_adjustment
     remaining = max(0, total_max_pct - current_exposure_pct)
     final_pct = min(base_pct, remaining)
 
@@ -48,3 +51,22 @@ def calc_position_size(
         pct=round(actual_pct, 4),
         market_multiplier=market_multiplier,
     )
+
+
+def volatility_adjusted_stop_loss(
+    *,
+    base_stop_loss: float = 0.08,
+    daily_atr_pct: float = 0.0,
+    floor: float = 0.05,
+    cap: float = 0.12,
+) -> float:
+    """Return a 2x-volatility stop with a floor and cap."""
+    if daily_atr_pct <= 0:
+        return round(base_stop_loss, 4)
+    return round(min(cap, max(floor, daily_atr_pct * 2)), 4)
+
+
+def _volatility_adjustment(daily_atr_pct: float, target_vol_pct: float) -> float:
+    if daily_atr_pct <= 0 or target_vol_pct <= 0:
+        return 1.0
+    return min(1.0, target_vol_pct / daily_atr_pct)

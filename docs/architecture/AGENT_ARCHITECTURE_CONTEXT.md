@@ -69,6 +69,17 @@ atrade db check --json
 
 新增 CLI、MCP、pipeline 或调度能力时，优先复用这套服务图。不要在新入口里重复拼 DB 连接、配置加载、market provider 链和业务 service。
 
+当前付费主数据源策略：
+
+- MX 是实时/日线级行情、指数行情和选股搜索主入口。
+- Tushare SDK 是 A 股日线/复权 K 线、指数日线、每日指标、财务指标、个股资金流、
+  股票基础信息、龙虎榜、限售解禁和沪深股通持股等常规积分接口主源。
+- `ASTOCK_TUSHARE_TOKEN` 存在时，provider 顺序为 MX / Tushare 优先，AkShare、Baidu、
+  BaoStock、OpenCli、Mootdx 等只作为 fallback。
+- Tushare token 不写入代码、文档、测试或日志；运行时从 `.env` / 环境变量读取。
+- Tushare 6000 积分档只按常规积分接口使用；分钟、新闻、公告、特色数据仍需按官方独立权限
+  或更高积分要求单独开通，不能在代码里默认可用。
+
 ## 数据主线
 
 运行数据库是 MySQL，schema 由 SQLAlchemy Core 定义。
@@ -154,6 +165,12 @@ atrade db check --json
 - `paper trial-plan` 只把 `watch` / `radar` / `core` 转成影子试运行清单和复核命令，
   不提交模拟盘订单，不绕过 `core` / `BUY` / 人工确认边界；加 `--record` 时只写
   `paper.trial.recorded` 影子试运行事件，供后续复盘和 agent 跟踪
+- `TRIAL_BUY` 展示为“试买意向”，表示策略给出低置信小仓判断：评分、数据质量和无硬否决
+  足够支持试运行，但市场门控或入场信号没有完全放行；也可以来自
+  `trial_buy_entry_signal_threshold` 以上且入场信号已触发、但尚未达到正式买入线的候选。
+  它不能触发 `manual_trade.requested`，
+  也不能被 `auto_trade` 当作可承接的正式 `BUY` 买入意向；后续只用于报告、风控上限和
+  影子表现记录。
 - `paper trial-plan --json` 本身必须输出 `candidate_summary` 和 `current_entry_signals`，
   让 agent 直接看到影子候选数量、核心/观察/强势观察分布和当前入场信号，不要只靠遍历
   `candidates` 列表推断候选流是否形成
@@ -442,7 +459,9 @@ atrade db check --json
 `atrade manual-trades expire-stale --yes --json`，该命令只追加
 `manual_trade.expired` 审计事件，不会下单。
 
-不要把 `radar`、`watch`、`core`、`BUY` 混为同一个交易强度。弱信号应表达为“强势观察”“观察”或“等待”，不要包装成看多结论。
+不要把 `radar`、`watch`、`core`、`TRIAL_BUY`、`BUY` 混为同一个交易强度。弱信号应表达为
+“强势观察”“观察”或“等待”；只有满足试买规则时才能表达为“试买意向”，且必须明确它不等于
+正式买入意向。
 
 ## 开发定位规则
 

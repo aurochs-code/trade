@@ -153,7 +153,18 @@ CLI 先行，MCP 只做薄适配：
 
 ### P4：来源补强
 
-- 引入 Tushare 作为可配置增强源，但不把 token 作为硬依赖。
+- 已把付费稳定源调整为主源策略：MX 负责实时/日线级行情和选股搜索主入口；
+  Tushare SDK 负责日线/复权 K 线、指数日线、每日指标、财务指标、个股资金流、
+  股票基础信息、龙虎榜、限售解禁和沪深股通持股等常规积分接口。
+- `ASTOCK_TUSHARE_TOKEN` 存在时，provider 顺序为：
+  - 行情/K 线：`MXMarketAdapter -> TushareMarketAdapter -> AStockSignal/OpenCli/Mootdx/AkShare/BaoStock`
+  - 财务：`TushareFinancialAdapter -> TencentFinancialAdapter -> AkShare`
+  - 资金流：`TushareFlowAdapter -> BaiduFundFlowAdapter -> AkShareFlowAdapter`
+- Tushare token 不是启动硬依赖；缺失时自动禁用 Tushare provider，并在
+  `atrade data-sources diagnose --json` 的 `optional_providers.tushare` 中展示
+  `enabled=false`，不会泄露 token 明文。
+- 6000 积分档按常规积分接口使用；分钟、新闻、公告和 10000+ 特色数据仍按官方独立权限
+  或更高积分要求处理，不在代码里假设已开通。
 - 保留当前 `CLI + MCP + MySQL + 人工确认` 边界，不引入 MongoDB/Redis 式外部运行核心。
 - 对外部源只借鉴 provider 优先级、fallback、缓存和健康可视化，不复制整套架构。
 

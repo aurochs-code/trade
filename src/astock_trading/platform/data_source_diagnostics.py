@@ -8,6 +8,7 @@ import json
 from typing import Any, Optional
 
 from astock_trading.market.health import evaluate_data_source_health
+from astock_trading.market.tushare_adapters import tushare_provider_diagnostic
 from astock_trading.platform.time import utc_now
 
 SOURCE_QUALITY_DIMENSIONS = (
@@ -48,6 +49,50 @@ MISSING_FIELD_DIMENSIONS = {
     "舆情": "sentiment",
     "行业上下文": "sector",
 }
+
+
+def _provider_policy() -> dict[str, dict[str, list[str]]]:
+    tushare = tushare_provider_diagnostic()
+    tushare_enabled = bool(tushare.get("enabled"))
+    market_primary = ["MXMarketAdapter"]
+    financial_primary: list[str] = []
+    flow_primary: list[str] = []
+    if tushare_enabled:
+        market_primary.append("TushareMarketAdapter")
+        financial_primary.append("TushareFinancialAdapter")
+        flow_primary.append("TushareFlowAdapter")
+    return {
+        "market": {
+            "primary_providers": market_primary,
+            "fallback_providers": [
+                "AStockSignalAdapter",
+                "OpenCliFinanceAdapter",
+                "MootdxMarketAdapter",
+                "AkShareHKMarketAdapter",
+                "AkShareMarketAdapter",
+                "BaoStockMarketAdapter",
+            ],
+        },
+        "financial": {
+            "primary_providers": financial_primary,
+            "fallback_providers": [
+                "TencentFinancialAdapter",
+                "AkShareHKFinancialAdapter",
+                "AkShareFinancialAdapter",
+            ],
+        },
+        "fund_flow": {
+            "primary_providers": flow_primary,
+            "fallback_providers": [
+                "BaiduFundFlowAdapter",
+                "AkShareFlowAdapter",
+            ],
+        },
+        "sentiment": {
+            "primary_providers": ["MXSentimentAdapter"],
+            "fallback_providers": [],
+        },
+    }
 
 
 def _decode_payload(value: Any) -> Any:
@@ -459,6 +504,10 @@ def build_data_source_diagnosis(
         "status": status,
         "findings": findings,
         "recommendations": recommendations,
+        "provider_policy": _provider_policy(),
+        "optional_providers": {
+            "tushare": tushare_provider_diagnostic(),
+        },
         "health": health,
         "provider_failures": provider_failures,
         "provider_incidents": {

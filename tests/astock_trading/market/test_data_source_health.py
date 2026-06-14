@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from astock_trading.market.health import evaluate_data_source_health
+from astock_trading.market import health as health_module
 from astock_trading.market.store import MarketStore
 from astock_trading.platform.db import connect, init_db
 
@@ -25,6 +26,62 @@ def test_evaluate_data_source_health_marks_missing_required_as_failed(tmp_path):
         assert result["status"] == "failed"
         assert "northbound_realtime" in result["required_missing"]
         assert result["checks"]["hot_stocks"]["status"] == "healthy"
+    finally:
+        conn.close()
+
+
+def test_latest_for_kinds_queries_each_kind_separately_to_avoid_large_sort():
+    class FakeResult:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class RecordingConnection:
+        def __init__(self):
+            self.queries = []
+            self.rows = {
+                "flow": {
+                    "source": "baidu",
+                    "kind": "flow",
+                    "symbol": "000001",
+                    "observed_at": "2026-06-12T02:00:00+00:00",
+                    "payload_json": "{}",
+                },
+                "fund_flow": {
+                    "source": "tushare",
+                    "kind": "fund_flow",
+                    "symbol": "000001",
+                    "observed_at": "2026-06-12T03:00:00+00:00",
+                    "payload_json": "{}",
+                },
+            }
+
+        def execute(self, sql, params=()):
+            normalized_sql = " ".join(sql.split())
+            assert "WHERE kind = ?" in normalized_sql
+            assert "kind IN" not in normalized_sql
+            self.queries.append((normalized_sql, tuple(params)))
+            return FakeResult(self.rows.get(params[0]))
+
+    conn = RecordingConnection()
+
+    latest = health_module._latest_for_kinds(conn, ("flow", "fund_flow"))
+
+    assert latest["kind"] == "fund_flow"
+    assert [params for _, params in conn.queries] == [("flow",), ("fund_flow",)]
+
+
+def test_market_observations_has_kind_observed_index(tmp_path):
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        rows = conn.execute("PRAGMA index_list(market_observations)").fetchall()
+        index_names = {row["name"] for row in rows}
+
+        assert "idx_market_obs_kind_observed" in index_names
     finally:
         conn.close()
 

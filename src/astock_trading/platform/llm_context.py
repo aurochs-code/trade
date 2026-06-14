@@ -100,6 +100,7 @@ TERM_CN = {
     "adjust-position-cost": "持仓成本校准命令",
     "record-sell": "卖出记录命令",
     "BUY": "买入意向",
+    "TRIAL_BUY": "试买意向",
     "SELL": "卖出意向",
     "WATCH": "观察",
     "NO_TRADE": "不操作",
@@ -200,6 +201,7 @@ TEXT_REPLACEMENTS = {
 
 ACTION_CN = {
     "BUY": "买入意向",
+    "TRIAL_BUY": "试买意向",
     "SELL": "卖出意向",
     "WATCH": "观察",
     "NO_TRADE": "不操作",

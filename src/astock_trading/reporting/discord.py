@@ -38,6 +38,7 @@ SIGNAL_EMOJI = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴", "CLEAR": "⚪"
 SIGNAL_CN = {"GREEN": "偏强", "YELLOW": "震荡", "RED": "转弱", "CLEAR": "观望"}
 ACTION_CN = {
     "BUY": "买入意向",
+    "TRIAL_BUY": "试买意向",
     "SELL": "卖出意向",
     "WATCH": "观察",
     "CLEAR": "清仓",
@@ -389,6 +390,9 @@ def format_morning_embed(data: dict) -> dict:
         chg = info.get("chg_pct", info.get("change_pct", 0)) or 0
         fields.append(_field(name, f"`{price:.2f}` ({chg:+.2f}%)", inline=True))
 
+    if guidance := _auto_readiness_guidance_text(data.get("auto_trade_readiness") or {}):
+        fields.append(_field("今日操作指引", guidance, inline=False))
+
     # 持仓
     positions = data.get("positions", [])
     if positions:
@@ -466,6 +470,53 @@ def format_morning_embed(data: dict) -> dict:
         fields=fields,
         footer="A-Stock Trading · morning_brief",
     )
+
+
+def _auto_readiness_guidance_text(readiness: dict) -> str:
+    if not readiness:
+        return ""
+    pool = readiness.get("candidate_pool", {}) or {}
+    buy_side = readiness.get("buy_side", {}) or {}
+    profile = readiness.get("execution_profile", {}) or {}
+    next_action = readiness.get("next_action", {}) or {}
+    lines = [
+        f"状态：**{_auto_readiness_status_label(readiness.get('status'))}**",
+        f"模式：{_auto_readiness_mode_label(readiness.get('mode'))}",
+        (
+            f"候选：核心 {pool.get('core_count', 0)} / "
+            f"观察 {pool.get('watch_count', 0)} / 强势观察 {pool.get('radar_count', 0)}"
+        ),
+        f"当前入场信号 {len(buy_side.get('current_entry_signals') or [])}",
+    ]
+    if profile.get("current_profile"):
+        lines.append(f"profile：`{profile.get('current_profile')}`")
+    summary = str(readiness.get("summary") or "").strip()
+    if summary:
+        lines.append(summary)
+    command = str(next_action.get("command") or "").strip()
+    if command:
+        lines.append(f"复核：`{command}`")
+    return "\n".join(lines)
+
+
+def _auto_readiness_status_label(value: object) -> str:
+    return {
+        "ready": "可承接",
+        "waiting_window": "等待窗口",
+        "profile_review_required": "profile 待确认",
+        "shadow": "影子记录",
+        "blocked": "阻断",
+        "disabled": "未启用",
+        "error": "预检失败",
+    }.get(str(value or ""), str(value or "未知"))
+
+
+def _auto_readiness_mode_label(value: object) -> str:
+    return {
+        "mx_paper_order": "MX 模拟盘委托",
+        "shadow_event": "影子试运行",
+        "disabled": "未启用",
+    }.get(str(value or ""), str(value or "未知"))
 
 
 def format_evening_embed(data: dict) -> dict:
@@ -961,6 +1012,19 @@ def format_weekly_embed(data: dict) -> dict:
         fields.append(_field("当前持仓", "\n".join(pos_lines) or "空仓", inline=False))
     else:
         fields.append(_field("当前持仓", "空仓", inline=False))
+
+    paper_stats = data.get("paper_stats", {}) or {}
+    route_rows = paper_stats.get("by_route") or []
+    if route_rows:
+        lines = []
+        for row in route_rows[:6]:
+            pnl = (row.get("net_pnl_cents") or 0) / 100
+            lines.append(
+                f"• {row.get('route', '未知路线')} "
+                f"{row.get('buy_count', 0)}买/{row.get('sell_count', 0)}卖 "
+                f"`¥{pnl:+,.0f}` 胜率 {row.get('win_rate', 0):.0%}"
+            )
+        fields.append(_field("模拟盘路线归因", "\n".join(lines), inline=False))
 
     return _embed(
         title=f"📋 周报 — {week}",

@@ -1212,6 +1212,25 @@ class ObsidianProjector:
                 f"| 卖出次数 | {p.get('sell_count', 0)} 次 |",
                 f"| 净盈亏 | {paper_pnl_text} |",
             ])
+            route_rows = p.get("by_route") or []
+            if route_rows:
+                lines.extend([
+                    "",
+                    "### 模拟盘路线归因",
+                    "",
+                    "| 路线 | 买入 | 卖出 | 净盈亏 | 胜率 |",
+                    "|------|------|------|--------|------|",
+                ])
+                for row in route_rows[:8]:
+                    pnl = row.get("net_pnl_cents", 0) / 100
+                    win_rate = row.get("win_rate", 0)
+                    lines.append(
+                        f"| {row.get('route', '未知路线')} "
+                        f"| {row.get('buy_count', 0)} "
+                        f"| {row.get('sell_count', 0)} "
+                        f"| ¥{pnl:+,.0f} "
+                        f"| {win_rate:.0%} |"
+                    )
 
         # 交易明细
         lines.extend([

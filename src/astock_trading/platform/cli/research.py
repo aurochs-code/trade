@@ -26,6 +26,10 @@ def _parse_int_csv(value: str) -> tuple[int, ...]:
     return parsed
 
 
+def _parse_str_csv(value: str) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(part.strip() for part in value.split(",") if part.strip()))
+
+
 def register_research_commands(app: typer.Typer) -> None:
     @app.command("backtest")
     def run_backtest_cmd(
@@ -36,6 +40,22 @@ def register_research_commands(app: typer.Typer) -> None:
         initial_cash: float = typer.Option(100000.0, help="初始资金（元）"),
         adjustflag: str = typer.Option("2", help="复权: 2=前复权 1=后复权 3=不复权"),
         use_history_mirror: bool = typer.Option(True, "--history-mirror/--no-history-mirror", help="优先读取历史信号镜像，缺失时回退代理回放"),
+        load_financials: bool = typer.Option(True, "--financials/--skip-financials", help="是否加载财务维度；正式回测应保持开启"),
+        use_stored_data: bool = typer.Option(False, "--use-stored-data", help="优先使用 MySQL 已落库的 K 线和财务快照"),
+        hydrate_data: bool = typer.Option(False, "--hydrate-data", help="远端拉取缺口并写入 MySQL，后续回测只补增量"),
+        use_market_bars: bool = typer.Option(False, "--use-market-bars", help="细粒度选项：优先从 market_price_bars 读取 K 线"),
+        hydrate_market_bars: bool = typer.Option(False, "--hydrate-market-bars", help="细粒度选项：远端 K 线拉取成功后写入 market_price_bars"),
+        red_multiplier: Optional[float] = typer.Option(None, "--red-multiplier", help="回测情景：覆盖 RED 市场仓位乘数；默认不覆盖"),
+        execute_red_trial_buy: bool = typer.Option(False, "--red-trial", "--execute-red-trial-buy", help="回测情景：把 RED 下的试买意向按 RED 仓位乘数模拟执行"),
+        trial_routes: str = typer.Option("", "--trial-routes", help="回测情景：只执行指定路线的试买意向，逗号分隔；留空表示不过滤"),
+        watch_trial_markets: str = typer.Option("", "--watch-trial-markets", help="回测情景：把指定市场制度下的观察路线按试买模拟执行，逗号分隔，如 GREEN,RED"),
+        watch_trial_routes: str = typer.Option("", "--watch-trial-routes", help="回测情景：仅升级指定观察路线，逗号分隔；留空表示不过滤"),
+        watch_trial_pairs: str = typer.Option("", "--watch-trial-pairs", help="回测情景：仅升级指定市场制度和路线组合，格式 GREEN:relative_strength_overheat,YELLOW:pullback_to_ma20；提供后优先于 markets/routes"),
+        watch_trial_score_min: float = typer.Option(6.0, "--watch-trial-score-min", help="观察路线升级试买的最低评分"),
+        trailing_stop: Optional[float] = typer.Option(None, "--trailing-stop", help="回测情景：覆盖移动止盈/追踪止损比例，如 0.20；默认使用 preset"),
+        score_dimension_mode: str = typer.Option("full", "--score-dimensions", help="评分维度模式：full 或 tech_fundamental，用于验证资金流维度增量"),
+        include_signal_alpha: bool = typer.Option(True, "--signal-alpha/--skip-signal-alpha", help="是否计算路线前瞻收益统计；组合 what-if 可跳过以加速"),
+        progress_log: bool = typer.Option(False, "--progress-log/--quiet-progress", help="向 stderr 输出回测阶段进度，JSON 仍只写 stdout"),
         as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
     ):
         """运行历史回测（生产级四维评分引擎 + baostock 数据）。"""
@@ -49,6 +69,22 @@ def register_research_commands(app: typer.Typer) -> None:
             initial_cash=initial_cash,
             adjustflag=adjustflag,
             use_history_mirror=use_history_mirror,
+            load_financials=load_financials,
+            red_multiplier=red_multiplier,
+            execute_red_trial_buy=execute_red_trial_buy,
+            execute_trial_buy_routes=_parse_str_csv(trial_routes),
+            execute_watch_trial_markets=_parse_str_csv(watch_trial_markets),
+            execute_watch_trial_routes=_parse_str_csv(watch_trial_routes),
+            execute_watch_trial_pairs=_parse_str_csv(watch_trial_pairs),
+            execute_watch_trial_score_min=watch_trial_score_min,
+            trailing_stop=trailing_stop,
+            score_dimension_mode=score_dimension_mode,
+            include_signal_alpha=include_signal_alpha,
+            progress_log=progress_log,
+            use_stored_data=use_stored_data,
+            hydrate_data=hydrate_data,
+            use_market_bars=use_market_bars,
+            hydrate_market_bars=hydrate_market_bars,
         )
 
         if "error" in result:
@@ -69,6 +105,91 @@ def register_research_commands(app: typer.Typer) -> None:
                 f"负/{result.get('losing_trades', 0)}"
             )
             typer.echo(f"  持仓中: {result['positions_open']} 只")
+
+    @app.command("backtest-batch")
+    def run_backtest_batch_cmd(
+        codes: str = typer.Argument(..., help="逗号分隔股票代码，支持较大股票池"),
+        start: str = typer.Argument(..., help="回测开始日期 YYYY-MM-DD"),
+        end: str = typer.Argument(..., help="回测结束日期 YYYY-MM-DD"),
+        preset: str = typer.Option("保守验证C", help="策略 preset（对应 strategy.yaml）"),
+        initial_cash: float = typer.Option(100000.0, help="每个批次的初始资金（元）"),
+        adjustflag: str = typer.Option("2", help="复权: 2=前复权 1=后复权 3=不复权"),
+        use_history_mirror: bool = typer.Option(True, "--history-mirror/--no-history-mirror", help="优先读取历史信号镜像，缺失时回退代理回放"),
+        load_financials: bool = typer.Option(True, "--financials/--skip-financials", help="是否加载财务维度；正式回测应保持开启"),
+        use_stored_data: bool = typer.Option(False, "--use-stored-data", help="优先使用 MySQL 已落库的 K 线和财务快照"),
+        hydrate_data: bool = typer.Option(False, "--hydrate-data", help="远端拉取缺口并写入 MySQL，后续回测只补增量"),
+        use_market_bars: bool = typer.Option(False, "--use-market-bars", help="细粒度选项：优先从 market_price_bars 读取 K 线"),
+        hydrate_market_bars: bool = typer.Option(False, "--hydrate-market-bars", help="细粒度选项：远端 K 线拉取成功后写入 market_price_bars"),
+        batch_size: int = typer.Option(8, "--batch-size", min=1, help="每个子回测批次包含的股票数"),
+        batch_timeout_seconds: float = typer.Option(240.0, "--batch-timeout", "--batch-timeout-seconds", min=1.0, help="单个批次最大运行秒数，超时后会拆成单票重试"),
+        red_multiplier: Optional[float] = typer.Option(None, "--red-multiplier", help="回测情景：覆盖 RED 市场仓位乘数；默认不覆盖"),
+        execute_red_trial_buy: bool = typer.Option(False, "--red-trial", "--execute-red-trial-buy", help="回测情景：把 RED 下的试买意向按 RED 仓位乘数模拟执行"),
+        trial_routes: str = typer.Option("", "--trial-routes", help="回测情景：只执行指定路线的试买意向，逗号分隔；留空表示不过滤"),
+        watch_trial_markets: str = typer.Option("", "--watch-trial-markets", help="回测情景：把指定市场制度下的观察路线按试买模拟执行，逗号分隔，如 GREEN,RED"),
+        watch_trial_routes: str = typer.Option("", "--watch-trial-routes", help="回测情景：仅升级指定观察路线，逗号分隔；留空表示不过滤"),
+        watch_trial_pairs: str = typer.Option("", "--watch-trial-pairs", help="回测情景：仅升级指定市场制度和路线组合，格式 GREEN:relative_strength_overheat,YELLOW:pullback_to_ma20；提供后优先于 markets/routes"),
+        watch_trial_score_min: float = typer.Option(6.0, "--watch-trial-score-min", help="观察路线升级试买的最低评分"),
+        score_dimension_mode: str = typer.Option("full", "--score-dimensions", help="评分维度模式：full 或 tech_fundamental，用于验证资金流维度增量"),
+        signal_output_limit: int = typer.Option(200, "--signal-output-limit", min=0, help="JSON 中保留的原始信号行数；0 表示不输出原始行，完整拆分可调大"),
+        progress_log: bool = typer.Option(False, "--progress-log/--quiet-progress", help="向 stderr 输出批次和数据阶段进度，JSON 仍只写 stdout"),
+        as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+    ):
+        """大样本批量回测：批次隔离、超时拆分，并汇总信号 Alpha。"""
+        from astock_trading.backtest.batch_runner import (
+            BacktestBatchConfig,
+            run_batched_backtest,
+        )
+
+        code_list = [item.strip() for item in codes.split(",") if item.strip()]
+        result = run_batched_backtest(
+            code_list,
+            start,
+            end,
+            BacktestBatchConfig(
+                preset=preset,
+                initial_cash=initial_cash,
+                adjustflag=adjustflag,
+                use_history_mirror=use_history_mirror,
+                load_financials=load_financials,
+                use_stored_data=use_stored_data,
+                hydrate_data=hydrate_data,
+                use_market_bars=use_market_bars,
+                hydrate_market_bars=hydrate_market_bars,
+                red_multiplier=red_multiplier,
+                execute_red_trial_buy=execute_red_trial_buy,
+                execute_trial_buy_routes=_parse_str_csv(trial_routes),
+                execute_watch_trial_markets=_parse_str_csv(watch_trial_markets),
+                execute_watch_trial_routes=_parse_str_csv(watch_trial_routes),
+                execute_watch_trial_pairs=_parse_str_csv(watch_trial_pairs),
+                execute_watch_trial_score_min=watch_trial_score_min,
+                score_dimension_mode=score_dimension_mode,
+                progress_log=progress_log,
+                batch_size=batch_size,
+                batch_timeout_seconds=batch_timeout_seconds,
+                signal_output_limit=signal_output_limit,
+            ),
+        )
+
+        if as_json:
+            typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+            return
+
+        coverage = result.get("coverage", {})
+        portfolio = result.get("portfolio_summary", {})
+        typer.echo(f"批量回测 {start} ~ {end} status={result.get('status')}")
+        typer.echo(
+            f"  股票覆盖: {coverage.get('completed_codes', 0)}/"
+            f"{coverage.get('requested_codes', 0)}  失败: {len(coverage.get('failed_codes', []))}"
+        )
+        typer.echo(
+            f"  信号样本: {coverage.get('signal_sample_size', 0)}  "
+            f"批次: {coverage.get('completed_batches', 0)} 成功 / "
+            f"{coverage.get('failed_batches', 0)} 失败"
+        )
+        typer.echo(
+            f"  批次平均收益: {portfolio.get('avg_total_return_pct', 0):.2f}%  "
+            f"最差回撤: {portfolio.get('worst_max_drawdown_pct', 0):.2f}%"
+        )
 
     @app.command("continuation-validate")
     def continuation_validate_cmd(

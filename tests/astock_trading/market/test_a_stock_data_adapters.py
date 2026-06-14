@@ -50,11 +50,20 @@ def test_akshare_financial_adapter_maps_scoring_fields(monkeypatch):
     monkeypatch.setattr(
         ak,
         "stock_financial_analysis_indicator",
-        lambda symbol, start_year: pd.DataFrame([{
-            "净资产收益率(%)": "12.5",
-            "主营业务收入增长率(%)": "18.6",
-            "每股经营性现金流(元)": "0.91",
-        }]),
+        lambda symbol, start_year: pd.DataFrame([
+            {
+                "日期": "2026-03-31",
+                "净资产收益率(%)": "12.5",
+                "主营业务收入增长率(%)": "18.6",
+                "每股经营性现金流(元)": "0.91",
+            },
+            {
+                "日期": "2023-03-31",
+                "净资产收益率(%)": "6.4",
+                "主营业务收入增长率(%)": "4.2",
+                "每股经营性现金流(元)": "0.31",
+            },
+        ]),
     )
 
     adapter = AkShareFinancialAdapter()
@@ -62,6 +71,7 @@ def test_akshare_financial_adapter_maps_scoring_fields(monkeypatch):
 
     assert report is not None
     assert report.roe == 12.5
+    assert report.roe_3y_ago == 6.4
     assert report.revenue_growth == 18.6
     assert report.operating_cash_flow == 0.91
 

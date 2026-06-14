@@ -91,8 +91,8 @@ def test_above_ma20_uses_quote():
     df = _make_kline(60, base_price=15.0, trend=0.001)
     # Quote with price well above MA20
     quote = StockQuote(
-        code="002138", name="test", price=20.0,
-        open=19.5, high=20.5, low=19.0, close=20.0,
+        code="002138", name="test", price=30.0,
+        open=29.5, high=30.5, low=29.0, close=30.0,
         volume=5000000, amount=1e8, change_pct=2.0,
     )
     result = compute_technical_indicators(df, quote)

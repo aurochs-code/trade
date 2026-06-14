@@ -1285,6 +1285,9 @@ def _execute_sell(
         "reason": reason,
         "dry_run": dry_run,
     }
+    route_info = _latest_paper_buy_route(ctx, pos.code)
+    if route_info:
+        info.update(route_info)
 
     if dry_run:
         _logger.info(f"[auto_trade][DRY] 卖出 {pos.name}({pos.code}) {pos.shares}股")
@@ -1406,8 +1409,14 @@ def _score_and_buy(
         if code in held_codes:
             continue
 
-        # 计算仓位
-        position_pct = min(single_max * market_state.multiplier, total_max - exposure_pct)
+        # 计算仓位：正式 BUY 可按市场制度 × 路线策略覆盖仓位；无策略时沿用原始仓位。
+        position_pct = _buy_candidate_position_pct(
+            ctx,
+            candidate,
+            market_state,
+            single_max=single_max,
+            remaining_pct=total_max - exposure_pct,
+        )
         if position_pct <= 0.01:
             break
 
@@ -1430,6 +1439,12 @@ def _score_and_buy(
             dry_run,
             source_event_id=candidate.get("source_event_id", ""),
             source_score_event_id=candidate.get("source_score_event_id", ""),
+            primary_strategy_route=candidate.get("primary_strategy_route") or "",
+            primary_strategy_route_label=(
+                candidate.get("primary_strategy_route_label")
+                or _route_label_for_key(candidate.get("primary_strategy_route"))
+                or ""
+            ),
         )
         if buy_info:
             buy_info["score"] = candidate.get("score", 0)
@@ -1488,6 +1503,9 @@ def _get_buy_candidates(
             "name": p.get("name", code),
             "score": p.get("score", 0),
             "position_pct": p.get("position_pct", 0),
+            "market_signal": p.get("market_signal") or getattr(getattr(market_state, "signal", None), "value", ""),
+            "primary_strategy_route": p.get("primary_strategy_route"),
+            "primary_strategy_route_label": p.get("primary_strategy_route_label"),
             "source_event_id": ev.get("event_id", ""),
             "source_score_event_id": p.get("source_score_event_id", ""),
             "price": 0,  # 需要实时获取
@@ -1526,10 +1544,63 @@ def _get_buy_candidates(
 
     # 过滤无价格的
     candidates = [c for c in candidates if c["price"] > 0]
-    # 按评分降序
-    candidates.sort(key=lambda c: c.get("score", 0), reverse=True)
+    # 按路线策略优先级、评分降序。没有配置路线策略时等价于原始按评分排序。
+    candidates.sort(
+        key=lambda c: _buy_candidate_sort_key(ctx, c, market_state),
+        reverse=True,
+    )
 
     return candidates
+
+
+def _buy_candidate_sort_key(ctx: PipelineContext, candidate: dict, market_state) -> tuple[float, float]:
+    policy = _route_execution_policy_for_candidate(ctx, candidate, market_state)
+    return (
+        float(policy.get("priority", 0.0) or 0.0),
+        float(candidate.get("score", 0.0) or 0.0),
+    )
+
+
+def _buy_candidate_position_pct(
+    ctx: PipelineContext,
+    candidate: dict,
+    market_state,
+    *,
+    single_max: float,
+    remaining_pct: float,
+) -> float:
+    policy = _route_execution_policy_for_candidate(ctx, candidate, market_state)
+    pct = None
+    if policy.get("position_pct") is not None:
+        pct = float(policy.get("position_pct") or 0.0)
+    if pct is None or pct <= 0:
+        pct = single_max * float(getattr(market_state, "multiplier", 0.0) or 0.0)
+    return min(pct, single_max, remaining_pct)
+
+
+def _route_execution_policy_for_candidate(ctx: PipelineContext, candidate: dict, market_state) -> dict:
+    policy_map = (
+        ctx.cfg.get("scoring", {}).get("route_execution_policy")
+        or ctx.cfg.get("auto_trade", {}).get("route_execution_policy")
+        or {}
+    )
+    if not isinstance(policy_map, dict):
+        return {}
+    signal = str(
+        candidate.get("market_signal")
+        or getattr(getattr(market_state, "signal", None), "value", "")
+        or ""
+    )
+    route = str(candidate.get("primary_strategy_route") or candidate.get("source_route") or "unknown")
+    for key in (f"{signal}:{route}", f"*:{route}", route):
+        policy = policy_map.get(key)
+        if not isinstance(policy, dict):
+            continue
+        score_min = policy.get("score_min")
+        if score_min is not None and float(candidate.get("score", 0.0) or 0.0) < float(score_min or 0.0):
+            return {}
+        return policy
+    return {}
 
 
 def _recent_paper_buy_keys(ctx: PipelineContext, *, since: str) -> dict[str, set[str]]:
@@ -1569,6 +1640,8 @@ def _execute_buy(
     dry_run: bool,
     source_event_id: str = "",
     source_score_event_id: str = "",
+    primary_strategy_route: str = "",
+    primary_strategy_route_label: str = "",
 ) -> dict | None:
     """执行模拟盘买入。"""
     info = {
@@ -1582,6 +1655,10 @@ def _execute_buy(
         "source_event_id": source_event_id,
         "source_score_event_id": source_score_event_id,
     }
+    if primary_strategy_route:
+        info["primary_strategy_route"] = primary_strategy_route
+    if primary_strategy_route_label:
+        info["primary_strategy_route_label"] = primary_strategy_route_label
 
     if dry_run:
         _logger.info(f"[auto_trade][DRY] 买入 {name}({code}) {shares}股 @ ¥{price:.2f}")
@@ -1606,6 +1683,46 @@ def _execute_buy(
         metadata={"run_id": run_id, "account": "paper"},
     )
     return info
+
+
+def _latest_paper_buy_route(ctx: PipelineContext, code: str) -> dict:
+    events = ctx.event_store.query(
+        stream=f"paper:{code}",
+        event_type=AUTO_TRADE_EXECUTED,
+        limit=200,
+    )
+    for event in reversed(events):
+        payload = event.get("payload", {}) or {}
+        if payload.get("side") != "buy":
+            continue
+        if payload.get("status") not in {"filled", "dry_run"}:
+            continue
+        route = str(payload.get("primary_strategy_route") or "")
+        label = str(payload.get("primary_strategy_route_label") or "")
+        if not label:
+            label = _route_label_for_key(route) or ""
+        result = {}
+        if route:
+            result["primary_strategy_route"] = route
+        if label:
+            result["primary_strategy_route_label"] = label
+        return result
+    return {}
+
+
+def _route_label_for_key(route: object) -> str | None:
+    return {
+        "flow_confirmed_trend": "资金趋势确认",
+        "volume_breakout": "放量突破",
+        "pullback_to_ma20": "均线回踩转强",
+        "short_continuation": "短续接力",
+        "ma_golden_cross": "均线金叉",
+        "dragon_head": "龙头策略",
+        "shrink_pullback": "缩量回踩",
+        "relative_strength_overheat": "强势过热观察",
+        "trend_cooling_off": "趋势冷却观察",
+        "trend_watch": "趋势观察",
+    }.get(str(route or ""))
 
 
 # ======================================================================

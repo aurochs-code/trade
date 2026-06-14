@@ -16,7 +16,7 @@ from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.events import EventStore
 from astock_trading.platform.time import local_today
 from astock_trading.risk.rules import check_exit_signals, check_portfolio_risk, get_risk_params
-from astock_trading.risk.sizing import calc_position_size
+from astock_trading.risk.sizing import calc_position_size, volatility_adjusted_stop_loss
 from astock_trading.strategy.models import Style
 
 
@@ -64,6 +64,8 @@ def risk_position(
     market_multiplier: float = typer.Option(1.0, "--market-multiplier", help="大盘仓位系数"),
     single_max_pct: float | None = typer.Option(None, "--single-max-pct", help="单股仓位上限"),
     total_max_pct: float | None = typer.Option(None, "--total-max-pct", help="总仓位上限"),
+    daily_atr_pct: float = typer.Option(0.0, "--daily-atr-pct", help="日 ATR/收盘价；用于高波动个股缩仓"),
+    target_vol_pct: float | None = typer.Option(None, "--target-vol-pct", help="单票目标日波动贡献；默认读取 risk.position.target_vol_pct"),
     as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
 ):
     """计算建议仓位；只读，不写入数据库。"""
@@ -72,6 +74,7 @@ def risk_position(
     total_capital = capital if capital is not None else float(strategy.get("capital", 500000))
     single_max = single_max_pct if single_max_pct is not None else float(position_cfg.get("single_max", 0.20))
     total_max = total_max_pct if total_max_pct is not None else float(position_cfg.get("total_max", 0.60))
+    target_vol = target_vol_pct if target_vol_pct is not None else float(position_cfg.get("target_vol_pct", 0.02))
 
     size = calc_position_size(
         total_capital=total_capital,
@@ -80,7 +83,12 @@ def risk_position(
         market_multiplier=market_multiplier,
         single_max_pct=single_max,
         total_max_pct=total_max,
+        daily_atr_pct=daily_atr_pct,
+        target_vol_pct=target_vol,
     )
+    volatility_adjustment = 1.0
+    if daily_atr_pct > 0 and target_vol > 0:
+        volatility_adjustment = min(1.0, target_vol / daily_atr_pct)
     payload = {
         "code": code,
         "score": score,
@@ -90,6 +98,10 @@ def risk_position(
         "market_multiplier": market_multiplier,
         "single_max_pct": single_max,
         "total_max_pct": total_max,
+        "daily_atr_pct": daily_atr_pct,
+        "target_vol_pct": target_vol,
+        "volatility_adjustment": round(volatility_adjustment, 4),
+        "stop_loss_pct": volatility_adjusted_stop_loss(daily_atr_pct=daily_atr_pct),
         "shares": size.shares,
         "amount": size.amount,
         "pct": size.pct,

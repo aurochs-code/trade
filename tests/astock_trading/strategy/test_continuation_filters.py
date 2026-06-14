@@ -74,6 +74,27 @@ def test_qualifier_rejects_when_quote_or_technical_is_missing():
     assert missing_technical.reasons == ["missing_quote_or_technical"]
 
 
+def test_qualifier_rejects_when_quote_range_fields_are_missing():
+    qualifier = ContinuationQualifier(ContinuationFilterConfig())
+    quote = StockQuote(
+        code="002138",
+        name="双环传动",
+        price=15.0,
+        open=14.5,
+        high=None,
+        low=14.4,
+        close=15.0,
+        volume=5_000_000,
+        amount=3e8,
+        change_pct=3.5,
+    )
+
+    result = qualifier.qualify(_make_snapshot(quote=quote))
+
+    assert result.qualified is False
+    assert result.reasons == ["missing_quote_fields"]
+
+
 def test_qualifier_rejects_long_upper_shadow_when_enabled():
     qualifier = ContinuationQualifier(ContinuationFilterConfig())
     quote = StockQuote(

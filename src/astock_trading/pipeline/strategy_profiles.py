@@ -1084,13 +1084,25 @@ def _key_parameters(strategy: dict) -> dict:
     auto_trade = strategy.get("auto_trade", {})
     continuation = strategy.get("continuation", {})
     continuation_scoring = continuation.get("scoring", {})
+    buy_threshold = _float(thresholds.get("buy"))
+    watch_threshold = _float(thresholds.get("watch"))
+    trial_buy_threshold = gates.get("trial_buy_threshold")
+    trial_buy_entry_signal_threshold = gates.get("trial_buy_entry_signal_threshold")
     return {
-        "buy_threshold": _float(thresholds.get("buy")),
-        "watch_threshold": _float(thresholds.get("watch")),
+        "buy_threshold": buy_threshold,
+        "watch_threshold": watch_threshold,
         "reject_threshold": _float(thresholds.get("reject")),
         "require_entry_signal_for_buy": bool(gates.get("require_entry_signal_for_buy", False)),
         "min_data_quality_for_buy": str(gates.get("min_data_quality_for_buy", "degraded")),
         "max_missing_fields_for_buy": gates.get("max_missing_fields_for_buy"),
+        "trial_buy_threshold": (
+            buy_threshold if trial_buy_threshold is None else _float(trial_buy_threshold)
+        ),
+        "trial_buy_entry_signal_threshold": _float(
+            max(watch_threshold, buy_threshold - 0.5)
+            if trial_buy_entry_signal_threshold is None
+            else trial_buy_entry_signal_threshold
+        ),
         "single_max_pct": _float(position.get("single_max")),
         "total_max_pct": _float(position.get("total_max")),
         "weekly_max": int(position.get("weekly_max", 0) or 0),

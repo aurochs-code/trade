@@ -2,7 +2,7 @@
 pipeline/sentiment.py — 舆情监控
 
 流程：
-1. 读持仓股 + 核心池股票
+1. 读持仓股 + 核心/观察/强势观察候选
 2. 对每只票调 mx-search 搜最新资讯
 3. 过滤重要事件（评级变动、重大公告）
 4. 去重（跟已推送的比对）
@@ -328,25 +328,45 @@ def _collect_opencli_watch_alerts(
     return alerts
 
 
+def _sentiment_watch_stocks(ctx: PipelineContext) -> dict[str, str]:
+    """收集舆情监控标的：持仓优先，再补充当前候选池。"""
+    cfg = ctx.cfg.get("sentiment", {})
+    candidate_limit = max(1, int(cfg.get("candidate_pool_limit") or 30))
+    positions = ctx.exec_svc.get_positions()
+    pool_rows = ctx.conn.execute(
+        """SELECT code, name
+           FROM projection_candidate_pool
+           WHERE pool_tier IN ('core', 'watch', 'radar')
+           ORDER BY CASE pool_tier WHEN 'core' THEN 0 WHEN 'watch' THEN 1 ELSE 2 END,
+                    score DESC,
+                    last_scored_at DESC,
+                    code
+           LIMIT ?""",
+        (candidate_limit,),
+    ).fetchall()
+
+    watch_stocks: dict[str, str] = {}
+    for position in positions:
+        code = str(getattr(position, "code", "") or "")
+        if not code:
+            continue
+        watch_stocks[code] = str(getattr(position, "name", "") or code)
+    for row in pool_rows:
+        code = str(row["code"] or "")
+        if code and code not in watch_stocks:
+            watch_stocks[code] = str(row["name"] or code)
+    return watch_stocks
+
+
 def run(ctx: PipelineContext, run_id: str) -> dict:
     """执行舆情监控 pipeline。"""
     from astock_trading.market.mx.search import MXSearch
 
-    # 1. 收集监控股票列表（持仓 + 核心池，去重）
-    positions = ctx.exec_svc.get_positions()
-    pool_rows = ctx.conn.execute(
-        "SELECT code, name FROM projection_candidate_pool WHERE pool_tier = 'core' ORDER BY score DESC"
-    ).fetchall()
-
-    watch_stocks: dict[str, str] = {}  # code → name
-    for p in positions:
-        watch_stocks[p.code] = p.name
-    for r in pool_rows:
-        if r["code"] not in watch_stocks:
-            watch_stocks[r["code"]] = r["name"] or r["code"]
+    # 1. 收集监控股票列表（持仓 + 候选池，去重）
+    watch_stocks = _sentiment_watch_stocks(ctx)
 
     if not watch_stocks:
-        _logger.info("[sentiment] 无持仓和核心池，跳过")
+        _logger.info("[sentiment] 无持仓和候选池，跳过")
         return {"monitored": 0, "alerts": []}
 
     # 2. 获取已推送 hash
