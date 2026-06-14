@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from datetime import date, timedelta
 import os
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import pandas as pd
 
@@ -40,11 +40,17 @@ class TushareClient:
         *,
         token_source: str = "",
         sdk_module: Any | None = None,
+        api_url: str = "http://api.tushare.pro",
+        timeout: float = 30.0,
+        http_post: Callable[..., Any] | None = None,
     ):
         self._token = token.strip()
         self._token_source = token_source
         self._sdk = sdk_module
         self._pro = None
+        self._api_url = api_url
+        self._timeout = timeout
+        self._http_post = http_post
 
     @classmethod
     def from_env(cls) -> "TushareClient":
@@ -75,6 +81,7 @@ class TushareClient:
             "token_present": self.token_present,
             "token_source": self._token_source if self._token else "",
             "sdk": "tushare",
+            "query_transport": "http",
             "configured_regular_interfaces": [
                 "daily",
                 "pro_bar",
@@ -111,11 +118,60 @@ class TushareClient:
     def query(self, api_name: str, *, params: dict | None = None, fields: str = "") -> list[dict]:
         if not self._token:
             return []
+        if self._sdk is None:
+            return self._http_query(api_name, params=params, fields=fields)
         try:
             frame = self._pro_api().query(api_name, fields=fields, **(params or {}))
         except Exception as exc:
             raise TushareAPIError("sdk_query_failed", str(exc)) from exc
         return _frame_to_records(frame)
+
+    def _http_query(self, api_name: str, *, params: dict | None = None, fields: str = "") -> list[dict]:
+        try:
+            post = self._http_post
+            if post is None:
+                import requests
+
+                post = requests.post
+            response = post(
+                self._api_url,
+                json={
+                    "api_name": api_name,
+                    "token": self._token,
+                    "params": params or {},
+                    "fields": fields,
+                },
+                timeout=self._timeout,
+            )
+            raise_for_status = getattr(response, "raise_for_status", None)
+            if callable(raise_for_status):
+                raise_for_status()
+            payload = response.json()
+        except TushareAPIError:
+            raise
+        except Exception as exc:
+            raise TushareAPIError("http_query_failed", str(exc)) from exc
+
+        if not isinstance(payload, dict):
+            raise TushareAPIError("invalid_response", "Tushare HTTP response is not a JSON object")
+        code = payload.get("code", 0)
+        if code not in (0, "0", None):
+            raise TushareAPIError(code, str(payload.get("msg") or ""))
+        data = payload.get("data") or {}
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        if not isinstance(data, dict):
+            return []
+        records = data.get("items") or []
+        response_fields = data.get("fields") or []
+        if not isinstance(records, list) or not isinstance(response_fields, list):
+            return []
+        rows: list[dict] = []
+        for item in records:
+            if not isinstance(item, (list, tuple)):
+                continue
+            rows.append({str(field): value for field, value in zip(response_fields, item)})
+        return rows
 
     def pro_bar(self, *, ts_code: str, start_date: str, end_date: str, count: int) -> list[dict]:
         if not self._token:
