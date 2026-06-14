@@ -311,6 +311,65 @@ class TestMarketStore:
         assert result["error_type"] == "JSONDecodeError"
         assert result["error_message"] == "Expecting value"
 
+    def test_save_and_get_price_bars_preserves_adjustflag(self, store):
+        bars = pd.DataFrame({
+            "日期": ["2024-01-02", "2024-01-03"],
+            "开盘": [10.0, 10.2],
+            "最高": [10.5, 10.6],
+            "最低": [9.8, 10.0],
+            "收盘": [10.2, 10.4],
+            "成交量": [1000000, 1100000],
+            "成交额": [10000000, 11000000],
+            "涨跌幅": [1.0, 1.96],
+        })
+
+        saved = store.save_price_bars("600036", bars, source="baostock", adjustflag="2")
+        missing = store.get_price_bars("600036", "2024-01-01", "2024-01-31", adjustflag="3")
+        loaded = store.get_price_bars("600036", "2024-01-01", "2024-01-31", adjustflag="2")
+
+        assert saved == 2
+        assert missing.empty
+        assert loaded["日期"].tolist() == ["2024-01-02", "2024-01-03"]
+        assert loaded["收盘"].tolist() == [10.2, 10.4]
+        assert loaded["涨跌幅"].tolist() == [1.0, 1.96]
+
+    def test_financial_snapshots_are_loaded_by_available_date(self, store):
+        store.save_financial_snapshot(
+            "600036",
+            report_year=2024,
+            report_quarter=1,
+            report_date="2024-03-31",
+            available_date="2024-04-30",
+            payload={
+                "roe": 12.3,
+                "roe_3y_ago": 6.1,
+                "revenue_growth": 8.8,
+                "operating_cash_flow": 0.2,
+            },
+            source="baostock",
+        )
+        store.save_financial_snapshot(
+            "600036",
+            report_year=2024,
+            report_quarter=2,
+            report_date="2024-06-30",
+            available_date="2024-08-31",
+            payload={"roe": 14.0, "operating_cash_flow": 0.3},
+            source="baostock",
+        )
+
+        early = store.get_financial_snapshot("600036", as_of_date="2024-04-15")
+        q1 = store.get_financial_snapshot("600036", as_of_date="2024-05-01")
+        q2 = store.get_financial_snapshot("600036", as_of_date="2024-09-01")
+
+        assert early is None
+        assert q1 is not None
+        assert q1["report_quarter"] == 1
+        assert q1["roe"] == 12.3
+        assert q2 is not None
+        assert q2["report_quarter"] == 2
+        assert q2["roe"] == 14.0
+
 
 # ---------------------------------------------------------------------------
 # Mock providers for MarketService tests

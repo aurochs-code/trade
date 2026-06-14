@@ -392,6 +392,9 @@ def _schedule_intraday_simulation_state(
     missed_critical_jobs = [
         job for job in step_jobs if job.get("critical_for_intraday_simulation") and job.get("missed_today")
     ]
+    failed_critical_jobs = [
+        job for job in step_jobs if job.get("critical_for_intraday_simulation") and _schedule_job_failed(job)
+    ]
     critical_job_count = sum(1 for step in scheduled_steps if step.get("critical_for_intraday_simulation"))
     pending_first_run_critical_count = sum(
         1
@@ -402,6 +405,8 @@ def _schedule_intraday_simulation_state(
 
     if not scheduled_steps or disabled_step_jobs or runtime_contract.get("status") == "warning":
         status = "schedule_attention_required"
+    elif failed_critical_jobs:
+        status = "critical_jobs_failed"
     elif runtime_profile.get("status") == "review_required":
         status = "profile_review_required"
     elif missed_critical_jobs:
@@ -417,6 +422,7 @@ def _schedule_intraday_simulation_state(
         scheduled_steps=scheduled_steps,
         critical_job_count=critical_job_count,
         pending_first_run_critical_count=pending_first_run_critical_count,
+        failed_critical_count=len(failed_critical_jobs),
     )
     next_action = _schedule_intraday_simulation_next_action(status, runtime_profile)
     return {
@@ -431,6 +437,7 @@ def _schedule_intraday_simulation_state(
         "first_run_verification": first_run_verification,
         "runtime_contract": runtime_contract,
         "missed_critical_jobs": missed_critical_jobs,
+        "failed_critical_jobs": failed_critical_jobs,
         "disabled_step_jobs": disabled_step_jobs,
         "next_action": next_action,
         "guardrails": {
@@ -449,6 +456,7 @@ def _schedule_intraday_simulation_summary(
     scheduled_steps: list[dict[str, Any]],
     critical_job_count: int,
     pending_first_run_critical_count: int,
+    failed_critical_count: int = 0,
 ) -> str:
     if not scheduled_steps:
         return "未找到下个窗口的盘中候选刷新/模拟承接任务；需要先核查 Hermes 调度。"
@@ -462,6 +470,8 @@ def _schedule_intraday_simulation_summary(
         return f"{base}；运行 profile 仍需人工确认。"
     if status == "schedule_attention_required":
         return f"{base}；存在调度缺失、停用或暂停，需要先修调度。"
+    if status == "critical_jobs_failed":
+        return f"{base}；{failed_critical_count} 个关键模拟承接任务最近运行失败，需要先核查日志。"
     if status == "critical_jobs_missed":
         return f"{base}；已有关键模拟承接任务漏跑，需要核查日志。"
     if status == "pending_first_run_verification":
@@ -475,7 +485,12 @@ def _schedule_intraday_simulation_next_action(
 ) -> dict[str, Any]:
     if status == "profile_review_required":
         return _runtime_profile_next_action(runtime_profile)
-    if status in {"schedule_attention_required", "critical_jobs_missed", "pending_first_run_verification"}:
+    if status in {
+        "schedule_attention_required",
+        "critical_jobs_failed",
+        "critical_jobs_missed",
+        "pending_first_run_verification",
+    }:
         return {
             "type": "inspect_hermes_trading_profile",
             "label": "检查 Hermes trading 调度",

@@ -84,6 +84,7 @@ def test_detects_volume_breakout_strategy_route(scorer):
     assert result.primary_strategy_route == "volume_breakout"
     assert result.strategy_routes[0].route == "volume_breakout"
     assert result.strategy_routes[0].family == "short_continuation"
+    assert result.strategy_routes[0].confidence == pytest.approx(0.96)
     payload = result.to_dict()
     assert payload["primary_strategy_route"] == "volume_breakout"
     assert payload["strategy_routes"][0]["display_name"] == "放量突破"
@@ -196,9 +197,37 @@ def test_detects_pullback_to_ma20_entry_with_constructive_volume(scorer):
     route = result.strategy_routes[0]
     assert route.display_name == "均线回踩转强"
     assert route.family == "trend_swing"
+    assert route.confidence > 0.9
     assert route.entry_signal is True
     assert route.evidence["volume_ratio"] == 1.4
     assert route.evidence["main_net_inflow"] == 120_000_000
+
+
+def test_detects_relative_strength_overheat_as_watch_route(scorer):
+    s = _make_snapshot(
+        name="强势过热候选",
+        quote=StockQuote(
+            code="600276", name="强势过热候选", price=58.0,
+            open=55.2, high=65.0, low=54.8, close=58.0,
+            volume=9000000, amount=8.8e8, change_pct=1.5,
+        ),
+        technical=TechnicalIndicators(
+            ma5=57.0, ma10=54.5, ma20=50.8, ma60=43.0,
+            above_ma20=True, volume_ratio=1.45, rsi=74.0,
+            golden_cross=False, ma20_slope=0.018,
+            momentum_5d=12.0, daily_volatility=0.045,
+            deviation_rate=11.2, change_pct=5.2,
+        ),
+    )
+
+    result = scorer.score(s)
+
+    assert result.primary_strategy_route == "relative_strength_overheat"
+    route = result.strategy_routes[0]
+    assert route.display_name == "强势过热观察"
+    assert route.status == "watch"
+    assert route.entry_signal is False
+    assert route.route_score >= 0.8
 
 
 def test_detects_trend_watch_route_when_volume_ratio_is_missing(scorer):
@@ -230,6 +259,126 @@ def test_detects_trend_watch_route_when_volume_ratio_is_missing(scorer):
     assert payload["route_diagnostics"][0]["route"] == "trend_watch"
 
 
+def test_detects_trend_cooling_off_watch_route_for_overheated_trend(scorer):
+    s = _make_snapshot(
+        name="趋势冷却候选",
+        quote=StockQuote(
+            code="688498", name="趋势冷却候选", price=93.2,
+            open=91.0, high=95.0, low=90.8, close=93.2,
+            volume=6500000, amount=9.6e8, change_pct=1.2,
+        ),
+        technical=TechnicalIndicators(
+            ma5=92.8, ma10=91.5, ma20=86.3, ma60=78.0,
+            above_ma20=True, volume_ratio=0.82, rsi=73.0,
+            golden_cross=True, ma20_slope=0.025,
+            momentum_5d=6.0, daily_volatility=0.045,
+            deviation_rate=8.0, change_pct=1.2,
+        ),
+        flow=FundFlow(net_inflow_1d=80_000_000, northbound_net_positive=False),
+    )
+
+    result = scorer.score(s)
+
+    assert result.entry_signal is False
+    assert result.primary_strategy_route == "trend_cooling_off"
+    route = result.strategy_routes[0]
+    assert route.display_name == "趋势冷却观察"
+    assert route.status == "watch"
+    assert route.entry_signal is False
+    assert "rsi_cooling_watch" in route.notes
+    assert route.evidence["rsi"] == 73.0
+    assert route.evidence["main_net_inflow"] == 80_000_000
+
+
+def test_classifies_near_pullback_without_flow_as_setup_watch(scorer):
+    s = _make_snapshot(
+        name="回踩待确认候选",
+        technical=TechnicalIndicators(
+            ma5=14.4, ma10=14.7, ma20=14.2, ma60=13.0,
+            above_ma20=True, volume_ratio=1.97, rsi=64.99,
+            golden_cross=False, ma20_slope=0.0087,
+            momentum_5d=0.31, daily_volatility=0.025,
+            deviation_rate=2.23, change_pct=0.43,
+        ),
+    )
+
+    result = scorer.score(s)
+
+    assert result.total >= 6.0
+    assert result.primary_strategy_route == "pullback_setup_watch"
+    route = result.strategy_routes[0]
+    assert route.display_name == "回踩待确认"
+    assert route.status == "watch"
+    assert route.entry_signal is False
+    assert "missing_flow_or_volume_confirmation" in route.notes
+
+
+def test_classifies_trend_structure_gap_as_watch_route(scorer):
+    s = _make_snapshot(
+        name="趋势结构观察候选",
+        technical=TechnicalIndicators(
+            ma5=15.0, ma10=14.6, ma20=14.2, ma60=13.0,
+            above_ma20=True, volume_ratio=1.85, rsi=68.33,
+            golden_cross=False, ma20_slope=0.0028,
+            momentum_5d=9.63, daily_volatility=0.035,
+            deviation_rate=6.39, change_pct=1.21,
+        ),
+    )
+
+    result = scorer.score(s)
+
+    assert result.primary_strategy_route == "trend_structure_watch"
+    route = result.strategy_routes[0]
+    assert route.display_name == "趋势结构观察"
+    assert route.status == "watch"
+    assert route.entry_signal is False
+    assert route.route_score >= 0.6
+
+
+def test_classifies_high_score_without_technical_route_as_score_strength_watch(scorer):
+    s = _make_snapshot(
+        name="评分支撑观察候选",
+        technical=TechnicalIndicators(
+            ma5=15.0, ma10=14.6, ma20=14.2, ma60=13.0,
+            above_ma20=True, volume_ratio=1.24, rsi=56.07,
+            golden_cross=False, ma20_slope=-0.0042,
+            momentum_5d=-0.12, daily_volatility=0.025,
+            deviation_rate=0.56, change_pct=1.26,
+        ),
+    )
+
+    result = scorer.score(s)
+
+    assert result.total >= 6.0
+    assert result.primary_strategy_route == "score_strength_watch"
+    route = result.strategy_routes[0]
+    assert route.display_name == "评分支撑观察"
+    assert route.status == "watch"
+    assert route.entry_signal is False
+
+
+def test_classifies_generic_entry_without_named_route_as_generic_entry_watch(scorer):
+    s = _make_snapshot(
+        name="通用入场观察候选",
+        technical=TechnicalIndicators(
+            ma5=15.0, ma10=14.6, ma20=14.2, ma60=13.0,
+            above_ma20=False, volume_ratio=1.55, rsi=55.0,
+            golden_cross=True, ma20_slope=-0.004,
+            momentum_5d=0.5, daily_volatility=0.025,
+            deviation_rate=1.5, change_pct=1.0,
+        ),
+    )
+
+    result = scorer.score(s)
+
+    assert result.entry_signal is True
+    assert result.primary_strategy_route == "generic_entry_signal_watch"
+    route = result.strategy_routes[0]
+    assert route.display_name == "通用入场观察"
+    assert route.status == "watch"
+    assert route.entry_signal is False
+
+
 def test_configured_volume_floor_allows_trend_golden_cross_entry():
     scorer = Scorer(
         weights=ScoringWeights(technical=3, fundamental=2, flow=2, sentiment=3),
@@ -251,6 +400,55 @@ def test_configured_volume_floor_allows_trend_golden_cross_entry():
     assert result.entry_signal is True
     route = next(route for route in result.strategy_routes if route.route == "ma_golden_cross")
     assert route.entry_signal is True
+
+
+def test_flow_score_discount_reduces_repeated_momentum_vote():
+    plain = Scorer(
+        weights=ScoringWeights(technical=4, fundamental=2.5, flow=3, sentiment=0.5),
+        veto_rules=[],
+        entry_cfg={"rsi_max": 70, "volume_ratio_min": 1.5},
+    ).score(_make_snapshot())
+    adjusted = Scorer(
+        weights=ScoringWeights(technical=4, fundamental=2.5, flow=3, sentiment=0.5),
+        veto_rules=[],
+        entry_cfg={"rsi_max": 70, "volume_ratio_min": 1.5},
+        score_adjustments={
+            "tech_flow_correlation": {
+                "enabled": True,
+                "tech_threshold": 2.5,
+                "flow_threshold": 1.5,
+                "flow_discount": 0.7,
+            }
+        },
+    ).score(_make_snapshot())
+
+    flow_dim = next(dim for dim in adjusted.dimensions if dim.name == "flow")
+    plain_flow_dim = next(dim for dim in plain.dimensions if dim.name == "flow")
+    assert flow_dim.score == pytest.approx(round(plain_flow_dim.score * 0.7, 1))
+    assert flow_dim.raw_data["pre_correlation_discount_score"] == plain_flow_dim.score
+    assert flow_dim.raw_data["correlation_discount"] == 0.7
+    assert adjusted.total < plain.total
+
+
+def test_fundamental_score_rewards_roe_improvement_against_own_history(scorer):
+    baseline = scorer.score(
+        _make_snapshot(financial=FinancialReport(roe=12.0, revenue_growth=8.0, operating_cash_flow=1e8))
+    )
+    improved = scorer.score(
+        _make_snapshot(
+            financial=FinancialReport(
+                roe=12.0,
+                roe_3y_ago=6.0,
+                revenue_growth=8.0,
+                operating_cash_flow=1e8,
+            )
+        )
+    )
+
+    fund_dim = next(dim for dim in improved.dimensions if dim.name == "fundamental")
+    assert fund_dim.raw_data["roe_trend"] == 6.0
+    assert "ROE改善" in fund_dim.detail
+    assert improved.total > baseline.total
 
 
 def test_dragon_head_route_uses_confirmed_sector_strength(scorer):

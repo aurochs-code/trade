@@ -249,6 +249,86 @@ class TestStrategyService:
         assert decision_payload["position_pct"] == 0.0
         assert event_store.query(event_type="manual_trade.requested") == []
 
+    def test_recent_false_breakouts_cool_entry_signal_to_watch(self, event_store):
+        score = ScoreResult(
+            code="002384",
+            name="东山精密",
+            total=7.1,
+            dimensions=[
+                DimensionScore("technical", 2.6, 3.0, "趋势成立"),
+                DimensionScore("fundamental", 1.2, 3.0, "基本面可用"),
+                DimensionScore("flow", 1.5, 2.0, "资金较强"),
+                DimensionScore("sentiment", 1.5, 2.0, "情绪中性"),
+            ],
+            entry_signal=True,
+            style=Style.MOMENTUM,
+            style_confidence=0.8,
+            data_quality=DataQuality.OK,
+            strategy_routes=[
+                StrategyRouteEvidence(
+                    route="ma_golden_cross",
+                    display_name="均线金叉",
+                    family="trend_swing",
+                    confidence=0.8,
+                    entry_signal=True,
+                )
+            ],
+            primary_strategy_route="ma_golden_cross",
+        )
+        for idx, review_as_of in enumerate(("2026-06-03", "2026-06-09"), start=1):
+            event_store.append(
+                stream=f"trade:002384:false_break_{idx}",
+                stream_type="trade",
+                event_type="trade.review.recorded",
+                payload={
+                    "code": "002384",
+                    "name": "东山精密",
+                    "entry_date": "2026-06-01",
+                    "review_as_of": review_as_of,
+                    "mae_pct": -0.06,
+                    "latest_return_pct": -0.04,
+                    "hypothesis_validation": {"status": "invalidation_possible"},
+                },
+                metadata={"source": "test"},
+            )
+
+        class StaticScorer:
+            def score_batch(self, snapshots):
+                return [score]
+
+        decider = Decider(
+            buy_threshold=6.0,
+            watch_threshold=5.0,
+            require_entry_signal_for_buy=True,
+        )
+        svc = StrategyService(
+            StaticScorer(),
+            decider,
+            event_store,
+            false_breakout_cfg={
+                "enabled": True,
+                "lookback_days": 30,
+                "failure_threshold": 2,
+                "cooldown_days": 10,
+                "as_of": "2026-06-13",
+            },
+        )
+
+        decisions = svc.evaluate(
+            [_make_snapshot("002384", "东山精密")],
+            MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
+            run_id="run_false_breakout_cooldown",
+            config_version="v_test",
+        )
+
+        assert decisions[0].action == Action.WATCH
+        assert "假突破冷却" in " ".join(decisions[0].notes)
+        decision_payload = event_store.query(event_type="decision.suggested")[-1]["payload"]
+        assert decision_payload["entry_signal"] is False
+        assert decision_payload["false_breakout_cooldown"]["active"] is True
+        assert decision_payload["strategy_routes"][0]["status"] == "watch"
+        assert event_store.query(event_type="manual_trade.requested") == []
+
     def test_degraded_score_keeps_previous_valid_score_as_reference_only(self, event_store):
         previous_event_id = event_store.append(
             stream="strategy:002138",

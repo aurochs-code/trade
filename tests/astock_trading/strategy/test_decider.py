@@ -26,6 +26,7 @@ def _make_score(total: float = 7.0, veto: bool = False, **kw) -> ScoreResult:
         data_quality=kw.get("data_quality", DataQuality.OK),
         data_missing_fields=kw.get("data_missing_fields", []),
         strategy_routes=kw.get("strategy_routes", []),
+        primary_strategy_route=kw.get("primary_strategy_route"),
     )
 
 
@@ -77,6 +78,162 @@ def test_red_market_blocks_buy(decider):
     assert d.action == Action.TRIAL_BUY
     assert d.market_multiplier == 0.0
     assert "试买意向" in " ".join(d.notes)
+
+
+def test_regime_overlay_can_disable_red_clear_trial_buy():
+    decider = Decider(
+        buy_threshold=6.0,
+        watch_threshold=5.0,
+        trial_buy_threshold=6.0,
+        market_regime_overlays={
+            "RED": {"allow_trial_buy": False, "buy_threshold": 7.0},
+            "CLEAR": {"allow_trial_buy": False, "buy_threshold": 7.0},
+        },
+    )
+    score = _make_score(8.0, entry_signal=True)
+
+    d = decider.decide(score, MarketState(signal=MarketSignal.RED, multiplier=0.0))
+
+    assert d.action == Action.WATCH
+    assert d.position_pct == 0.0
+    assert "制度阻断观察" in " ".join(d.notes)
+
+
+def test_green_regime_overlay_raises_buy_line_without_switching_profile():
+    decider = build_decider_from_config(
+        {
+            "scoring": {
+                "thresholds": {"buy": 6.0, "watch": 5.0, "reject": 4.0},
+                "decision_gates": {
+                    "require_entry_signal_for_buy": True,
+                    "trial_buy_entry_signal_threshold": 5.5,
+                    "min_data_quality_for_buy": "ok",
+                    "max_missing_fields_for_buy": 0,
+                },
+                "market_regime_overlays": {
+                    "GREEN": {"buy_threshold": 6.5}
+                },
+            },
+            "risk": {"position": {"single_max": 0.2, "total_max": 0.6}},
+        }
+    )
+    score = _make_score(6.2, entry_signal=True)
+
+    d = decider.decide(score, MarketState(signal=MarketSignal.GREEN, multiplier=1.0))
+
+    assert d.action == Action.TRIAL_BUY
+    assert d.position_pct == 0.0
+    assert d.score == 6.2
+    assert decider.buy_threshold == 6.0
+    assert "市场制度 GREEN 买入线 6.5" in " ".join(d.notes)
+
+
+def test_yellow_regime_overlay_disables_trial_buy_and_raises_buy_line():
+    decider = build_decider_from_config(
+        {
+            "scoring": {
+                "thresholds": {"buy": 6.0, "watch": 5.0, "reject": 4.0},
+                "decision_gates": {
+                    "require_entry_signal_for_buy": True,
+                    "trial_buy_entry_signal_threshold": 5.5,
+                    "min_data_quality_for_buy": "ok",
+                    "max_missing_fields_for_buy": 0,
+                },
+                "market_regime_overlays": {
+                    "YELLOW": {"buy_threshold": 6.5, "allow_trial_buy": False}
+                },
+            },
+            "risk": {"position": {"single_max": 0.2, "total_max": 0.6}},
+        }
+    )
+    score = _make_score(6.2, entry_signal=True)
+
+    d = decider.decide(score, MarketState(signal=MarketSignal.YELLOW, multiplier=0.5))
+
+    assert d.action == Action.WATCH
+    assert d.position_pct == 0.0
+    assert "市场制度 YELLOW 买入线 6.5" in " ".join(d.notes)
+
+
+def test_regime_overlay_blocks_disabled_trial_route_only():
+    decider = Decider(
+        buy_threshold=6.0,
+        watch_threshold=5.0,
+        trial_buy_threshold=6.0,
+        market_regime_overlays={
+            "RED": {
+                "allow_trial_buy": True,
+                "disabled_trial_routes": ["shrink_pullback"],
+            }
+        },
+    )
+    score = _make_score(
+        6.4,
+        strategy_routes=[
+            StrategyRouteEvidence(
+                route="shrink_pullback",
+                display_name="缩量回踩",
+                family="trend_swing",
+                confidence=0.84,
+                entry_signal=True,
+            )
+        ],
+        entry_signal=True,
+    )
+
+    d = decider.decide(score, MarketState(signal=MarketSignal.RED, multiplier=0.0))
+
+    assert d.action == Action.WATCH
+    assert "市场制度禁用试买路线" in " ".join(d.notes)
+
+
+def test_regime_overlay_can_allow_only_specific_trial_routes():
+    decider = Decider(
+        buy_threshold=6.0,
+        watch_threshold=5.0,
+        trial_buy_threshold=6.0,
+        market_regime_overlays={
+            "RED": {
+                "allow_trial_buy": True,
+                "enabled_trial_routes": ["pullback_to_ma20"],
+            }
+        },
+    )
+    pullback = _make_score(
+        6.4,
+        entry_signal=True,
+        primary_strategy_route="pullback_to_ma20",
+        strategy_routes=[
+            StrategyRouteEvidence(
+                route="pullback_to_ma20",
+                display_name="均线回踩转强",
+                family="trend_swing",
+                confidence=0.86,
+                entry_signal=True,
+            )
+        ],
+    )
+    short = _make_score(
+        6.4,
+        entry_signal=True,
+        primary_strategy_route="short_continuation",
+        strategy_routes=[
+            StrategyRouteEvidence(
+                route="short_continuation",
+                display_name="短续接力",
+                family="short_continuation",
+                confidence=0.9,
+                entry_signal=True,
+            )
+        ],
+    )
+
+    allowed = decider.decide(pullback, MarketState(signal=MarketSignal.RED, multiplier=0.0))
+    blocked = decider.decide(short, MarketState(signal=MarketSignal.RED, multiplier=0.0))
+
+    assert allowed.action == Action.TRIAL_BUY
+    assert blocked.action == Action.WATCH
+    assert "只允许试买路线" in " ".join(blocked.notes)
 
 
 def test_red_market_low_score_stays_watch(decider):

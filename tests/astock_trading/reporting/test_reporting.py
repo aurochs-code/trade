@@ -10,6 +10,7 @@ from astock_trading.platform.domain_events import AUTO_TRADE_EXECUTED
 from astock_trading.platform.events import EventStore
 from astock_trading.reporting.discord import (
     format_evening_embed, format_morning_embed,
+    format_weekly_embed,
     format_scoring_embed, format_stop_alert_embed,
     format_propose_plan_embed, format_daily_inspection_embed,
     format_manual_confirmation_embed,
@@ -723,9 +724,58 @@ class TestReportGenerator:
         _seed(event_store, db)
         assert "盘前摘要" in ReportGenerator(event_store, db).generate_morning_report("run_1")
 
+    def test_morning_report_includes_pre_market_action_preview(self, event_store, db):
+        db.execute(
+            """INSERT INTO projection_candidate_pool
+               (code, pool_tier, name, score, added_at, last_scored_at, streak_days, note)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "002384",
+                "core",
+                "东山精密",
+                7.2,
+                "2026-06-13T09:30:00+08:00",
+                "2026-06-13T13:40:00+08:00",
+                1,
+                "screener_refresh",
+            ),
+        )
+
+        report = ReportGenerator(event_store, db).generate_morning_report("run_1")
+
+        assert "## 今日操作预览" in report
+        assert "候选池：核心 1 / 观察 0 / 强势观察 0" in report
+        assert "atrade paper auto-readiness --json" in report
+        assert "atrade stock analyze 002384 --json" in report
+
     def test_evening_report(self, event_store, db):
         _seed(event_store, db)
         assert "收盘报告" in ReportGenerator(event_store, db).generate_evening_report("run_1")
+
+    def test_evening_report_includes_today_trade_attribution(self, event_store, db):
+        event_store.append(
+            stream="strategy:002384",
+            stream_type="strategy",
+            event_type="decision.suggested",
+            payload={
+                "code": "002384",
+                "name": "东山精密",
+                "action": "BUY",
+                "score": 7.1,
+                "entry_signal": True,
+                "primary_strategy_route": "flow_confirmed_trend",
+                "primary_strategy_route_label": "资金趋势确认",
+            },
+            metadata={"run_id": "run_evening_attr"},
+        )
+
+        report = ReportGenerator(event_store, db).generate_evening_report("run_1")
+
+        assert "## 今日交易归因" in report
+        assert "东山精密" in report
+        assert "买入意向" in report
+        assert "资金趋势确认" in report
+        assert "atrade stock analyze 002384 --json" in report
 
     def test_evening_report_includes_shadow_reconciliation(self, event_store, db):
         event_store.append(
@@ -752,6 +802,52 @@ class TestReportGenerator:
 
     def test_weekly_report(self, event_store, db):
         assert "周报" in ReportGenerator(event_store, db).generate_weekly_report()
+
+    def test_weekly_report_includes_route_return_attribution(self, event_store, db):
+        score_event_id = event_store.append(
+            stream="strategy:002384",
+            stream_type="strategy",
+            event_type="score.calculated",
+            payload={
+                "code": "002384",
+                "name": "东山精密",
+                "total_score": 7.1,
+                "primary_strategy_route": "flow_confirmed_trend",
+                "primary_strategy_route_label": "资金趋势确认",
+                "strategy_routes": [
+                    {"route": "flow_confirmed_trend", "display_name": "资金趋势确认"}
+                ],
+            },
+        )
+        hypothesis_event_id = event_store.append(
+            stream="trade:002384:order-test",
+            stream_type="trade",
+            event_type="trade.hypothesis.recorded",
+            payload={
+                "code": "002384",
+                "order_id": "order-test",
+                "source_score_event_id": score_event_id,
+                "hypothesis": {"entry_signal_type": "flow_confirmed_trend"},
+            },
+        )
+        event_store.append(
+            stream="trade:002384:order-test",
+            stream_type="trade",
+            event_type="trade.review.recorded",
+            payload={
+                "code": "002384",
+                "order_id": "order-test",
+                "latest_return_pct": 0.06,
+                "source_hypothesis_event_id": hypothesis_event_id,
+            },
+        )
+
+        report = ReportGenerator(event_store, db).generate_weekly_report()
+
+        assert "## 路线收益归因" in report
+        assert "资金趋势确认" in report
+        assert "+6.00%" in report
+        assert "胜率 100%" in report
 
 
 class TestDiscordFormat:
@@ -787,6 +883,78 @@ class TestDiscordFormat:
         flash_field = next(field for field in embed["fields"] if field["name"] == "财经快讯")
         assert "影响: 宏观/出口链/人民币风险" in flash_field["value"]
         assert "动作:" in flash_field["value"]
+
+    def test_morning_embed_includes_auto_readiness_guidance(self):
+        embed = format_morning_embed({
+            "date": "2026-04-14",
+            "market_signal": "YELLOW",
+            "auto_trade_readiness": {
+                "status": "waiting_window",
+                "mode": "mx_paper_order",
+                "summary": "已有买入意向但当前不在模拟买入窗口，不会提交模拟买入",
+                "candidate_pool": {
+                    "core_count": 3,
+                    "watch_count": 2,
+                    "radar_count": 1,
+                },
+                "buy_side": {
+                    "status": "waiting_window",
+                    "current_entry_signals": [
+                        {"code": "002138", "name": "双环传动"},
+                    ],
+                },
+                "execution_profile": {
+                    "current_profile": "trend_swing",
+                    "status": "ok",
+                },
+                "next_action": {
+                    "command": "atrade paper auto-readiness --json",
+                },
+            },
+        })
+
+        guidance = next(field for field in embed["fields"] if field["name"] == "今日操作指引")
+        assert "等待窗口" in guidance["value"]
+        assert "MX 模拟盘委托" in guidance["value"]
+        assert "核心 3 / 观察 2 / 强势观察 1" in guidance["value"]
+        assert "当前入场信号 1" in guidance["value"]
+        assert "trend_swing" in guidance["value"]
+        assert "atrade paper auto-readiness --json" in guidance["value"]
+
+    def test_weekly_embed_includes_paper_route_attribution(self):
+        embed = format_weekly_embed({
+            "week": "2026-W23",
+            "paper_stats": {
+                "by_route": [
+                    {
+                        "route": "资金趋势确认",
+                        "buy_count": 2,
+                        "sell_count": 1,
+                        "net_pnl_cents": 12000,
+                        "win_count": 1,
+                        "loss_count": 0,
+                        "win_rate": 1.0,
+                    },
+                    {
+                        "route": "放量突破",
+                        "buy_count": 1,
+                        "sell_count": 1,
+                        "net_pnl_cents": -4000,
+                        "win_count": 0,
+                        "loss_count": 1,
+                        "win_rate": 0.0,
+                    },
+                ],
+            },
+        })
+
+        field = next(field for field in embed["fields"] if field["name"] == "模拟盘路线归因")
+        assert "资金趋势确认" in field["value"]
+        assert "2买/1卖" in field["value"]
+        assert "¥+120" in field["value"]
+        assert "胜率 100%" in field["value"]
+        assert "放量突破" in field["value"]
+        assert "¥-40" in field["value"]
 
     def test_evening_embed(self):
         embed = format_evening_embed({

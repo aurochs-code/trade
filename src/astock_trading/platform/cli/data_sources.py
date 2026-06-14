@@ -206,6 +206,116 @@ def data_sources_diagnose(
         conn.close()
 
 
+@data_sources_app.command("coverage")
+def data_sources_coverage(
+    source: Optional[str] = typer.Option(None, "--source", help="限定数据源，如 tushare 或 baostock"),
+    adjustflag: Optional[str] = typer.Option(None, "--adjustflag", help="限定复权口径：2=前复权，3=不复权"),
+    start: Optional[str] = typer.Option(None, "--start", help="覆盖率统计开始日期 YYYY-MM-DD"),
+    end: Optional[str] = typer.Option(None, "--end", help="覆盖率统计结束日期 YYYY-MM-DD"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """查看 market_price_bars 市场数据覆盖率。"""
+    from astock_trading.market.data_hydration import summarize_price_bar_coverage
+
+    conn = connect()
+    try:
+        result = summarize_price_bar_coverage(
+            conn,
+            source=source,
+            adjustflag=adjustflag,
+            start=start,
+            end=end,
+        )
+        if as_json:
+            json_or_text(result, True)
+            return
+
+        typer.echo(f"市场数据覆盖率: {result['status']}")
+        for item in result["price_bars"]:
+            typer.echo(
+                f"  {item['source']} adjustflag={item['adjustflag']} "
+                f"{item['start_date']}~{item['end_date']} "
+                f"rows={item['row_count']} symbols={item['symbol_count']} "
+                f"days={item['trading_day_count']}"
+            )
+        if not result["price_bars"]:
+            typer.echo("  - 暂无 market_price_bars 落库数据")
+    finally:
+        conn.close()
+
+
+@data_sources_app.command("hydrate-market-bars")
+def data_sources_hydrate_market_bars(
+    start: str = typer.Argument(..., help="补水开始日期 YYYY-MM-DD"),
+    end: str = typer.Argument(..., help="补水结束日期 YYYY-MM-DD"),
+    source: str = typer.Option("tushare", "--source", help="数据源；当前仅支持 tushare 全市场普通日线"),
+    adjustflag: str = typer.Option("3", "--adjustflag", help="复权口径；Tushare daily 只能使用 3=不复权"),
+    limit_dates: Optional[int] = typer.Option(None, "--limit-dates", min=1, help="最多处理几个交易日，用于小范围验收"),
+    write: bool = typer.Option(False, "--write", help="实际写入 market_price_bars；默认仅 dry-run"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """按交易日补齐全市场日线 K 线。"""
+    from astock_trading.market.data_hydration import hydrate_tushare_daily_market_bars
+    from astock_trading.market.tushare_adapters import TushareClient
+
+    if source != "tushare":
+        result = {
+            "status": "failed",
+            "error": f"暂不支持 source={source} 的全市场日线补水；前复权历史请继续用回测 --hydrate-data 按股票池补齐。",
+            "source": source,
+            "start": start,
+            "end": end,
+        }
+        if as_json:
+            json_or_text(result, True)
+            raise typer.Exit(1)
+        typer.secho(result["error"], fg="red")
+        raise typer.Exit(1)
+
+    conn = connect()
+    try:
+        try:
+            result = hydrate_tushare_daily_market_bars(
+                conn,
+                client=TushareClient.from_env(),
+                start=start,
+                end=end,
+                adjustflag=adjustflag,
+                dry_run=not write,
+                limit_dates=limit_dates,
+            )
+        except ValueError as exc:
+            result = {
+                "status": "failed",
+                "error": str(exc),
+                "source": source,
+                "adjustflag": adjustflag,
+                "start": start,
+                "end": end,
+            }
+            if as_json:
+                json_or_text(result, True)
+                raise typer.Exit(1)
+            typer.secho(str(exc), fg="red")
+            raise typer.Exit(1)
+
+        if as_json:
+            json_or_text(result, True)
+            if result.get("status") == "failed":
+                raise typer.Exit(1)
+            return
+
+        typer.echo(
+            f"全市场日线补水: {result['status']} "
+            f"{result['start']}~{result['end']} dates={result['trade_date_count']} "
+            f"planned={result['planned_rows']} written={result['rows_written']}"
+        )
+        for note in result.get("notes", []):
+            typer.echo(f"  - {note}")
+    finally:
+        conn.close()
+
+
 def register_check_data_sources(app: typer.Typer) -> None:
     @app.command("check-data-sources")
     def check_data_sources(

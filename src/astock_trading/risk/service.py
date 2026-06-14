@@ -128,6 +128,8 @@ class RiskService:
         run_id: str,
         single_max_pct: float = 0.20,
         total_max_pct: float = 0.60,
+        daily_atr_pct: float = 0.0,
+        target_vol_pct: float = 0.02,
     ) -> PositionSize:
         """
         仓位计算，结果追加到 event_log。
@@ -139,7 +141,12 @@ class RiskService:
             market_multiplier=market_multiplier,
             single_max_pct=single_max_pct,
             total_max_pct=total_max_pct,
+            daily_atr_pct=daily_atr_pct,
+            target_vol_pct=target_vol_pct,
         )
+        volatility_adjustment = 1.0
+        if daily_atr_pct > 0 and target_vol_pct > 0:
+            volatility_adjustment = min(1.0, target_vol_pct / daily_atr_pct)
 
         self._event_store.append(
             stream=f"risk:{code}",
@@ -151,6 +158,9 @@ class RiskService:
                 "amount": ps.amount,
                 "pct": ps.pct,
                 "market_multiplier": ps.market_multiplier,
+                "daily_atr_pct": daily_atr_pct,
+                "target_vol_pct": target_vol_pct,
+                "volatility_adjustment": round(volatility_adjustment, 4),
             },
             metadata={"run_id": run_id},
         )

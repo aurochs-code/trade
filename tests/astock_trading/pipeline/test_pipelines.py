@@ -279,6 +279,53 @@ class TestMorningPipeline:
         assert result["market_announcements"] == 1
         assert {"跨平台热度", "财经快讯", "海外风险", "公告提示"} <= field_names
 
+    def test_includes_auto_readiness_guidance_in_summary(self, ctx, monkeypatch):
+        monkeypatch.setattr("astock_trading.reporting.discord_sender.send_embed", lambda *args, **kwargs: (True, None))
+
+        def fake_readiness(context, *, include_account=True, **kwargs):
+            assert context is ctx
+            assert include_account is False
+            return {
+                "status": "waiting_window",
+                "mode": "mx_paper_order",
+                "summary": "已有买入意向但当前不在模拟买入窗口，不会提交模拟买入",
+                "candidate_pool": {
+                    "core_count": 3,
+                    "watch_count": 2,
+                    "radar_count": 1,
+                },
+                "buy_side": {
+                    "status": "waiting_window",
+                    "current_entry_signals": [
+                        {"code": "002138", "name": "双环传动"},
+                    ],
+                },
+                "execution_profile": {
+                    "current_profile": "trend_swing",
+                    "status": "ok",
+                },
+                "next_action": {
+                    "command": "atrade paper auto-readiness --json",
+                },
+            }
+
+        monkeypatch.setattr(
+            "astock_trading.pipeline.morning.build_auto_trade_readiness",
+            fake_readiness,
+            raising=False,
+        )
+
+        from astock_trading.pipeline.morning import run
+
+        result = run(ctx, "run_morning_readiness")
+        field = next(field for field in result["discord_embed"]["fields"] if field["name"] == "今日操作指引")
+
+        assert result["auto_trade_readiness"]["status"] == "waiting_window"
+        assert "等待窗口" in field["value"]
+        assert "核心 3 / 观察 2 / 强势观察 1" in field["value"]
+        assert "当前入场信号 1" in field["value"]
+        assert "atrade paper auto-readiness --json" in field["value"]
+
     def test_writes_obsidian(self, ctx):
         from astock_trading.pipeline.morning import run
         run(ctx, "run_morning_test")
@@ -721,3 +768,57 @@ class TestWeeklyPipeline:
         assert result["paper_stats"]["sell_count"] == 1
         assert result["paper_stats"]["net_pnl_cents"] == 12000
         assert "| 净盈亏 | ¥+120 |" in content
+
+    def test_weekly_report_groups_paper_pnl_by_route(self, ctx, monkeypatch):
+        monkeypatch.setattr("astock_trading.reporting.discord_sender.send_embed", lambda *args, **kwargs: (True, None))
+        for code, name, route, route_label, realized_pnl in (
+            ("002138", "双环传动", "flow_confirmed_trend", "资金趋势确认", 12000),
+            ("300274", "阳光电源", "volume_breakout", "放量突破", -4000),
+        ):
+            ctx.event_store.append(
+                stream=f"paper:{code}",
+                stream_type="paper_trade",
+                event_type=AUTO_TRADE_EXECUTED,
+                payload={
+                    "side": "buy",
+                    "code": code,
+                    "name": name,
+                    "shares": 100,
+                    "price": 10.0,
+                    "status": "filled",
+                    "primary_strategy_route": route,
+                    "primary_strategy_route_label": route_label,
+                },
+                metadata={"run_id": "paper_weekly_route", "account": "paper"},
+            )
+            ctx.event_store.append(
+                stream=f"paper:{code}",
+                stream_type="paper_trade",
+                event_type=AUTO_TRADE_EXECUTED,
+                payload={
+                    "side": "sell",
+                    "code": code,
+                    "name": name,
+                    "shares": 100,
+                    "price": 11.2,
+                    "status": "filled",
+                    "realized_pnl_cents": realized_pnl,
+                },
+                metadata={"run_id": "paper_weekly_route", "account": "paper"},
+            )
+
+        from astock_trading.pipeline.weekly import run
+
+        result = run(ctx, "run_weekly_paper_route")
+        week_file = next((Path(ctx.vault_path) / "03-分析" / "周复盘").glob("*.md"))
+        content = week_file.read_text(encoding="utf-8")
+        stats = {row["route"]: row for row in result["paper_stats"]["by_route"]}
+
+        assert stats["资金趋势确认"]["buy_count"] == 1
+        assert stats["资金趋势确认"]["sell_count"] == 1
+        assert stats["资金趋势确认"]["net_pnl_cents"] == 12000
+        assert stats["资金趋势确认"]["win_rate"] == 1.0
+        assert stats["放量突破"]["loss_count"] == 1
+        assert "### 模拟盘路线归因" in content
+        assert "| 资金趋势确认 | 1 | 1 | ¥+120 | 100% |" in content
+        assert "| 放量突破 | 1 | 1 | ¥-40 | 0% |" in content

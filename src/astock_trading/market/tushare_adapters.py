@@ -273,6 +273,16 @@ class TushareMarketAdapter:
             return None
         return await asyncio.to_thread(self._get_kline_sync, code, count)
 
+    async def get_trade_dates(self, start: str, end: str) -> list[str]:
+        if not self._client.enabled:
+            return []
+        return await asyncio.to_thread(self._get_trade_dates_sync, start, end)
+
+    async def get_daily_market_bars(self, trade_date: str) -> pd.DataFrame:
+        if not self._client.enabled:
+            return pd.DataFrame()
+        return await asyncio.to_thread(self._get_daily_market_bars_sync, trade_date)
+
     async def get_index(self, symbols: list[str]) -> dict[str, IndexQuote]:
         if not self._client.enabled:
             return {}
@@ -323,6 +333,46 @@ class TushareMarketAdapter:
             },
             fields="ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount",
         )
+
+    def _get_trade_dates_sync(self, start: str, end: str) -> list[str]:
+        rows = self._client.query(
+            "trade_cal",
+            params={
+                "exchange": "SSE",
+                "is_open": "1",
+                "start_date": _normalize_trade_date(start),
+                "end_date": _normalize_trade_date(end),
+            },
+            fields="cal_date",
+        )
+        dates = {
+            str(row.get("cal_date") or "").strip()
+            for row in rows
+            if str(row.get("cal_date") or "").strip()
+        }
+        return sorted(dates)
+
+    def _get_daily_market_bars_sync(self, trade_date: str) -> pd.DataFrame:
+        compact = _normalize_trade_date(trade_date)
+        rows = self._client.query(
+            "daily",
+            params={"trade_date": compact},
+            fields="ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount",
+        )
+        if not rows:
+            return pd.DataFrame()
+        rows = sorted(rows, key=lambda item: str(item.get("ts_code") or ""))
+        return pd.DataFrame({
+            "symbol": [_from_ts_code(str(row.get("ts_code") or "")) for row in rows],
+            "date": [str(row.get("trade_date") or compact) for row in rows],
+            "open": [_to_float(row.get("open")) for row in rows],
+            "high": [_to_float(row.get("high")) for row in rows],
+            "low": [_to_float(row.get("low")) for row in rows],
+            "close": [_to_float(row.get("close")) for row in rows],
+            "volume": [_daily_volume_to_shares(row.get("vol")) for row in rows],
+            "amount": [_daily_amount_to_yuan(row.get("amount")) for row in rows],
+            "涨跌幅": [_to_float(row.get("pct_chg")) for row in rows],
+        })
 
     def _get_realtime_sync(self, codes: list[str]) -> dict[str, StockQuote]:
         quotes: dict[str, StockQuote] = {}
@@ -566,6 +616,7 @@ class TushareFinancialAdapter:
             return None
         return FinancialReport(
             roe=_optional_float(latest_indicator.get("roe")),
+            roe_3y_ago=_indicator_roe_3y_ago(indicators),
             revenue_growth=_optional_float(latest_indicator.get("or_yoy")),
             net_profit_growth=_optional_float(latest_indicator.get("netprofit_yoy")),
             operating_cash_flow=_optional_float(latest_indicator.get("ocf_to_or")),
@@ -573,6 +624,29 @@ class TushareFinancialAdapter:
             pb=_optional_float(latest_basic.get("pb")),
             debt_ratio=_optional_float(latest_indicator.get("debt_to_assets")),
         )
+
+
+def _indicator_roe_3y_ago(indicators: list[dict[str, Any]]) -> Optional[float]:
+    if not indicators:
+        return None
+    latest_year = _indicator_year(indicators[-1])
+    if latest_year is None:
+        return None
+    target_year = latest_year - 3
+    for row in reversed(indicators):
+        if _indicator_year(row) == target_year:
+            return _optional_float(row.get("roe"))
+    return None
+
+
+def _indicator_year(row: dict[str, Any]) -> Optional[int]:
+    text = str(row.get("end_date") or "")
+    if len(text) < 4:
+        return None
+    try:
+        return int(text[:4])
+    except ValueError:
+        return None
 
 
 class TushareFlowAdapter:

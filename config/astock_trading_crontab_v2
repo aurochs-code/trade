@@ -6,6 +6,9 @@
 TRADE="atrade"
 LOG_DIR="$HOME/.local/state/a-stock-trading/logs/cron"
 
+# 盘前舆情 08:00：扫描持仓 + 核心/观察/强势观察候选的隔夜舆情
+0 8 * * 1-5 $TRADE run-pipeline sentiment --json >> $LOG_DIR/cron_sentiment.log 2>&1
+
 # 盘前摘要 08:25
 25 8 * * 1-5 $TRADE run-pipeline morning --json >> $LOG_DIR/cron_morning.log 2>&1
 
@@ -38,12 +41,24 @@ LOG_DIR="$HOME/.local/state/a-stock-trading/logs/cron"
 # 核心池评分 15:25：候选刷新后再评分，避免评分早于候选池
 25 15 * * 1-5 $TRADE run-pipeline scoring --json >> $LOG_DIR/cron_scoring.log 2>&1
 
+# 盘后舆情 15:30：汇总当日持仓 + 候选池重大舆情
+30 15 * * 1-5 $TRADE run-pipeline sentiment --json >> $LOG_DIR/cron_sentiment.log 2>&1
+
 # 收盘报告 15:35
 35 15 * * 1-5 $TRADE run-pipeline evening --json >> $LOG_DIR/cron_evening.log 2>&1
 
 # 影子试运行记录与当日复盘 15:45：只写 paper.trial.* 影子事件，不提交模拟盘订单
 45 15 * * 1-5 $TRADE paper trial-plan --record --json >> $LOG_DIR/cron_paper_trial.log 2>&1
 46 15 * * 1-5 $TRADE paper trial-review --min-age-days 0 --record --json >> $LOG_DIR/cron_paper_trial.log 2>&1
+
+# 全市场日线增量 18:10：Tushare daily 非复权日线，写 market_price_bars adjustflag=3
+10 18 * * 1-5 $TRADE data-sources hydrate-market-bars $(date +\%F) $(date +\%F) --source tushare --adjustflag 3 --write --json >> $LOG_DIR/cron_market_bars_hydrate.log 2>&1
+
+# 全市场日线增量兜底 20:30：处理 Tushare 当日数据延迟或首轮失败
+30 20 * * 1-5 $TRADE data-sources hydrate-market-bars $(date +\%F) $(date +\%F) --source tushare --adjustflag 3 --write --json >> $LOG_DIR/cron_market_bars_hydrate.log 2>&1
+
+# 市场数据覆盖率检查 21:00：只读，便于 agent/运维确认落库范围
+0 21 * * 1-5 $TRADE data-sources coverage --source tushare --adjustflag 3 --json >> $LOG_DIR/cron_market_data_coverage.log 2>&1
 
 # 周报 周日 20:00
 0 20 * * 0 $TRADE run-pipeline weekly --json >> $LOG_DIR/cron_weekly.log 2>&1

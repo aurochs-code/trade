@@ -146,6 +146,54 @@ def test_tushare_market_adapter_maps_daily_data_to_quote_and_kline():
     assert list(kline["volume"]) == [100_000, 123_400]
 
 
+def test_tushare_market_adapter_fetches_trade_calendar_and_full_market_daily():
+    from astock_trading.market.tushare_adapters import TushareMarketAdapter
+
+    client = FakeTushareClient({
+        "trade_cal": [
+            {"cal_date": "20260611"},
+            {"cal_date": "20260612"},
+        ],
+        "daily": [
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": "20260612",
+                "open": 10.0,
+                "high": 10.8,
+                "low": 9.8,
+                "close": 10.5,
+                "pct_chg": 2.3,
+                "vol": 1234.0,
+                "amount": 5678.0,
+            },
+            {
+                "ts_code": "600036.SH",
+                "trade_date": "20260612",
+                "open": 35.0,
+                "high": 36.0,
+                "low": 34.5,
+                "close": 35.8,
+                "pct_chg": 1.7,
+                "vol": 4321.0,
+                "amount": 8765.0,
+            },
+        ],
+    })
+    adapter = TushareMarketAdapter(client=client)
+
+    dates = asyncio.run(adapter.get_trade_dates("2026-06-11", "2026-06-12"))
+    bars = asyncio.run(adapter.get_daily_market_bars("2026-06-12"))
+
+    assert dates == ["20260611", "20260612"]
+    assert list(bars["symbol"]) == ["000001", "600036"]
+    assert list(bars["date"]) == ["20260612", "20260612"]
+    assert list(bars["close"]) == [10.5, 35.8]
+    assert list(bars["volume"]) == [123_400, 432_100]
+    assert [call[0] for call in client.calls] == ["trade_cal", "daily"]
+    assert client.calls[0][1]["is_open"] == "1"
+    assert client.calls[1][1]["trade_date"] == "20260612"
+
+
 def test_tushare_financial_and_flow_adapters_use_regular_6000_point_interfaces():
     from astock_trading.market.tushare_adapters import TushareFinancialAdapter, TushareFlowAdapter
 
@@ -154,6 +202,7 @@ def test_tushare_financial_and_flow_adapters_use_regular_6000_point_interfaces()
             {"trade_date": "20260612", "pe_ttm": 18.5, "pb": 2.1},
         ],
         "fina_indicator": [
+            {"end_date": "20230331", "roe": 6.1},
             {
                 "end_date": "20260331",
                 "roe": 12.3,
@@ -175,6 +224,7 @@ def test_tushare_financial_and_flow_adapters_use_regular_6000_point_interfaces()
     default_flow = asyncio.run(TushareFlowAdapter(client=client).get_fund_flow("000001"))
 
     assert financial.roe == 12.3
+    assert financial.roe_3y_ago == 6.1
     assert financial.revenue_growth == 16.8
     assert financial.net_profit_growth == 21.5
     assert financial.operating_cash_flow == 0.17

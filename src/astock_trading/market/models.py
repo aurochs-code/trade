@@ -48,6 +48,7 @@ class TechnicalIndicators:
 @dataclass(frozen=True)
 class FinancialReport:
     roe: Optional[float] = None
+    roe_3y_ago: Optional[float] = None
     revenue_growth: Optional[float] = None
     net_profit_growth: Optional[float] = None
     operating_cash_flow: Optional[float] = None

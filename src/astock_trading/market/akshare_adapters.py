@@ -423,19 +423,44 @@ class AkShareFinancialAdapter:
         if df is None or df.empty:
             return None
 
+        date_col = next((c for c in ("日期", "报告期", "公告日期") if c in df.columns), None)
+
+        def _col(col_name_pattern: str) -> Optional[str]:
+            return next((c for c in df.columns if col_name_pattern in str(c)), None)
+
         def _latest(col_name_pattern: str) -> Optional[float]:
-            col = next((c for c in df.columns if col_name_pattern in str(c)), None)
+            col = _col(col_name_pattern)
             if not col:
                 return None
             vals = df[col].dropna().head(4).tolist()
             return _parse_financial_number(vals[0]) if vals else None
 
+        def _three_years_ago(col_name_pattern: str) -> Optional[float]:
+            col = _col(col_name_pattern)
+            if not col:
+                return None
+            if date_col:
+                rows = df.sort_values(date_col, ascending=False).to_dict("records")
+                if not rows:
+                    return None
+                latest_year = _report_year(rows[0].get(date_col))
+                if latest_year is not None:
+                    target_year = latest_year - 3
+                    for row in rows:
+                        if _report_year(row.get(date_col)) == target_year:
+                            return _parse_financial_number(row.get(col))
+            vals = df[col].dropna().head(4).tolist()
+            return _parse_financial_number(vals[3]) if len(vals) >= 4 else None
+
         roe = _latest("净资产收益率")  # 取加权净资产收益率更准确
+        roe_3y_ago = _three_years_ago("净资产收益率")
         if roe is None:
             roe = _latest("总资产净利润率")
+            roe_3y_ago = _three_years_ago("总资产净利润率")
 
         return FinancialReport(
             roe=roe,
+            roe_3y_ago=roe_3y_ago,
             revenue_growth=_latest("主营业务收入增长率"),
             operating_cash_flow=_latest("每股经营性现金流"),
         )
@@ -445,12 +470,23 @@ class AkShareFinancialAdapter:
             return None
 
         rows = df.sort_values("报告期", ascending=False).to_dict("records")
+        latest_year = _report_year(rows[0].get("报告期")) if rows else None
+        roe_3y_ago = None
+        if latest_year is not None:
+            for row in rows:
+                if _report_year(row.get("报告期")) == latest_year - 3:
+                    roe_3y_ago = (
+                        _parse_financial_number(row.get("净资产收益率"))
+                        or _parse_financial_number(row.get("净资产收益率-摊薄"))
+                    )
+                    break
         for row in rows:
             report = FinancialReport(
                 roe=(
                     _parse_financial_number(row.get("净资产收益率"))
                     or _parse_financial_number(row.get("净资产收益率-摊薄"))
                 ),
+                roe_3y_ago=roe_3y_ago,
                 revenue_growth=_parse_financial_number(row.get("营业总收入同比增长率")),
                 operating_cash_flow=_parse_financial_number(row.get("每股经营现金流")),
             )
@@ -478,6 +514,11 @@ def _merge_financial_report(
         return base
     return FinancialReport(
         roe=base.roe if base.roe is not None else fallback.roe,
+        roe_3y_ago=(
+            base.roe_3y_ago
+            if base.roe_3y_ago is not None
+            else fallback.roe_3y_ago
+        ),
         revenue_growth=(
             base.revenue_growth
             if base.revenue_growth is not None
@@ -497,6 +538,16 @@ def _merge_financial_report(
         pb=base.pb if base.pb is not None else fallback.pb,
         debt_ratio=base.debt_ratio if base.debt_ratio is not None else fallback.debt_ratio,
     )
+
+
+def _report_year(value: object) -> Optional[int]:
+    text = str(value or "")
+    if len(text) < 4:
+        return None
+    try:
+        return int(text[:4])
+    except ValueError:
+        return None
 
 
 def _parse_financial_number(value: object) -> Optional[float]:

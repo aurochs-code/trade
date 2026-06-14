@@ -17,6 +17,7 @@ import asyncio
 import logging
 
 from astock_trading.pipeline.context import PipelineContext
+from astock_trading.pipeline.auto_trade import build_auto_trade_readiness
 from astock_trading.pipeline.helpers import check_position_risks
 from astock_trading.pipeline.notification_policy import should_push_sector_heatmap
 from astock_trading.platform.history_mirror import archive_market_signal_snapshot
@@ -110,6 +111,16 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     else:
         decision_action = "BUY_ALLOWED"
 
+    try:
+        auto_trade_readiness = build_auto_trade_readiness(ctx, include_account=False)
+    except Exception as exc:
+        _logger.warning("[morning] 模拟承接预检摘要生成失败: %s", exc)
+        auto_trade_readiness = {
+            "status": "error",
+            "summary": "模拟承接预检摘要生成失败，请运行 atrade paper auto-readiness --json 复核。",
+            "next_action": {"command": "atrade paper auto-readiness --json"},
+        }
+
     ctx.obsidian.write_today_decision(
         market_signal=signal, multiplier=multiplier,
         can_buy=can_buy, holding_count=len(positions),
@@ -131,6 +142,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     )
 
     log_lines = ["## 盘前摘要", "", f"大盘信号: **{signal}** (仓位系数 {multiplier})", ""]
+    log_lines.extend(_readiness_log_lines(auto_trade_readiness))
     if positions:
         log_lines.append(f"持仓 {len(positions)} 只")
         for p in positions:
@@ -192,6 +204,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
             "holding_count": len(positions),
             "risk_alerts": risk_alerts,
         },
+        "auto_trade_readiness": auto_trade_readiness,
         "stop_loss_reminders": stop_loss_reminders,
         "xueqiu_hot_stocks": xueqiu_hot_stocks[:5],
         "cross_platform_hot_stocks": cross_platform_hot_stocks[:5],
@@ -234,4 +247,52 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         "market_announcements": len(market_announcements),
         "sector_heatmap_pushed": sector_heatmap_pushed,
         "history_group_id": history_group_id,
+        "auto_trade_readiness": auto_trade_readiness,
     }
+
+
+def _readiness_log_lines(readiness: dict) -> list[str]:
+    if not readiness:
+        return []
+    pool = readiness.get("candidate_pool", {}) or {}
+    buy_side = readiness.get("buy_side", {}) or {}
+    profile = readiness.get("execution_profile", {}) or {}
+    next_action = readiness.get("next_action", {}) or {}
+    lines = [
+        "### 今日操作指引",
+        f"- 状态：{_readiness_status_label(readiness.get('status'))}",
+        f"- 模式：{_readiness_mode_label(readiness.get('mode'))}",
+        (
+            f"- 候选池：核心 {pool.get('core_count', 0)} / "
+            f"观察 {pool.get('watch_count', 0)} / 强势观察 {pool.get('radar_count', 0)}"
+        ),
+        f"- 当前入场信号：{len(buy_side.get('current_entry_signals') or [])}",
+    ]
+    if profile.get("current_profile"):
+        lines.append(f"- 执行 profile：{profile.get('current_profile')}")
+    if readiness.get("summary"):
+        lines.append(f"- 摘要：{readiness.get('summary')}")
+    if next_action.get("command"):
+        lines.append(f"- 复核命令：`{next_action.get('command')}`")
+    lines.append("")
+    return lines
+
+
+def _readiness_status_label(value: object) -> str:
+    return {
+        "ready": "可承接",
+        "waiting_window": "等待窗口",
+        "profile_review_required": "profile 待确认",
+        "shadow": "影子记录",
+        "blocked": "阻断",
+        "disabled": "未启用",
+        "error": "预检失败",
+    }.get(str(value or ""), str(value or "未知"))
+
+
+def _readiness_mode_label(value: object) -> str:
+    return {
+        "mx_paper_order": "MX 模拟盘委托",
+        "shadow_event": "影子试运行",
+        "disabled": "未启用",
+    }.get(str(value or ""), str(value or "未知"))

@@ -162,6 +162,7 @@ def build_strategy_service(event_store: EventStore, cfg: dict) -> StrategyServic
         veto_rules=cfg.get("scoring", {}).get("veto", []),
         entry_cfg=cfg.get("entry_signal", {}),
         continuation_cfg=cfg.get("continuation", {}),
+        score_adjustments=cfg.get("scoring", {}).get("score_adjustments", {}),
     )
     decider = build_decider_from_config(cfg)
     return StrategyService(
@@ -169,6 +170,7 @@ def build_strategy_service(event_store: EventStore, cfg: dict) -> StrategyServic
         decider,
         event_store,
         manual_trade_notifier=notify_manual_confirmation_requested,
+        false_breakout_cfg=cfg.get("risk", {}).get("false_breakout_cooldown", {}),
     )
 
 

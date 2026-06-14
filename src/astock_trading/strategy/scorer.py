@@ -36,10 +36,12 @@ class Scorer:
         veto_rules: list[str],
         entry_cfg: Optional[dict] = None,
         continuation_cfg: Optional[dict] = None,
+        score_adjustments: Optional[dict] = None,
     ):
         self.weights = weights
         self.veto_rules = set(veto_rules)
         self.entry_cfg = entry_cfg or {}
+        self.score_adjustments = score_adjustments or {}
         continuation_cfg = continuation_cfg or {}
         self.continuation_filter_cfg = _dataclass_from_config(
             ContinuationFilterConfig,
@@ -55,6 +57,7 @@ class Scorer:
         fund = self._score_fundamental(snapshot)
         flow = self._score_flow(snapshot)
         sent = self._score_sentiment(snapshot)
+        flow = self._apply_score_adjustments(tech, flow)
 
         w = self.weights
         raw = (
@@ -78,9 +81,19 @@ class Scorer:
         style, style_conf = self._classify_style(snapshot)
         data_quality, missing = self._assess_quality(snapshot, fund)
         strategy_routes, route_diagnostics = self._detect_strategy_routes(snapshot)
-        entry_signal = self._check_entry(snapshot, tech) or any(
+        generic_entry_signal = self._check_entry(snapshot, tech)
+        entry_signal = generic_entry_signal or any(
             route.entry_signal for route in strategy_routes
         )
+        if not strategy_routes:
+            fallback_route = self._fallback_strategy_route(
+                snapshot,
+                total=total,
+                generic_entry_signal=generic_entry_signal,
+            )
+            if fallback_route is not None:
+                strategy_routes = [fallback_route]
+                route_diagnostics = [_route_diagnostic(fallback_route), *route_diagnostics]
 
         return ScoreResult(
             code=snapshot.code,
@@ -100,6 +113,140 @@ class Scorer:
             route_diagnostics=route_diagnostics,
             primary_strategy_route=strategy_routes[0].route if strategy_routes else None,
         )
+
+    def _fallback_strategy_route(
+        self,
+        s: StockSnapshot,
+        *,
+        total: float,
+        generic_entry_signal: bool,
+    ) -> StrategyRouteEvidence | None:
+        t = s.technical
+        evidence = {
+            "score": round(float(total), 2),
+        }
+        if t is not None:
+            evidence.update({
+                "above_ma20": t.above_ma20,
+                "golden_cross": t.golden_cross,
+                "volume_ratio": round(t.volume_ratio, 2),
+                "rsi": round(t.rsi, 2),
+                "ma20_slope": round(t.ma20_slope, 4),
+                "momentum_5d": round(t.momentum_5d, 2),
+                "deviation_rate": round(t.deviation_rate, 2),
+                "change_pct": round(t.change_pct, 2),
+            })
+        if t is not None and total >= 6.0:
+            pullback_setup_conditions = {
+                "above_ma20": t.above_ma20,
+                "near_ma20": -2.0 <= t.deviation_rate <= 6.0,
+                "rsi_watch_range": 35.0 <= t.rsi <= 72.0,
+                "ma20_slope": t.ma20_slope >= 0.005,
+                "constructive_momentum": t.momentum_5d >= 0.0,
+                "volume_observed": t.volume_ratio > 0,
+                "not_chasing": t.change_pct <= 5.0,
+            }
+            pullback_setup_matched, pullback_setup_missing = _condition_lists(pullback_setup_conditions)
+            pullback_setup_score = _route_score(pullback_setup_matched, pullback_setup_conditions)
+            if (
+                pullback_setup_conditions["above_ma20"]
+                and pullback_setup_conditions["near_ma20"]
+                and pullback_setup_conditions["rsi_watch_range"]
+                and pullback_setup_conditions["ma20_slope"]
+                and pullback_setup_conditions["constructive_momentum"]
+                and pullback_setup_conditions["volume_observed"]
+                and pullback_setup_score >= 0.85
+            ):
+                return StrategyRouteEvidence(
+                    route="pullback_setup_watch",
+                    display_name="回踩待确认",
+                    family="trend_swing",
+                    confidence=0.63,
+                    entry_signal=False,
+                    status="watch",
+                    route_score=pullback_setup_score,
+                    matched_conditions=pullback_setup_matched,
+                    missing_conditions=pullback_setup_missing,
+                    evidence=evidence,
+                    notes=[
+                        "missing_flow_or_volume_confirmation",
+                        "watch_only_wait_for_pullback_confirmation",
+                    ],
+                )
+
+            trend_structure_conditions = {
+                "above_ma20": t.above_ma20,
+                "trend_hint": (
+                    t.golden_cross
+                    or t.ma20_slope >= 0.003
+                    or t.momentum_5d >= 2.0
+                ),
+                "rsi_watch_range": 40.0 <= t.rsi <= 82.0,
+                "deviation_watch_range": -2.0 <= t.deviation_rate <= 25.0,
+                "volume_observed": t.volume_ratio > 0,
+                "not_limit_chase": t.change_pct < 9.9,
+            }
+            trend_structure_matched, trend_structure_missing = _condition_lists(trend_structure_conditions)
+            trend_structure_score = _route_score(trend_structure_matched, trend_structure_conditions)
+            if (
+                trend_structure_conditions["above_ma20"]
+                and trend_structure_conditions["trend_hint"]
+                and trend_structure_conditions["rsi_watch_range"]
+                and trend_structure_conditions["deviation_watch_range"]
+                and trend_structure_conditions["volume_observed"]
+            ):
+                return StrategyRouteEvidence(
+                    route="trend_structure_watch",
+                    display_name="趋势结构观察",
+                    family="trend_swing",
+                    confidence=0.56,
+                    entry_signal=False,
+                    status="watch",
+                    route_score=trend_structure_score,
+                    matched_conditions=trend_structure_matched,
+                    missing_conditions=trend_structure_missing,
+                    evidence=evidence,
+                    notes=[
+                        "trend_structure_present_but_entry_confirmation_missing",
+                        "watch_only_low_priority_route",
+                    ],
+                )
+
+        if generic_entry_signal:
+            return StrategyRouteEvidence(
+                route="generic_entry_signal_watch",
+                display_name="通用入场观察",
+                family="score_watch",
+                confidence=0.52,
+                entry_signal=False,
+                status="watch",
+                route_score=1.0,
+                matched_conditions=["generic_entry_signal"],
+                missing_conditions=["named_strategy_route"],
+                evidence=evidence,
+                notes=[
+                    "generic_entry_signal_without_named_route",
+                    "watch_only_until_named_route_confirms",
+                ],
+            )
+        if total >= 6.0:
+            return StrategyRouteEvidence(
+                route="score_strength_watch",
+                display_name="评分支撑观察",
+                family="score_watch",
+                confidence=0.5,
+                entry_signal=False,
+                status="watch",
+                route_score=1.0,
+                matched_conditions=["score_floor"],
+                missing_conditions=["technical_route_confirmation"],
+                evidence=evidence,
+                notes=[
+                    "high_score_without_named_entry_route",
+                    "watch_only_prevents_unexplained_unknown_route",
+                ],
+            )
+        return None
 
     def score_batch(self, snapshots: list[StockSnapshot]) -> list[ScoreResult]:
         results = [self.score(s) for s in snapshots]
@@ -163,7 +310,14 @@ class Scorer:
             f"排列:{arr_score}/0.5 动量:{mom_score}/0.5"
         )
         return DimensionScore("technical", total, 3.0, detail, {
-            "rsi": t.rsi, "golden_cross": t.golden_cross, "volume_ratio": t.volume_ratio,
+            "above_ma20": t.above_ma20,
+            "rsi": t.rsi,
+            "golden_cross": t.golden_cross,
+            "volume_ratio": t.volume_ratio,
+            "ma20_slope": t.ma20_slope,
+            "momentum_5d": t.momentum_5d,
+            "deviation_rate": t.deviation_rate,
+            "change_pct": t.change_pct,
         })
 
     # ------------------------------------------------------------------
@@ -191,20 +345,30 @@ class Scorer:
 
         roe = f.roe or 0
         roe_score = 1.0 if roe >= 15 else (0.7 if roe >= 10 else (0.4 if roe >= 5 else 0))
+        roe_trend = None
+        roe_trend_score = 0.0
+        if f.roe is not None and f.roe_3y_ago is not None:
+            roe_trend = round(f.roe - f.roe_3y_ago, 2)
+            if roe_trend >= 6:
+                roe_trend_score = 0.4
+            elif roe_trend >= 3:
+                roe_trend_score = 0.2
 
         rev = f.revenue_growth or 0
         rev_score = 1.0 if rev >= 20 else (0.7 if rev >= 10 else (0.3 if rev >= 0 else 0))
 
         cf_score = 0.5 if (f.operating_cash_flow or 0) > 0 else 0
 
-        total = round(min(roe_score + rev_score + cf_score, 3.0), 1)
+        total = round(min(roe_score + roe_trend_score + rev_score + cf_score, 3.0), 1)
         detail = f"ROE:{roe_score:.1f}/1 营收:{rev_score:.1f}/1 现金流:{cf_score:.1f}/1"
+        if roe_trend_score:
+            detail += f" ROE改善:{roe_trend_score:.1f}/0.4({roe_trend:+.1f}pct)"
         if missing:
             detail += f" ⚠️缺失:{','.join(missing)}"
 
         dq = "ok" if not missing else "degraded"
         return DimensionScore("fundamental", total, 3.0, detail, {
-            "data_quality": dq, "missing_fields": missing,
+            "data_quality": dq, "missing_fields": missing, "roe_trend": roe_trend,
         })
 
     # ------------------------------------------------------------------
@@ -233,6 +397,32 @@ class Scorer:
         return DimensionScore("flow", total, 2.0, detail, {
             "main_net_inflow": main_net,
         })
+
+    def _apply_score_adjustments(
+        self,
+        tech: DimensionScore,
+        flow: DimensionScore,
+    ) -> DimensionScore:
+        cfg = self.score_adjustments.get("tech_flow_correlation") or {}
+        if not cfg.get("enabled", False):
+            return flow
+        tech_threshold = float(cfg.get("tech_threshold", 2.5))
+        flow_threshold = float(cfg.get("flow_threshold", 1.5))
+        if tech.score < tech_threshold or flow.score < flow_threshold:
+            return flow
+        discount = float(cfg.get("flow_discount", 0.7))
+        adjusted = round(flow.score * discount, 1)
+        return DimensionScore(
+            flow.name,
+            adjusted,
+            flow.max_score,
+            f"{flow.detail} 重复动量折扣:{discount:.0%}",
+            {
+                **flow.raw_data,
+                "pre_correlation_discount_score": flow.score,
+                "correlation_discount": discount,
+            },
+        )
 
     # ------------------------------------------------------------------
     # 舆情 (满分 3)
@@ -404,7 +594,7 @@ class Scorer:
                 route="volume_breakout",
                 display_name="放量突破",
                 family="short_continuation",
-                confidence=0.92,
+                confidence=0.96,
                 entry_signal=t.golden_cross and t.rsi < rsi_max,
                 evidence={
                     "volume_ratio": round(t.volume_ratio, 2),
@@ -435,7 +625,7 @@ class Scorer:
                 route="pullback_to_ma20",
                 display_name="均线回踩转强",
                 family="trend_swing",
-                confidence=0.86,
+                confidence=0.91,
                 entry_signal=True,
                 evidence={
                     "volume_ratio": round(t.volume_ratio, 2),
@@ -452,6 +642,47 @@ class Scorer:
                 notes=[
                     "trend_pullback_recovered_near_ma20",
                     "paper_execution_still_requires_core_buy_window_and_risk_gates",
+                ],
+            ))
+
+        overheat_conditions = {
+            "above_ma20": t.above_ma20,
+            "ma20_slope": t.ma20_slope >= 0.005,
+            "momentum_5d": t.momentum_5d >= 5.0,
+            "overheat_zone": (
+                t.rsi > rsi_max
+                or t.deviation_rate > 8.0
+                or t.change_pct >= 6.0
+            ),
+            "not_limit_up_chase": t.change_pct < 9.0,
+            "liquidity": liquidity_amount >= 3e8,
+        }
+        overheat_matched, overheat_missing = _condition_lists(overheat_conditions)
+        overheat_score = _route_score(overheat_matched, overheat_conditions)
+        if all(overheat_conditions.values()):
+            routes.append(StrategyRouteEvidence(
+                route="relative_strength_overheat",
+                display_name="强势过热观察",
+                family="trend_swing",
+                confidence=0.68,
+                entry_signal=False,
+                status="watch",
+                route_score=overheat_score,
+                matched_conditions=overheat_matched,
+                missing_conditions=overheat_missing,
+                evidence={
+                    "volume_ratio": round(t.volume_ratio, 2),
+                    "rsi": round(t.rsi, 2),
+                    "rsi_max": round(rsi_max, 2),
+                    "deviation_rate": round(t.deviation_rate, 2),
+                    "momentum_5d": round(t.momentum_5d, 2),
+                    "ma20_slope": round(t.ma20_slope, 4),
+                    "change_pct": round(t.change_pct, 2),
+                    "amount": round(liquidity_amount, 2),
+                },
+                notes=[
+                    "relative_strength_survived_overheat_filters",
+                    "watch_only_until_market_regime_execution_backtest_passes",
                 ],
             ))
 
@@ -478,6 +709,51 @@ class Scorer:
                     "ma_order": "ma5>=ma10>=ma20>ma60",
                 },
                 notes=["borrowed_from_daily_stock_analysis:shrink_pullback"],
+            ))
+
+        cooling_conditions = {
+            "above_ma20": t.above_ma20,
+            "trend_structure": _recent_golden_cross(t),
+            "quiet_volume": 0.5 <= t.volume_ratio <= 1.2,
+            "rsi_cooling_zone": 50 <= t.rsi <= rsi_max + 5,
+            "deviation_watch_zone": 2.0 <= t.deviation_rate <= 12.0,
+            "ma20_slope": t.ma20_slope >= 0,
+            "flow_not_out": s.flow is not None and flow_net >= 0,
+        }
+        cooling_matched, cooling_missing = _condition_lists(cooling_conditions)
+        cooling_score = _route_score(cooling_matched, cooling_conditions)
+        if (
+            cooling_conditions["above_ma20"]
+            and cooling_conditions["trend_structure"]
+            and cooling_conditions["quiet_volume"]
+            and cooling_conditions["rsi_cooling_zone"]
+            and cooling_conditions["deviation_watch_zone"]
+            and cooling_conditions["flow_not_out"]
+        ):
+            routes.append(StrategyRouteEvidence(
+                route="trend_cooling_off",
+                display_name="趋势冷却观察",
+                family="trend_swing",
+                confidence=0.7,
+                entry_signal=False,
+                status="watch",
+                route_score=cooling_score,
+                matched_conditions=cooling_matched,
+                missing_conditions=cooling_missing,
+                evidence={
+                    "golden_cross": t.golden_cross,
+                    "volume_ratio": round(t.volume_ratio, 2),
+                    "rsi": round(t.rsi, 2),
+                    "rsi_max": round(rsi_max, 2),
+                    "deviation_rate": round(t.deviation_rate, 2),
+                    "ma20_slope": round(t.ma20_slope, 4),
+                    "momentum_5d": round(t.momentum_5d, 2),
+                    "main_net_inflow": round(flow_net, 2),
+                },
+                notes=[
+                    "rsi_cooling_watch",
+                    "watch_only_wait_for_pullback_or_fresh_entry",
+                ],
             ))
 
         if (

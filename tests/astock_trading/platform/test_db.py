@@ -18,7 +18,7 @@ def test_init_db_sets_latest_schema_version(tmp_path):
     conn = connect(db_path)
     try:
         version = get_schema_version(conn)
-        assert version == 6
+        assert version == 7
 
         columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(projection_positions)")
@@ -42,6 +42,33 @@ def test_init_db_sets_latest_schema_version(tmp_path):
             "payload_json",
             "created_at",
         } <= history_columns
+        price_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(market_price_bars)")
+        }
+        assert {
+            "symbol",
+            "bar_date",
+            "period",
+            "adjustflag",
+            "open_cents",
+            "close_cents",
+            "source",
+            "raw_json",
+        } <= price_columns
+        financial_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(market_financials)")
+        }
+        assert {
+            "symbol",
+            "report_year",
+            "report_quarter",
+            "available_date",
+            "roe",
+            "roe_3y_ago",
+            "revenue_growth",
+            "operating_cash_flow",
+            "raw_json",
+        } <= financial_columns
     finally:
         conn.close()
 
@@ -66,7 +93,7 @@ def test_runtime_db_uses_sqlalchemy_url(monkeypatch, tmp_path):
     init_db()
     conn = connect()
     try:
-        assert get_schema_version(conn) == 6
+        assert get_schema_version(conn) == 7
         conn.execute(
             "INSERT INTO event_log "
             "(event_id, stream, stream_type, stream_version, event_type, payload_json, metadata_json, occurred_at) "
@@ -144,7 +171,7 @@ def test_init_db_migrates_v1_projection_positions(tmp_path):
     conn = connect(db_path)
     try:
         version = get_schema_version(conn)
-        assert version == 6
+        assert version == 7
 
         columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(projection_positions)")

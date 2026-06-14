@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 from astock_trading.market.models import StockSnapshot
@@ -22,6 +23,7 @@ from astock_trading.platform.domain_events import (
 from astock_trading.platform.events import EventStore
 from astock_trading.strategy.decider import Decider
 from astock_trading.strategy.models import Action, DataQuality, DecisionIntent, MarketState, ScoreResult
+from astock_trading.strategy.cooldown import false_breakout_cooldown
 from astock_trading.strategy.scorer import Scorer
 
 _logger = logging.getLogger(__name__)
@@ -36,12 +38,14 @@ class StrategyService:
         decider: Decider,
         event_store: EventStore,
         manual_trade_notifier: Callable[[dict[str, Any]], None] | None = None,
+        false_breakout_cfg: dict[str, Any] | None = None,
     ):
         self._scorer = scorer
         self._decider = decider
         self._event_store = event_store
         self._publisher = DomainEventPublisher(event_store)
         self._manual_trade_notifier = manual_trade_notifier
+        self._false_breakout_cfg = false_breakout_cfg or {}
 
     def evaluate(
         self,
@@ -69,6 +73,7 @@ class StrategyService:
         decisions: list[DecisionIntent] = []
 
         for score_result in results:
+            score_result = self._apply_false_breakout_cooldown(score_result)
             snapshot = next((s for s in snapshots if s.code == score_result.code), None)
             score_payload = self._score_payload_with_reference(score_result)
             score_evidence = _score_evidence_payload(score_payload)
@@ -91,6 +96,7 @@ class StrategyService:
                 current_exposure_pct=current_exposure_pct,
                 weekly_buy_count=weekly_buy_count,
             )
+            decision = self._decision_with_false_breakout_cooldown(decision, score_result)
             decisions.append(decision)
 
             # 追加决策事件
@@ -192,7 +198,7 @@ class StrategyService:
         config_version: str,
     ) -> ScoreResult:
         """单股评分，结果追加到 event_log。"""
-        result = self._scorer.score(snapshot)
+        result = self._apply_false_breakout_cooldown(self._scorer.score(snapshot))
 
         self._publisher.publish(DomainEvent(
             stream=f"strategy:{result.code}",
@@ -203,6 +209,56 @@ class StrategyService:
         ))
 
         return result
+
+    def _apply_false_breakout_cooldown(self, score_result: ScoreResult) -> ScoreResult:
+        cooldown = false_breakout_cooldown(
+            self._event_store,
+            score_result.code,
+            self._false_breakout_cfg,
+        )
+        if not cooldown.get("active") or not score_result.entry_signal:
+            return replace(score_result, false_breakout_cooldown=cooldown)
+
+        routes = [
+            replace(
+                route,
+                entry_signal=False,
+                status="watch",
+                notes=list(route.notes) + ["false_breakout_cooldown"],
+            )
+            if route.entry_signal
+            else route
+            for route in score_result.strategy_routes
+        ]
+        warnings = list(score_result.warning_signals)
+        if "false_breakout_cooldown" not in warnings:
+            warnings.append("false_breakout_cooldown")
+        return replace(
+            score_result,
+            entry_signal=False,
+            warning_signals=warnings,
+            strategy_routes=routes,
+            false_breakout_cooldown=cooldown,
+        )
+
+    @staticmethod
+    def _decision_with_false_breakout_cooldown(
+        decision: DecisionIntent,
+        score_result: ScoreResult,
+    ) -> DecisionIntent:
+        cooldown = score_result.false_breakout_cooldown or {}
+        if not cooldown.get("active") or decision.action not in {Action.BUY, Action.TRIAL_BUY}:
+            return decision
+        notes = list(decision.notes)
+        notes.append(
+            "近期假突破冷却：同股短期多次入场失败，当前只保留观察和研究记录"
+        )
+        return replace(
+            decision,
+            action=Action.WATCH,
+            position_pct=0.0,
+            notes=notes,
+        )
 
     def _score_payload_with_reference(self, score_result: ScoreResult) -> dict[str, Any]:
         payload = score_result.to_dict()
@@ -257,6 +313,7 @@ def _score_evidence_payload(score_payload: dict[str, Any]) -> dict[str, Any]:
         "strategy_routes": routes,
         "technical_detail": score_payload.get("technical_detail", ""),
         "data_quality": score_payload.get("data_quality", ""),
+        "false_breakout_cooldown": score_payload.get("false_breakout_cooldown", {}) or {},
     }
 
 

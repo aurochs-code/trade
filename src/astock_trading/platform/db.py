@@ -16,7 +16,7 @@ from typing import Optional
 from astock_trading.platform.database import Database, DatabaseSettings
 
 _BASE_SCHEMA_VERSION = 1
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 
 # ---------------------------------------------------------------------------
 # Schema DDL
@@ -238,6 +238,95 @@ CREATE INDEX IF NOT EXISTS idx_signal_history_group
     ON signal_history_snapshots(history_group_id);
 """
 
+_SCHEMA_SQL_7 = """\
+-- ═══════════════════════════════════════════════════════════════
+-- 回测市场数据底座
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS market_price_bars (
+    symbol          TEXT NOT NULL,
+    bar_date        TEXT NOT NULL,
+    period          TEXT NOT NULL DEFAULT 'daily',
+    adjustflag      TEXT NOT NULL DEFAULT '2',
+    source          TEXT NOT NULL,
+    open_cents      INTEGER NOT NULL,
+    high_cents      INTEGER NOT NULL,
+    low_cents       INTEGER NOT NULL,
+    close_cents     INTEGER NOT NULL,
+    volume          INTEGER NOT NULL,
+    amount_cents    INTEGER NOT NULL,
+    change_pct      REAL,
+    fetched_at      TEXT NOT NULL,
+    raw_json        TEXT,
+    PRIMARY KEY (symbol, bar_date, period, adjustflag, source)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_price_symbol_date
+    ON market_price_bars(symbol, bar_date);
+CREATE INDEX IF NOT EXISTS idx_market_price_date
+    ON market_price_bars(bar_date);
+
+CREATE TABLE IF NOT EXISTS market_financials (
+    symbol              TEXT NOT NULL,
+    report_year         INTEGER NOT NULL,
+    report_quarter      INTEGER NOT NULL,
+    source              TEXT NOT NULL,
+    report_date         TEXT NOT NULL,
+    available_date      TEXT NOT NULL,
+    roe                 REAL,
+    roe_3y_ago          REAL,
+    revenue_growth      REAL,
+    net_profit_growth   REAL,
+    operating_cash_flow REAL,
+    pe_ttm              REAL,
+    pb                  REAL,
+    debt_ratio          REAL,
+    fetched_at          TEXT NOT NULL,
+    raw_json            TEXT,
+    PRIMARY KEY (symbol, report_year, report_quarter, source)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_financials_available
+    ON market_financials(symbol, available_date);
+CREATE INDEX IF NOT EXISTS idx_market_financials_report
+    ON market_financials(symbol, report_year, report_quarter);
+
+CREATE TABLE IF NOT EXISTS market_fund_flows (
+    symbol                   TEXT NOT NULL,
+    trade_date               TEXT NOT NULL,
+    source                   TEXT NOT NULL,
+    net_inflow_1d            REAL,
+    net_inflow_5d            REAL,
+    main_force_ratio         REAL,
+    northbound_net           REAL,
+    consecutive_outflow_days INTEGER,
+    fetched_at               TEXT NOT NULL,
+    raw_json                 TEXT,
+    PRIMARY KEY (symbol, trade_date, source)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_fund_flows_symbol_date
+    ON market_fund_flows(symbol, trade_date);
+
+CREATE TABLE IF NOT EXISTS market_data_coverage (
+    coverage_key TEXT PRIMARY KEY,
+    domain       TEXT NOT NULL,
+    symbol       TEXT NOT NULL,
+    start_date   TEXT,
+    end_date     TEXT,
+    period       TEXT,
+    adjustflag   TEXT,
+    source       TEXT NOT NULL,
+    row_count    INTEGER NOT NULL DEFAULT 0,
+    status       TEXT NOT NULL,
+    fetched_at   TEXT NOT NULL,
+    error_json   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_data_coverage_lookup
+    ON market_data_coverage(domain, symbol, source);
+"""
+
 
 # ---------------------------------------------------------------------------
 # Connection management
@@ -363,6 +452,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA_SQL_2)
     conn.executescript(_SCHEMA_SQL_3)
     conn.executescript(_SCHEMA_SQL_4)
+    conn.executescript(_SCHEMA_SQL_7)
     _ensure_schema_version_table(conn)
 
 
@@ -414,12 +504,19 @@ def _migrate_to_v6(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_to_v7(conn: sqlite3.Connection) -> None:
+    if str(getattr(conn, "dialect", "")).startswith("mysql"):
+        return
+    conn.executescript(_SCHEMA_SQL_7)
+
+
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_to_v2,
     3: _migrate_to_v3,
     4: _migrate_to_v4,
     5: _migrate_to_v5,
     6: _migrate_to_v6,
+    7: _migrate_to_v7,
 }
 
 

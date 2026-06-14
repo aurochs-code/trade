@@ -132,12 +132,12 @@ risk:
   momentum:
     stop_loss: 0.08                  # -8% 止损（C版）
     stop_loss_anchor: entry_day_low  # 或跌破买入日最低价
-    trailing_stop: 0.10              # 移动止盈：最高点回撤 -10%（C版）
+    trailing_stop: 0.18              # 移动止盈：最高点回撤 -18%（进攻候选）
     trailing_ma_cross:               # 或 MA5 死叉 MA10
       fast: 5
       slow: 10
     exit_ma: 20                      # 收盘价跌破 MA20 离场
-    time_stop_days: 15               # 15 个交易日不创新高即警惕（C版）
+    time_stop_days: 30               # 30 个交易日不创新高即警惕（进攻候选）
 
   # 通用风控（不分风格）
   portfolio:
@@ -150,11 +150,17 @@ risk:
   intraday_monitor:
     daily_loss_alert_pct: 0.05      # 盘中单票当日跌幅 >= 5% 立即告警
   position:
-    total_max: 0.60
-    single_max: 0.20
+    total_max: 0.67
+    single_max: 0.22
     trial_single_max_ratio: 0.50
-    weekly_max: 2
-    holding_max: 4
+    target_vol_pct: 0.02
+    weekly_max: 5
+    holding_max: 5
+  false_breakout_cooldown:
+    enabled: true
+    lookback_days: 30
+    failure_threshold: 2
+    cooldown_days: 10
 
 # ---------------------------------------------------------------------------
 # 第五步：动态风格切换（防回撤保险丝）
@@ -189,6 +195,66 @@ scoring:
     max_missing_fields_for_buy: 0
     critical_missing_fields_for_buy: []
     min_position_pct_for_buy: 0.01
+    trial_buy_threshold: 6.0
+    trial_buy_entry_signal_threshold: 5.5
+
+  market_regime_overlays:
+    GREEN:
+      buy_threshold: 6.5
+      allow_trial_buy: true
+    YELLOW:
+      buy_threshold: 6.5
+      allow_trial_buy: false
+      disabled_trial_routes: [shrink_pullback]
+    RED:
+      buy_threshold: 7.0
+      allow_trial_buy: true
+      enabled_trial_routes: [pullback_to_ma20]
+    CLEAR:
+      buy_threshold: 7.0
+      allow_trial_buy: false
+      disabled_trial_routes: [shrink_pullback]
+
+  score_adjustments:
+    tech_flow_correlation:
+      enabled: true
+      tech_threshold: 2.5
+      flow_threshold: 1.5
+      flow_discount: 0.7
+
+  route_execution_policy: &route_execution_policy_v3
+    GREEN:dragon_head:
+      score_min: 6.0
+      position_pct: 0.22
+      priority: 85
+    GREEN:volume_breakout:
+      score_min: 6.0
+      position_pct: 0.22
+      priority: 80
+    GREEN:short_continuation:
+      score_min: 6.0
+      position_pct: 0.22
+      priority: 70
+    GREEN:ma_golden_cross:
+      score_min: 6.0
+      position_pct: 0.22
+      priority: 60
+    YELLOW:shrink_pullback:
+      score_min: 6.0
+      position_pct: 0.11
+      priority: 35
+    YELLOW:relative_strength_overheat:
+      score_min: 6.0
+      position_pct: 0.11
+      priority: 30
+    RED:volume_breakout:
+      score_min: 6.0
+      position_pct: 0.066
+      priority: 75
+    RED:pullback_to_ma20:
+      score_min: 6.0
+      position_pct: 0.066
+      priority: 65
 
   veto:
     - below_ma20
@@ -239,53 +305,16 @@ capital: 500022
 # 历史回测 preset（用于 historical_pipeline / strategy_replay）
 # ---------------------------------------------------------------------------
 backtest_presets:
-  aggressive_high_return:
-    description: "高收益优先，接受更高交易频次与阶段性回撤"
-    entry_mode: hybrid
-    require_entry_signal: true
-    buy_threshold: 6.0
-    momentum_stop_loss: 0.08
-    momentum_trailing_stop: 0.10
-    momentum_time_stop_days: 10
-    entry_trend_rsi_max: 75
-    entry_pullback_rsi_max: 75
-    entry_pullback_volume_ratio_min: 1.0
-  aggressive_high_return_trail12:
-    description: "高收益优先，放宽移动止盈到 12%"
-    entry_mode: hybrid
-    require_entry_signal: true
-    buy_threshold: 6.0
-    momentum_stop_loss: 0.08
-    momentum_trailing_stop: 0.12
-    momentum_time_stop_days: 10
-    entry_trend_rsi_max: 75
-    entry_pullback_rsi_max: 75
-    entry_pullback_volume_ratio_min: 1.0
   aggressive_score_capture:
-    description: "分数优先，放宽入场过滤以提高覆盖率"
+    description: "分数优先对照组，用于验证裸分数捕获能力"
     entry_mode: score_only
     buy_threshold: 6.0
     momentum_stop_loss: 0.08
     momentum_trailing_stop: 0.10
     momentum_time_stop_days: 10
 
-  # ── 新增策略 preset ──────────────────────────────────────────────
-  大盘择时增强版:
-    description: "金叉收阳 + 乖离率<12% + 两市成交>6000亿，高胜率但交易频次低"
-    entry_mode: hybrid
-    require_entry_signal: true
-    buy_threshold: 6.0
-    momentum_stop_loss: 0.08
-    momentum_trailing_stop: 0.18
-    momentum_time_stop_days: 40
-    entry_trend_rsi_max: 85
-    entry_pullback_rsi_max: 85
-    entry_pullback_volume_ratio_min: 1.0
-    entry_deviation_max: 12.0
-    entry_require_bullish_candle: true
-
   保守验证C:
-    description: "乖离率<10% + 收阳线 + trailing10% + time_stop15天，稳健首选"
+    description: "保守基线：乖离率<10% + 收阳线 + trailing10% + time_stop15天"
     entry_mode: hybrid
     require_entry_signal: true
     buy_threshold: 6.5
@@ -297,6 +326,86 @@ backtest_presets:
     entry_pullback_volume_ratio_min: 1.5
     entry_deviation_max: 10.0
     entry_require_bullish_candle: true
+
+  攻_C_route_policy_v3:
+    description: "进攻基线：market×route 执行策略，周买入3次，trailing10%"
+    entry_mode: hybrid
+    require_entry_signal: true
+    buy_threshold: 6.5
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.10
+    momentum_time_stop_days: 30
+    single_max_pct: 0.22
+    total_max_pct: 0.67
+    weekly_max: 3
+    daily_max_buys: 3
+    holding_max: 5
+    entry_trend_rsi_max: 70
+    entry_pullback_rsi_max: 70
+    entry_pullback_volume_ratio_min: 1.5
+    entry_deviation_max: 10.0
+    entry_require_bullish_candle: true
+    route_execution_policy: *route_execution_policy_v3
+
+  攻_C_route_policy_v3_weekly5:
+    description: "进攻对照：基于v3，仅将周买入上限提高到5次，trailing10%"
+    entry_mode: hybrid
+    require_entry_signal: true
+    buy_threshold: 6.5
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.10
+    momentum_time_stop_days: 30
+    single_max_pct: 0.22
+    total_max_pct: 0.67
+    weekly_max: 5
+    daily_max_buys: 3
+    holding_max: 5
+    entry_trend_rsi_max: 70
+    entry_pullback_rsi_max: 70
+    entry_pullback_volume_ratio_min: 1.5
+    entry_deviation_max: 10.0
+    entry_require_bullish_candle: true
+    route_execution_policy: *route_execution_policy_v3
+
+  攻_C_route_policy_v3_weekly5_trail18:
+    description: "进攻候选：训练期优先选择，周买入5次，trailing18%"
+    entry_mode: hybrid
+    require_entry_signal: true
+    buy_threshold: 6.5
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.18
+    momentum_time_stop_days: 30
+    single_max_pct: 0.22
+    total_max_pct: 0.67
+    weekly_max: 5
+    daily_max_buys: 3
+    holding_max: 5
+    entry_trend_rsi_max: 70
+    entry_pullback_rsi_max: 70
+    entry_pullback_volume_ratio_min: 1.5
+    entry_deviation_max: 10.0
+    entry_require_bullish_candle: true
+    route_execution_policy: *route_execution_policy_v3
+
+  攻_C_route_policy_v3_weekly5_trail20:
+    description: "进攻对照：全区间表现接近trail18，用于稳定性复核"
+    entry_mode: hybrid
+    require_entry_signal: true
+    buy_threshold: 6.5
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.20
+    momentum_time_stop_days: 30
+    single_max_pct: 0.22
+    total_max_pct: 0.67
+    weekly_max: 5
+    daily_max_buys: 3
+    holding_max: 5
+    entry_trend_rsi_max: 70
+    entry_pullback_rsi_max: 70
+    entry_pullback_volume_ratio_min: 1.5
+    entry_deviation_max: 10.0
+    entry_require_bullish_candle: true
+    route_execution_policy: *route_execution_policy_v3
 
 # ---------------------------------------------------------------------------
 # 模拟盘自动交易
@@ -321,4 +430,5 @@ auto_trade:
 sentiment:
   scan_interval_minutes: 30
   dedup_hours: 24
+  candidate_pool_limit: 30  # 持仓之外，最多扫描多少只核心/观察/强势观察候选
   enabled: true

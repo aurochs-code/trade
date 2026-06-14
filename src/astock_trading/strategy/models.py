@@ -157,6 +157,7 @@ class ScoreResult:
     strategy_routes: list[StrategyRouteEvidence] = field(default_factory=list)
     route_diagnostics: list[StrategyRouteDiagnostic] = field(default_factory=list)
     primary_strategy_route: Optional[str] = None
+    false_breakout_cooldown: dict = field(default_factory=dict)
     scored_at: datetime = field(default_factory=datetime.now)
 
     def to_dict(self) -> dict:
@@ -187,6 +188,7 @@ class ScoreResult:
                 diagnostic.to_dict() for diagnostic in self.route_diagnostics
             ],
             "primary_strategy_route": self.primary_strategy_route,
+            "false_breakout_cooldown": self.false_breakout_cooldown,
         }
 
     def _dim_score(self, name: str) -> float:

@@ -8,7 +8,9 @@ import pytest
 from astock_trading.market.models import TechnicalIndicators
 from astock_trading.pipeline.auto_trade import (
     _check_and_sell,
+    _get_buy_candidates,
     _get_highest_since_entry,
+    _score_and_buy,
     build_auto_trade_readiness,
     run,
 )
@@ -258,6 +260,50 @@ def test_sell_risk_uses_lightweight_intraday_snapshots(auto_trade_ctx):
     assert sells == []
     assert market.collect_intraday_calls == 1
     assert market.collect_batch_calls == 0
+
+
+def test_sell_event_inherits_latest_paper_buy_route(auto_trade_ctx):
+    position = PaperPosition(
+        code="002138",
+        name="双环传动",
+        shares=100,
+        avg_cost=10.0,
+        current_price=11.0,
+        market_value=1100.0,
+        pnl=100.0,
+        pnl_pct=0.1,
+    )
+    auto_trade_ctx.event_store = FakeEventStore(
+        auto_trade_events=[
+            {
+                "event_type": "auto_trade.executed",
+                "occurred_at": "2026-05-21T02:00:00+00:00",
+                "payload": {
+                    "side": "buy",
+                    "code": "002138",
+                    "status": "filled",
+                    "primary_strategy_route": "flow_confirmed_trend",
+                    "primary_strategy_route_label": "资金趋势确认",
+                },
+                "metadata": {"account": "paper"},
+            }
+        ]
+    )
+
+    sells = _check_and_sell(
+        auto_trade_ctx,
+        FakePaperAccount(),
+        [position],
+        MarketState(signal=MarketSignal.CLEAR, multiplier=0.0),
+        "run-sell-route",
+        auto_trade_ctx.cfg["auto_trade"],
+        dry_run=True,
+    )
+
+    assert sells[0]["primary_strategy_route"] == "flow_confirmed_trend"
+    assert sells[0]["primary_strategy_route_label"] == "资金趋势确认"
+    event_payload = auto_trade_ctx.event_store.appended[-1]["payload"]
+    assert event_payload["primary_strategy_route_label"] == "资金趋势确认"
 
 
 def test_run_skips_buy_and_returns_diagnostic_without_fresh_decision_events(
@@ -1403,6 +1449,107 @@ def test_run_explains_fresh_buy_signal_after_buy_window_closed(auto_trade_ctx, m
     assert result["no_trade_summary"]["reason"] == "buy_window_closed_with_signal"
     assert result["no_trade_summary"]["details"]["pending_buy_signal"]["count"] == 1
     assert result["no_trade_summary"]["details"]["pending_buy_signal"]["top"]["code"] == "688981"
+
+
+def test_buy_candidates_sort_by_route_policy_before_raw_score(auto_trade_ctx, monkeypatch):
+    from astock_trading.pipeline import auto_trade as auto_trade_module
+
+    now = datetime(2026, 5, 22, 10, 0, tzinfo=MARKET_TZ)
+    monkeypatch.setattr("astock_trading.pipeline.auto_trade.local_now", lambda: now)
+    monkeypatch.setattr(
+        auto_trade_module,
+        "_usable_buy_decision_events",
+        lambda ctx, cfg, now, max_age_hours: [
+            {
+                "event_id": "decision-high-score",
+                "occurred_at": now.astimezone(timezone.utc).isoformat(),
+                "payload": {
+                    "action": "BUY",
+                    "code": "600000",
+                    "name": "高分普通",
+                    "score": 7.2,
+                    "market_signal": "GREEN",
+                    "primary_strategy_route": "relative_strength_overheat",
+                },
+            },
+            {
+                "event_id": "decision-route-priority",
+                "occurred_at": now.astimezone(timezone.utc).isoformat(),
+                "payload": {
+                    "action": "BUY",
+                    "code": "600001",
+                    "name": "路线优先",
+                    "score": 6.1,
+                    "market_signal": "GREEN",
+                    "primary_strategy_route": "volume_breakout",
+                },
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        auto_trade_module,
+        "_recent_paper_buy_keys",
+        lambda ctx, since: {"codes": set(), "signal_ids": set()},
+    )
+    auto_trade_ctx.cfg["scoring"]["route_execution_policy"] = {
+        "GREEN:volume_breakout": {"priority": 80, "position_pct": 0.22, "score_min": 6.0}
+    }
+
+    candidates = _get_buy_candidates(
+        auto_trade_ctx,
+        "run-route-sort",
+        MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
+        exposure_pct=0.0,
+        weekly_buy_count=0,
+        cfg=auto_trade_ctx.cfg["auto_trade"],
+        max_age_hours=24,
+    )
+
+    assert [item["code"] for item in candidates] == ["600001", "600000"]
+
+
+def test_score_and_buy_uses_route_policy_position_for_formal_buy(auto_trade_ctx, monkeypatch):
+    from astock_trading.pipeline import auto_trade as auto_trade_module
+
+    auto_trade_ctx.cfg["scoring"]["route_execution_policy"] = {
+        "GREEN:volume_breakout": {"priority": 80, "position_pct": 0.11, "score_min": 6.0}
+    }
+    monkeypatch.setattr(auto_trade_module, "_buy_side_diagnostics", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        auto_trade_module,
+        "_get_buy_candidates",
+        lambda *args, **kwargs: [
+            {
+                "code": "600001",
+                "name": "路线仓位",
+                "score": 6.5,
+                "price": 10.0,
+                "market_signal": "GREEN",
+                "primary_strategy_route": "volume_breakout",
+                "source_event_id": "decision-route-position",
+                "source_score_event_id": "score-route-position",
+            }
+        ],
+    )
+
+    buys = _score_and_buy(
+        auto_trade_ctx,
+        FakePaperAccount(),
+        PaperBalance(total_asset=100_000, available_cash=100_000, market_value=0),
+        exposure_pct=0.0,
+        available_cash=100_000,
+        market_state=MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
+        run_id="run-route-position",
+        cfg=auto_trade_ctx.cfg["auto_trade"],
+        dry_run=True,
+        max_trades=1,
+    )
+
+    assert buys[0]["position_pct"] == 0.11
+    assert buys[0]["shares"] == 1100
+    event_payload = auto_trade_ctx.event_store.appended[-1]["payload"]
+    assert event_payload["primary_strategy_route"] == "volume_breakout"
+    assert event_payload["primary_strategy_route_label"] == "放量突破"
 
 
 def test_readiness_ignores_previous_day_buy_signal_even_within_max_age(auto_trade_ctx, monkeypatch):

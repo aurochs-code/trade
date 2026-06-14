@@ -17,6 +17,7 @@ from astock_trading.platform.agent_diagnostics import (
 from astock_trading.platform.cli.common import json_or_text
 from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.llm_context import build_llm_context, render_llm_context_markdown
+from astock_trading.platform.recommendation_diagnostics import diagnose_recommendations
 
 
 diagnose_app = typer.Typer(name="diagnose", help="Agent 诊断命令")
@@ -63,6 +64,19 @@ def diagnose_flow_cmd(
         json_or_text(diagnose_flow(ctx.conn, auto_readiness=auto_readiness), as_json)
     finally:
         ctx.conn.close()
+
+
+@diagnose_app.command("recommendations")
+def diagnose_recommendations_cmd(
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """诊断正式买入、试买观察、强观察和影子复盘推荐层；只读。"""
+    init_db()
+    conn = connect()
+    try:
+        json_or_text(diagnose_recommendations(conn), as_json)
+    finally:
+        conn.close()
 
 
 @diagnose_app.command("schedule")

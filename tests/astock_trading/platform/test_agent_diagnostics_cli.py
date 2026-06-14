@@ -2637,6 +2637,88 @@ def test_diagnose_schedule_reports_recent_failed_jobs(tmp_path):
     assert payload["missed_jobs"] == []
 
 
+def test_diagnose_schedule_marks_intraday_simulation_degraded_when_critical_step_failed(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "runtime.db"
+    jobs_path = tmp_path / "jobs.json"
+    env_file = tmp_path / ".env"
+    monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
+    init_db(db_path)
+    conn = connect(db_path)
+    jobs_path.write_text(
+        json.dumps({
+            "jobs": [
+                {
+                    "name": "A股盘中候选池轻量刷新",
+                    "script": "a_stock_screener_refresh_intraday_silent.sh",
+                    "schedule": {"display": "40 13 * * 1-5"},
+                    "enabled": True,
+                    "state": "scheduled",
+                    "last_run_at": "2026-05-25T13:40:33+08:00",
+                    "last_status": "ok",
+                    "next_run_at": "2026-05-26T13:40:00+08:00",
+                },
+                {
+                    "name": "模拟盘自动交易",
+                    "script": "a_stock_pipeline_auto_trade_silent.sh",
+                    "schedule": {"display": "0 14 * * 1-5"},
+                    "enabled": True,
+                    "state": "scheduled",
+                    "last_run_at": "2026-05-25T14:00:44+08:00",
+                    "last_status": "error",
+                    "last_error": "screener_scoring_timeout",
+                    "next_run_at": "2026-05-26T14:00:00+08:00",
+                },
+                {
+                    "name": "A股盘中候选-模拟闭环",
+                    "script": "a_stock_intraday_execution_cycle_silent.sh",
+                    "schedule": {"display": "12 14 * * 1-5"},
+                    "enabled": True,
+                    "state": "scheduled",
+                    "last_run_at": "2026-05-25T14:12:31+08:00",
+                    "last_status": "ok",
+                    "next_run_at": "2026-05-26T14:12:00+08:00",
+                },
+                {
+                    "name": "A股盘中模拟买入兜底",
+                    "script": "a_stock_pipeline_auto_trade_silent.sh",
+                    "schedule": {"display": "24 14 * * 1-5"},
+                    "enabled": True,
+                    "state": "scheduled",
+                    "last_run_at": "2026-05-25T14:24:29+08:00",
+                    "last_status": "ok",
+                    "next_run_at": "2026-05-26T14:24:00+08:00",
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+    env_file.write_text(
+        "ASTOCK_DATABASE_URL=sqlite:///runtime.db\nASTOCK_CONFIG_PROFILE=trend_swing\n",
+        encoding="utf-8",
+    )
+    try:
+        payload = diagnose_schedule(
+            conn,
+            jobs_path=jobs_path,
+            env_file=env_file,
+            now=datetime(2026, 5, 25, 8, 30, tzinfo=timezone.utc),
+        )
+    finally:
+        conn.close()
+
+    simulation = payload["intraday_simulation"]
+    assert simulation["status"] == "critical_jobs_failed"
+    assert simulation["ready_for_next_window"] is False
+    assert [item["script"] for item in simulation["failed_critical_jobs"]] == [
+        "a_stock_pipeline_auto_trade_silent.sh"
+    ]
+    assert "关键模拟承接任务最近运行失败" in simulation["summary"]
+    assert simulation["next_action"]["command"] == "atrade diagnose schedule --json"
+
+
 def test_diagnose_schedule_does_not_mark_jobs_created_after_schedule_as_missed(tmp_path):
     db_path = tmp_path / "runtime.db"
     jobs_path = tmp_path / "jobs.json"
