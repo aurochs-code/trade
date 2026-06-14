@@ -254,6 +254,28 @@ def _command_catalog_entries() -> list[dict[str, Any]]:
             },
         ),
         _catalog_entry(
+            id="data_sources_select_universe",
+            title="全市场适配池筛选",
+            argv=["atrade", "data-sources", "select-universe", "START", "END", "--source", "tushare", "--adjustflag", "3", "--json"],
+            category="research",
+            description="从已落库 market_price_bars 中按流动性、波动率、价格和历史覆盖筛出回测研究股票池；只读。",
+            arguments={
+                "START": {"description": "筛选开始日期 YYYY-MM-DD"},
+                "END": {"description": "筛选结束日期 YYYY-MM-DD"},
+            },
+            options={
+                "--source": {"placeholder": "SOURCE", "default": "tushare"},
+                "--adjustflag": {"placeholder": "ADJUSTFLAG", "default": "3"},
+                "--min-trading-days": {"type": "int", "default": 240},
+                "--min-avg-amount": {"type": "float", "default": 200000000.0},
+                "--min-avg-amplitude": {"type": "float", "default": 3.0},
+                "--min-price": {"type": "float", "default": 5.0},
+                "--max-price": {"type": "float", "default": 200.0},
+                "--limit": {"type": "int", "default": 300},
+                "--json": {"required_for_automation": True},
+            },
+        ),
+        _catalog_entry(
             id="digest",
             title="运行摘要",
             argv=["atrade", "digest", "--json"],

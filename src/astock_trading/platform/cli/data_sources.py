@@ -316,6 +316,52 @@ def data_sources_hydrate_market_bars(
         conn.close()
 
 
+@data_sources_app.command("select-universe")
+def data_sources_select_universe(
+    start: str = typer.Argument(..., help="筛选开始日期 YYYY-MM-DD"),
+    end: str = typer.Argument(..., help="筛选结束日期 YYYY-MM-DD"),
+    source: str = typer.Option("tushare", "--source", help="数据源，如 tushare"),
+    adjustflag: str = typer.Option("3", "--adjustflag", help="复权口径；3=不复权，2=前复权"),
+    min_trading_days: int = typer.Option(240, "--min-trading-days", min=1, help="最少覆盖交易日"),
+    min_avg_amount: float = typer.Option(200_000_000.0, "--min-avg-amount", min=0.0, help="区间日均成交额下限，单位元"),
+    min_avg_amplitude: float = typer.Option(3.0, "--min-avg-amplitude", min=0.0, help="区间日均振幅下限，单位百分比"),
+    min_price: float = typer.Option(5.0, "--min-price", min=0.0, help="最新收盘价下限"),
+    max_price: float = typer.Option(200.0, "--max-price", min=0.0, help="最新收盘价上限"),
+    limit: int = typer.Option(300, "--limit", min=1, help="最多输出多少只"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """从已落库全市场日线筛出适配池。"""
+    from astock_trading.market.data_hydration import select_backtest_universe
+
+    conn = connect()
+    try:
+        result = select_backtest_universe(
+            conn,
+            source=source,
+            adjustflag=adjustflag,
+            start=start,
+            end=end,
+            min_trading_days=min_trading_days,
+            min_avg_amount_yuan=min_avg_amount,
+            min_avg_amplitude_pct=min_avg_amplitude,
+            min_price=min_price,
+            max_price=max_price,
+            limit=limit,
+        )
+        if as_json:
+            json_or_text(result, True)
+            return
+
+        typer.echo(f"全市场适配池: {result['status']} selected={result['selected_count']}")
+        if result["codes_csv"]:
+            typer.echo(result["codes_csv"])
+            typer.echo(f"回测命令: {result['backtest_batch_command']}")
+        for warning in result.get("warnings", []):
+            typer.echo(f"  - {warning}")
+    finally:
+        conn.close()
+
+
 def register_check_data_sources(app: typer.Typer) -> None:
     @app.command("check-data-sources")
     def check_data_sources(

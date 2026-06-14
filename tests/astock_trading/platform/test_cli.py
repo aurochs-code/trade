@@ -1521,6 +1521,50 @@ def test_data_sources_hydrate_market_bars_help_via_bin_trade():
     assert "--json" in result.stdout
 
 
+def test_data_sources_select_universe_help_via_bin_trade():
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "data-sources", "select-universe", "--help"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "适配池" in result.stdout
+    assert "--min-avg-amount" in result.stdout
+    assert "--min-avg-amplitude" in result.stdout
+    assert "--json" in result.stdout
+
+
+def test_data_sources_select_universe_json_empty_via_bin_trade(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [
+            str(cli),
+            "data-sources",
+            "select-universe",
+            "2026-06-10",
+            "2026-06-12",
+            "--json",
+        ],
+        cwd=root,
+        env=_cli_env(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["diagnostic"] == "backtest_universe_selection"
+    assert payload["status"] == "empty"
+    assert payload["selected"] == []
+
+
 def test_crontab_template_schedules_market_bar_hydration():
     root = Path(__file__).resolve().parents[3]
     crontab = (root / "config" / "astock_trading_crontab_v2").read_text(encoding="utf-8")
@@ -1895,6 +1939,11 @@ def test_agent_command_catalog_json_via_bin_trade():
     )
     assert by_id["data_sources_hydrate_market_bars"]["risk_level"] == "market_data_write"
     assert by_id["data_sources_hydrate_market_bars"]["writes_state"] is True
+    assert by_id["data_sources_select_universe"]["command"] == (
+        "atrade data-sources select-universe START END --source tushare --adjustflag 3 --json"
+    )
+    assert by_id["data_sources_select_universe"]["risk_level"] == "read_only"
+    assert by_id["data_sources_select_universe"]["writes_state"] is False
     assert by_id["digest"]["command"] == "atrade digest --json"
     assert by_id["digest"]["risk_level"] == "read_only"
     assert by_id["llm_context_close"]["command"] == "atrade llm-context --mode close --json"
