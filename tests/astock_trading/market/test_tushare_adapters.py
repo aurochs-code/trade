@@ -83,6 +83,48 @@ def test_tushare_client_uses_official_sdk_query_and_pro_bar():
     assert bars == [{"ts_code": "000001.SZ", "close": 10.5}]
 
 
+def test_tushare_client_query_uses_http_without_sdk_dependency():
+    from astock_trading.market.tushare_adapters import TushareClient
+
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "code": 0,
+                "msg": None,
+                "data": {
+                    "fields": ["ts_code", "trade_date", "close"],
+                    "items": [["000001.SZ", "20260612", 10.5]],
+                },
+            }
+
+    def fake_post(url, *, json, timeout):
+        calls.append({"url": url, "json": json, "timeout": timeout})
+        return FakeResponse()
+
+    client = TushareClient("secret-http-token", token_source="test", http_post=fake_post)
+
+    rows = client.query("daily", params={"trade_date": "20260612"}, fields="ts_code,trade_date,close")
+
+    assert rows == [{"ts_code": "000001.SZ", "trade_date": "20260612", "close": 10.5}]
+    assert calls == [
+        {
+            "url": "http://api.tushare.pro",
+            "json": {
+                "api_name": "daily",
+                "token": "secret-http-token",
+                "params": {"trade_date": "20260612"},
+                "fields": "ts_code,trade_date,close",
+            },
+            "timeout": 30.0,
+        }
+    ]
+
+
 def test_tushare_market_adapter_maps_daily_data_to_quote_and_kline():
     from astock_trading.market.tushare_adapters import TushareMarketAdapter
 
