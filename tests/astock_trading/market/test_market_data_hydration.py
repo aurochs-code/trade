@@ -139,3 +139,62 @@ def test_hydrate_tushare_daily_market_bars_rejects_qfq_adjustflag(tmp_path):
             )
     finally:
         conn.close()
+
+
+def test_select_backtest_universe_filters_for_liquid_volatile_codes(tmp_path):
+    from astock_trading.market.data_hydration import select_backtest_universe
+    from astock_trading.market.store import MarketStore
+
+    db_path = tmp_path / "universe.db"
+    init_db(db_path)
+    conn = connect(db_path)
+    store = MarketStore(conn)
+    try:
+        rows = [
+            # 高成交额、高振幅、价格正常，应入选。
+            {"symbol": "300001", "date": "2026-06-10", "open": 10, "high": 11, "low": 9, "close": 10, "amount": 260_000_000, "volume": 1000},
+            {"symbol": "300001", "date": "2026-06-11", "open": 10, "high": 10.8, "low": 9.4, "close": 10.2, "amount": 280_000_000, "volume": 1000},
+            {"symbol": "300001", "date": "2026-06-12", "open": 10.2, "high": 11.2, "low": 9.8, "close": 10.8, "amount": 300_000_000, "volume": 1000},
+            # 成交额够但振幅不够，应过滤。
+            {"symbol": "600001", "date": "2026-06-10", "open": 20, "high": 20.2, "low": 19.9, "close": 20, "amount": 500_000_000, "volume": 1000},
+            {"symbol": "600001", "date": "2026-06-11", "open": 20, "high": 20.1, "low": 19.8, "close": 20, "amount": 520_000_000, "volume": 1000},
+            {"symbol": "600001", "date": "2026-06-12", "open": 20, "high": 20.2, "low": 19.9, "close": 20, "amount": 510_000_000, "volume": 1000},
+            # 振幅够但成交额不够，应过滤。
+            {"symbol": "002001", "date": "2026-06-10", "open": 8, "high": 8.8, "low": 7.4, "close": 8, "amount": 30_000_000, "volume": 1000},
+            {"symbol": "002001", "date": "2026-06-11", "open": 8, "high": 8.6, "low": 7.6, "close": 8.1, "amount": 35_000_000, "volume": 1000},
+            {"symbol": "002001", "date": "2026-06-12", "open": 8.1, "high": 8.9, "low": 7.7, "close": 8.5, "amount": 40_000_000, "volume": 1000},
+            # 价格过高，应过滤。
+            {"symbol": "688001", "date": "2026-06-10", "open": 260, "high": 285, "low": 240, "close": 260, "amount": 500_000_000, "volume": 1000},
+            {"symbol": "688001", "date": "2026-06-11", "open": 260, "high": 285, "low": 240, "close": 262, "amount": 520_000_000, "volume": 1000},
+            {"symbol": "688001", "date": "2026-06-12", "open": 262, "high": 290, "low": 245, "close": 265, "amount": 540_000_000, "volume": 1000},
+        ]
+        store.save_price_bar_records(rows, source="tushare", adjustflag="3")
+
+        result = select_backtest_universe(
+            conn,
+            source="tushare",
+            adjustflag="3",
+            start="2026-06-10",
+            end="2026-06-12",
+            min_trading_days=3,
+            min_avg_amount_yuan=200_000_000,
+            min_avg_amplitude_pct=5.0,
+            min_price=5.0,
+            max_price=200.0,
+            limit=10,
+        )
+
+        assert result["status"] == "ok"
+        assert result["selected_count"] == 1
+        assert result["codes"] == ["300001"]
+        selected = result["selected"][0]
+        assert selected["code"] == "300001"
+        assert selected["avg_amount_yuan"] == 280_000_000.0
+        assert selected["avg_amplitude_pct"] > 10
+        assert selected["latest_close"] == 10.8
+        assert result["backtest_batch_command"].startswith(
+            "atrade backtest-batch 300001 2026-06-10 2026-06-12"
+        )
+        assert result["warnings"][0].startswith("当前选择基于 market_price_bars")
+    finally:
+        conn.close()
