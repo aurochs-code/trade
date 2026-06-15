@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from astock_trading.platform.db import init_db, connect
 from astock_trading.platform.events import EventStore
 from astock_trading.platform.runs import RunJournal
 from astock_trading.execution.service import ExecutionService
@@ -13,7 +12,7 @@ from astock_trading.reporting.reports import ReportGenerator
 
 
 @pytest.fixture
-def setup_mcp(tmp_path):
+def setup_mcp(mysql_conn):
     """Set up the MCP server globals for testing."""
     import astock_trading.platform.mcp_server as srv
     from astock_trading.market.service import MarketService
@@ -23,9 +22,7 @@ def setup_mcp(tmp_path):
     from astock_trading.strategy.decider import Decider
     from astock_trading.strategy.service import StrategyService
 
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
 
     srv._conn = conn
     srv._event_store = EventStore(conn)

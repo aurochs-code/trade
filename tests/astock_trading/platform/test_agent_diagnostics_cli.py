@@ -17,14 +17,15 @@ from astock_trading.platform.agent_diagnostics import (
     diagnose_strategy,
     propose_agent_trade_plan,
 )
-from astock_trading.platform.db import connect, init_db
+from astock_trading.platform.db import connect
 from astock_trading.platform.events import EventStore
 from astock_trading.reporting.projectors import ProjectionUpdater
 
 
 def _cli_env(tmp_path: Path) -> dict:
+    del tmp_path
     env = os.environ.copy()
-    env["ASTOCK_DATABASE_URL"] = f"sqlite:///{tmp_path / 'runtime.db'}"
+    env["ASTOCK_DATABASE_URL"] = os.environ['ASTOCK_DATABASE_URL']
     return env
 
 
@@ -42,7 +43,7 @@ def test_next_window_date_uses_scheduled_trading_day_on_weekend_before_buy_windo
     assert next_date == date(2026, 5, 25)
 
 
-def test_diagnose_health_json_via_bin_trade(tmp_path):
+def test_diagnose_health_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -63,7 +64,7 @@ def test_diagnose_health_json_via_bin_trade(tmp_path):
     assert "data_sources" in payload["inputs"]
 
 
-def test_diagnose_flow_json_via_bin_trade(tmp_path):
+def test_diagnose_flow_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -86,11 +87,9 @@ def test_diagnose_flow_json_via_bin_trade(tmp_path):
     assert "auto_readiness" in payload
 
 
-def test_diagnose_flow_exposes_top_level_candidate_summary_and_entry_signals(tmp_path, monkeypatch):
+def test_diagnose_flow_exposes_top_level_candidate_summary_and_entry_signals(tmp_path, monkeypatch, mysql_runtime):
     monkeypatch.setenv("ASTOCK_HERMES_JOBS_PATH", str(tmp_path / "missing-jobs.json"))
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         events = EventStore(conn)
         ProjectionUpdater(events, conn).sync_candidate_pool([
@@ -180,10 +179,8 @@ def test_diagnose_flow_exposes_top_level_candidate_summary_and_entry_signals(tmp
     assert payload["strategy"]["candidate_flow"]["candidate_summary"] == payload["candidate_summary"]
 
 
-def test_diagnose_flow_paper_trial_summary_exposes_review_outcome(tmp_path):
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_diagnose_flow_paper_trial_summary_exposes_review_outcome(tmp_path, mysql_runtime):
+    conn = connect()
     try:
         store = EventStore(conn)
         store.append(
@@ -303,10 +300,8 @@ def test_diagnose_flow_paper_trial_summary_exposes_review_outcome(tmp_path):
     }
 
 
-def test_diagnose_flow_paper_trial_counts_are_not_capped_to_recent_page(tmp_path):
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_diagnose_flow_paper_trial_counts_are_not_capped_to_recent_page(tmp_path, mysql_runtime):
+    conn = connect()
     try:
         store = EventStore(conn)
         for index in range(21):
@@ -335,10 +330,8 @@ def test_diagnose_flow_paper_trial_counts_are_not_capped_to_recent_page(tmp_path
     assert payload["automation"]["paper_trial"]["reviewed_count"] == 21
 
 
-def test_diagnose_health_treats_old_failed_runs_as_historical(tmp_path):
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_diagnose_health_treats_old_failed_runs_as_historical(tmp_path, mysql_runtime):
+    conn = connect()
     try:
         conn.execute(
             """INSERT INTO run_log
@@ -364,11 +357,9 @@ def test_diagnose_health_treats_old_failed_runs_as_historical(tmp_path):
         conn.close()
 
 
-def test_diagnose_health_treats_recovered_failed_runs_as_non_actionable(tmp_path, monkeypatch):
+def test_diagnose_health_treats_recovered_failed_runs_as_non_actionable(tmp_path, monkeypatch, mysql_runtime):
     monkeypatch.setenv("ASTOCK_TEST_NOW", "2026-05-22T15:00:00+08:00")
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         rows = [
             (
@@ -408,10 +399,8 @@ def test_diagnose_health_treats_recovered_failed_runs_as_non_actionable(tmp_path
         conn.close()
 
 
-def test_diagnose_health_distinguishes_empty_pool_from_missing_market_data(tmp_path):
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_diagnose_health_distinguishes_empty_pool_from_missing_market_data(tmp_path, mysql_runtime):
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-18", {"items": [1]})
@@ -432,10 +421,8 @@ def test_diagnose_health_distinguishes_empty_pool_from_missing_market_data(tmp_p
         conn.close()
 
 
-def test_diagnose_health_reports_unresolved_provider_failures(tmp_path):
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_diagnose_health_reports_unresolved_provider_failures(tmp_path, mysql_runtime):
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-18", {"items": [1]})
@@ -461,7 +448,7 @@ def test_diagnose_health_reports_unresolved_provider_failures(tmp_path):
         conn.close()
 
 
-def test_explain_run_missing_json_via_bin_trade(tmp_path):
+def test_explain_run_missing_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -482,7 +469,7 @@ def test_explain_run_missing_json_via_bin_trade(tmp_path):
     }
 
 
-def test_propose_plan_json_is_non_executing_via_bin_trade(tmp_path):
+def test_propose_plan_json_is_non_executing_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -503,13 +490,11 @@ def test_propose_plan_json_is_non_executing_via_bin_trade(tmp_path):
     assert "actions" in payload
 
 
-def test_propose_plan_inspects_data_sources_when_latest_l1_coverage_is_degraded(tmp_path):
+def test_propose_plan_inspects_data_sources_when_latest_l1_coverage_is_degraded(tmp_path, mysql_runtime):
     from astock_trading.platform.history_mirror import archive_signal_history
     from astock_trading.platform.time import utc_now_iso
 
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-20", {"items": [1]})
@@ -566,7 +551,7 @@ def test_propose_plan_inspects_data_sources_when_latest_l1_coverage_is_degraded(
         conn.close()
 
 
-def test_llm_context_json_runs_from_outside_checkout(tmp_path):
+def test_llm_context_json_runs_from_outside_checkout(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -590,13 +575,11 @@ def test_llm_context_json_runs_from_outside_checkout(tmp_path):
     assert payload["term_glossary"]
 
 
-def test_llm_context_close_splits_realized_and_unrealized_after_partial_sell(tmp_path):
+def test_llm_context_close_splits_realized_and_unrealized_after_partial_sell(tmp_path, mysql_runtime):
     from astock_trading.execution.service import ExecutionService
     from astock_trading.platform.llm_context import build_llm_context
 
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = EventStore(conn)
         svc = ExecutionService(store, conn)
@@ -633,7 +616,7 @@ def test_llm_context_close_splits_realized_and_unrealized_after_partial_sell(tmp
     assert summary["by_code"][0]["combined_pnl_cents"] == -182910
 
 
-def test_llm_context_markdown_localizes_internal_terms(tmp_path):
+def test_llm_context_markdown_localizes_internal_terms(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -656,7 +639,7 @@ def test_llm_context_markdown_localizes_internal_terms(tmp_path):
     assert "status: `" not in text
 
 
-def test_llm_context_morning_markdown_includes_discord_card_contract(tmp_path):
+def test_llm_context_morning_markdown_includes_discord_card_contract(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -680,7 +663,7 @@ def test_llm_context_morning_markdown_includes_discord_card_contract(tmp_path):
     assert "热点只作为市场背景和复盘线索，不作为买入依据" in text
 
 
-def test_llm_context_close_markdown_includes_discord_card_contract(tmp_path):
+def test_llm_context_close_markdown_includes_discord_card_contract(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -707,12 +690,10 @@ def test_llm_context_close_markdown_includes_discord_card_contract(tmp_path):
     assert "发生减仓时不得只按剩余股数写总盈亏" in text
 
 
-def test_llm_context_close_includes_market_intel_comparison(tmp_path):
+def test_llm_context_close_includes_market_intel_comparison(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         for run_id, run_type, started_at in (
             ("morning_run", "morning", "2026-05-18T09:15:00+08:00"),
@@ -804,10 +785,8 @@ def test_llm_context_close_includes_market_intel_comparison(tmp_path):
     assert intel["comparison"]["news"]["new"][0]["title"] == "收盘新增新闻"
 
 
-def test_llm_context_morning_marks_hot_stock_change_as_non_realtime_and_labels_evidence(tmp_path):
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_llm_context_morning_marks_hot_stock_change_as_non_realtime_and_labels_evidence(tmp_path, mysql_runtime):
+    conn = connect()
     try:
         conn.execute(
             """INSERT INTO run_log
@@ -841,10 +820,8 @@ def test_llm_context_morning_marks_hot_stock_change_as_non_realtime_and_labels_e
     assert evidence["label"] == "xueqiu_hot_stocks"
 
 
-def test_llm_context_morning_omits_directionless_sector_heatmap(tmp_path):
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_llm_context_morning_omits_directionless_sector_heatmap(tmp_path, mysql_runtime):
+    conn = connect()
     try:
         conn.execute(
             """INSERT INTO run_log
@@ -875,12 +852,10 @@ def test_llm_context_morning_omits_directionless_sector_heatmap(tmp_path):
     assert current["observations"]["sector_heatmap"]["kind"] == "sector_heatmap"
 
 
-def test_llm_context_close_includes_operable_review_diagnostics(tmp_path):
+def test_llm_context_close_includes_operable_review_diagnostics(tmp_path, mysql_runtime):
     from astock_trading.platform.events import EventStore
 
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "cn_a", {"items": [1]})
@@ -974,18 +949,16 @@ def test_llm_context_close_includes_operable_review_diagnostics(tmp_path):
     assert any(item["kind"] == "market_observation" for item in payload["evidence_registry"])
 
 
-def test_llm_context_close_includes_simulation_flow_gate(tmp_path, monkeypatch):
-    db_path = tmp_path / "runtime.db"
+def test_llm_context_close_includes_simulation_flow_gate(tmp_path, monkeypatch, mysql_runtime):
     monkeypatch.setenv("ASTOCK_TEST_NOW", "2026-05-23T10:00:00+08:00")
     jobs_path = tmp_path / "jobs.json"
     scripts_dir = tmp_path / "scripts"
     env_file = tmp_path / ".env"
-    env_file.write_text(f"ASTOCK_DATABASE_URL=sqlite:///{db_path}\n", encoding="utf-8")
+    env_file.write_text(f"ASTOCK_DATABASE_URL={os.environ['ASTOCK_DATABASE_URL']}\n", encoding="utf-8")
     monkeypatch.setenv("ASTOCK_ENV_FILE", str(env_file))
     monkeypatch.setenv("ASTOCK_HERMES_JOBS_PATH", str(jobs_path))
     monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     scripts_dir.mkdir(parents=True)
     jobs_path.write_text(
         json.dumps({
@@ -1318,12 +1291,10 @@ def test_close_review_checklist_does_not_prioritize_non_actionable_provider_inci
     assert "不阻断候选或模拟承接" in data_source_item["reason"]
 
 
-def test_llm_context_morning_falls_back_to_latest_market_intel_cache(tmp_path):
+def test_llm_context_morning_falls_back_to_latest_market_intel_cache(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation(
@@ -1368,7 +1339,7 @@ def test_llm_context_morning_falls_back_to_latest_market_intel_cache(tmp_path):
     assert current["hot_stocks"][0]["name"] == "周末热股"
 
 
-def test_notify_propose_plan_dry_run_json_via_bin_trade(tmp_path):
+def test_notify_propose_plan_dry_run_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -1388,7 +1359,7 @@ def test_notify_propose_plan_dry_run_json_via_bin_trade(tmp_path):
     assert payload["plan"]["execution_allowed"] is False
 
 
-def test_diagnose_strategy_json_reports_parameter_profile_need(tmp_path):
+def test_diagnose_strategy_json_reports_parameter_profile_need(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -1413,6 +1384,7 @@ def test_diagnose_strategy_json_reports_parameter_profile_need(tmp_path):
         "trend_swing",
         "short_continuation",
         "defensive_watch",
+        "weak_sideways",
     }
     assert "profile 已存在" in " ".join(payload["recommendations"])
     assert "split operating parameters into explicit profiles" not in payload["recommendations"]
@@ -1420,10 +1392,83 @@ def test_diagnose_strategy_json_reports_parameter_profile_need(tmp_path):
         "trend_swing",
         "short_continuation",
         "defensive_watch",
+        "weak_sideways",
     }
 
 
-def test_diagnose_strategy_accepts_explicit_runtime_profile(tmp_path):
+def test_diagnose_strategy_marks_morning_regime_profile_as_reference_only(tmp_path, monkeypatch, mysql_runtime):
+    monkeypatch.setenv("ASTOCK_HERMES_JOBS_PATH", str(tmp_path / "missing-jobs.json"))
+    monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
+    conn = connect()
+    try:
+        conn.execute(
+            """INSERT INTO signal_history_snapshots
+               (snapshot_id, snapshot_date, history_group_id, run_id, phase,
+                snapshot_type, payload_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "snap_market_morning",
+                "2026-06-15",
+                "group_morning",
+                "run_morning",
+                "morning",
+                "market",
+                json.dumps({"signal": "YELLOW"}),
+                "2026-06-15T09:15:00+08:00",
+            ),
+        )
+
+        payload = diagnose_strategy(conn)
+    finally:
+        conn.close()
+
+    guidance = payload["market_regime_profile_guidance"]
+    assert guidance["market_signal"] == "YELLOW"
+    assert guidance["snapshot_phase"] == "morning"
+    assert guidance["candidate_profile"] == "weak_sideways"
+    assert guidance["switch_allowed"] is False
+    assert guidance["activation_profile"] == "trend_swing"
+    assert guidance["reason_key"] == "pre_market_reference_only"
+
+
+def test_diagnose_strategy_recommends_weak_sideways_after_confirmed_yellow_snapshot(
+    tmp_path,
+    monkeypatch,
+    mysql_runtime,
+):
+    monkeypatch.setenv("ASTOCK_HERMES_JOBS_PATH", str(tmp_path / "missing-jobs.json"))
+    monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
+    conn = connect()
+    try:
+        conn.execute(
+            """INSERT INTO signal_history_snapshots
+               (snapshot_id, snapshot_date, history_group_id, run_id, phase,
+                snapshot_type, payload_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "snap_market_noon",
+                "2026-06-15",
+                "group_noon",
+                "run_noon",
+                "noon",
+                "market",
+                json.dumps({"signal": "YELLOW"}),
+                "2026-06-15T12:15:00+08:00",
+            ),
+        )
+
+        payload = diagnose_strategy(conn)
+    finally:
+        conn.close()
+
+    guidance = payload["market_regime_profile_guidance"]
+    assert guidance["switch_allowed"] is True
+    assert guidance["candidate_profile"] == "weak_sideways"
+    assert guidance["activation_profile"] == "weak_sideways"
+    assert payload["execution_profile"]["recommended_profile"] == "weak_sideways"
+
+
+def test_diagnose_strategy_accepts_explicit_runtime_profile(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
     env = _cli_env(tmp_path)
@@ -1447,12 +1492,10 @@ def test_diagnose_strategy_accepts_explicit_runtime_profile(tmp_path):
     )
 
 
-def test_diagnose_strategy_reports_candidate_flow_and_simulation_blocker(tmp_path, monkeypatch):
-    db_path = tmp_path / "runtime.db"
+def test_diagnose_strategy_reports_candidate_flow_and_simulation_blocker(tmp_path, monkeypatch, mysql_runtime):
     monkeypatch.setenv("ASTOCK_HERMES_JOBS_PATH", str(tmp_path / "missing-jobs.json"))
     monkeypatch.setenv("ASTOCK_CONFIG_PROFILE", "trend_swing")
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -1548,12 +1591,126 @@ def test_diagnose_strategy_reports_candidate_flow_and_simulation_blocker(tmp_pat
     assert payload["actionable_state"]["next_action"]["command"] == "atrade paper auto-readiness --json"
 
 
-def test_diagnose_strategy_ranks_top_scores_and_decisions_by_actionability(tmp_path, monkeypatch):
-    db_path = tmp_path / "runtime.db"
+def test_diagnose_strategy_reports_buy_funnel_gate_blockers(tmp_path, monkeypatch, mysql_runtime):
     monkeypatch.setenv("ASTOCK_HERMES_JOBS_PATH", str(tmp_path / "missing-jobs.json"))
     monkeypatch.setenv("ASTOCK_CONFIG_PROFILE", "trend_swing")
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
+    try:
+        events = EventStore(conn)
+        events.append(
+            "strategy:002384",
+            "strategy",
+            "score.calculated",
+            {
+                "code": "002384",
+                "name": "东山精密",
+                "total_score": 6.8,
+                "entry_signal": False,
+                "primary_strategy_route": "trend_cooling_off",
+                "data_quality": "ok",
+                "hard_veto_signals": ["below_ma20", "ma20_trend_down"],
+            },
+        )
+        events.append(
+            "strategy:002384",
+            "strategy",
+            "decision.suggested",
+            {
+                "code": "002384",
+                "name": "东山精密",
+                "action": "CLEAR",
+                "score": 6.8,
+                "position_pct": 0.0,
+                "market_signal": "YELLOW",
+                "veto_reasons": ["below_ma20", "ma20_trend_down"],
+                "buy_funnel": {
+                    "status": "blocked",
+                    "decision_reason_keys": [
+                        "below_ma20",
+                        "ma20_trend_down",
+                        "entry_signal_missing",
+                        "route_policy_not_matched",
+                    ],
+                    "gates": {
+                        "hard_veto": {
+                            "status": "blocked",
+                            "reasons": ["below_ma20", "ma20_trend_down"],
+                        },
+                        "entry_signal": {
+                            "status": "blocked",
+                            "reason_key": "entry_signal_missing",
+                        },
+                        "route_policy": {
+                            "status": "not_matched",
+                            "primary_route": "trend_cooling_off",
+                        },
+                    },
+                },
+            },
+        )
+        events.append(
+            "strategy:300750",
+            "strategy",
+            "score.calculated",
+            {
+                "code": "300750",
+                "name": "宁德时代",
+                "total_score": 6.3,
+                "entry_signal": True,
+                "primary_strategy_route": "pullback_to_ma20",
+                "data_quality": "ok",
+            },
+        )
+        events.append(
+            "strategy:300750",
+            "strategy",
+            "decision.suggested",
+            {
+                "code": "300750",
+                "name": "宁德时代",
+                "action": "TRIAL_BUY",
+                "score": 6.3,
+                "position_pct": 0.0,
+                "market_signal": "RED",
+                "buy_funnel": {
+                    "status": "trial_only",
+                    "decision_reason_keys": ["market_blocks_new_positions"],
+                    "gates": {
+                        "market_regime": {
+                            "status": "blocked",
+                            "signal": "RED",
+                            "reason_key": "market_blocks_new_positions",
+                        },
+                        "route_policy": {
+                            "status": "matched",
+                            "matched_key": "RED:pullback_to_ma20",
+                            "primary_route": "pullback_to_ma20",
+                        },
+                    },
+                },
+            },
+        )
+
+        payload = diagnose_strategy(conn)
+    finally:
+        conn.close()
+
+    funnel = payload["candidate_flow"]["buy_funnel"]
+    assert funnel["reason_counts"]["below_ma20"] == 1
+    assert funnel["reason_counts"]["ma20_trend_down"] == 1
+    assert funnel["reason_counts"]["entry_signal_missing"] == 1
+    assert funnel["reason_counts"]["route_policy_not_matched"] == 1
+    assert funnel["reason_counts"]["market_blocks_new_positions"] == 1
+    assert funnel["gate_status_counts"]["route_policy"]["not_matched"] == 1
+    assert funnel["gate_status_counts"]["market_regime"]["blocked"] == 1
+    assert funnel["top_blocked"][0]["code"] == "002384"
+    assert "buy_funnel" in funnel["top_blocked"][0]
+
+
+def test_diagnose_strategy_ranks_top_scores_and_decisions_by_actionability(tmp_path, monkeypatch, mysql_runtime):
+    monkeypatch.setenv("ASTOCK_HERMES_JOBS_PATH", str(tmp_path / "missing-jobs.json"))
+    monkeypatch.setenv("ASTOCK_CONFIG_PROFILE", "trend_swing")
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -1647,12 +1804,10 @@ def test_diagnose_strategy_ranks_top_scores_and_decisions_by_actionability(tmp_p
     assert decisions[0]["action"] == "BUY"
 
 
-def test_diagnose_strategy_ignores_stale_entry_signal_outside_current_pool(tmp_path, monkeypatch):
-    db_path = tmp_path / "runtime.db"
+def test_diagnose_strategy_ignores_stale_entry_signal_outside_current_pool(tmp_path, monkeypatch, mysql_runtime):
     monkeypatch.setenv("ASTOCK_HERMES_JOBS_PATH", str(tmp_path / "missing-jobs.json"))
     monkeypatch.setenv("ASTOCK_CONFIG_PROFILE", "trend_swing")
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -1701,12 +1856,10 @@ def test_diagnose_strategy_ignores_stale_entry_signal_outside_current_pool(tmp_p
     assert "入场信号不足" in payload["actionable_state"]["summary"]
 
 
-def test_diagnose_strategy_ignores_buy_signal_on_non_trading_day(tmp_path, monkeypatch):
-    db_path = tmp_path / "runtime.db"
+def test_diagnose_strategy_ignores_buy_signal_on_non_trading_day(tmp_path, monkeypatch, mysql_runtime):
     monkeypatch.setenv("ASTOCK_HERMES_JOBS_PATH", str(tmp_path / "missing-jobs.json"))
     monkeypatch.setenv("ASTOCK_CONFIG_PROFILE", "trend_swing")
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -1781,12 +1934,10 @@ def test_diagnose_strategy_ignores_buy_signal_on_non_trading_day(tmp_path, monke
     )
 
 
-def test_diagnose_flow_profile_review_summary_uses_current_signal_state(tmp_path, monkeypatch):
-    db_path = tmp_path / "runtime.db"
+def test_diagnose_flow_profile_review_summary_uses_current_signal_state(tmp_path, monkeypatch, mysql_runtime):
     monkeypatch.setenv("ASTOCK_HERMES_JOBS_PATH", str(tmp_path / "missing-jobs.json"))
     monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -1833,12 +1984,10 @@ def test_diagnose_flow_profile_review_summary_uses_current_signal_state(tmp_path
     assert "买入意向已经进入可观察链路" not in payload["summary"]
 
 
-def test_diagnose_flow_profile_review_summary_surfaces_recent_unusable_buy_signal(tmp_path, monkeypatch):
-    db_path = tmp_path / "runtime.db"
+def test_diagnose_flow_profile_review_summary_surfaces_recent_unusable_buy_signal(tmp_path, monkeypatch, mysql_runtime):
     monkeypatch.setenv("ASTOCK_HERMES_JOBS_PATH", str(tmp_path / "missing-jobs.json"))
     monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -1925,12 +2074,10 @@ def test_diagnose_flow_profile_review_summary_surfaces_recent_unusable_buy_signa
     assert "买入意向发生日或当前检查日不是交易日" in payload["summary"]
 
 
-def test_diagnose_flow_next_window_falls_back_to_latest_buy_signal(tmp_path, monkeypatch):
-    db_path = tmp_path / "runtime.db"
+def test_diagnose_flow_next_window_falls_back_to_latest_buy_signal(tmp_path, monkeypatch, mysql_runtime):
     monkeypatch.setenv("ASTOCK_HERMES_JOBS_PATH", str(tmp_path / "missing-jobs.json"))
     monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -1996,8 +2143,8 @@ def test_diagnose_flow_next_window_falls_back_to_latest_buy_signal(tmp_path, mon
 def test_diagnose_strategy_prioritizes_profile_activation_before_next_buy_window(
     tmp_path,
     monkeypatch,
+    mysql_runtime,
 ):
-    db_path = tmp_path / "runtime.db"
     jobs_path = tmp_path / "jobs.json"
     monkeypatch.setenv("ASTOCK_HERMES_JOBS_PATH", str(jobs_path))
     monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
@@ -2005,8 +2152,7 @@ def test_diagnose_strategy_prioritizes_profile_activation_before_next_buy_window
         "astock_trading.platform.agent_diagnostics.utc_now",
         lambda: datetime(2026, 5, 22, 8, 10, tzinfo=timezone.utc),
     )
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     jobs_path.write_text(
         json.dumps({
             "jobs": [
@@ -2154,8 +2300,8 @@ def test_diagnose_strategy_prioritizes_profile_activation_before_next_buy_window
 def test_diagnose_flow_joins_candidate_signal_and_simulation_blockers(
     tmp_path,
     monkeypatch,
+    mysql_runtime,
 ):
-    db_path = tmp_path / "runtime.db"
     jobs_path = tmp_path / "jobs.json"
     monkeypatch.setenv("ASTOCK_HERMES_JOBS_PATH", str(jobs_path))
     monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
@@ -2163,8 +2309,7 @@ def test_diagnose_flow_joins_candidate_signal_and_simulation_blockers(
         "astock_trading.platform.agent_diagnostics.utc_now",
         lambda: datetime(2026, 5, 22, 8, 10, tzinfo=timezone.utc),
     )
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     jobs_path.write_text(
         json.dumps({
             "jobs": [
@@ -2529,11 +2674,9 @@ def test_diagnose_flow_joins_candidate_signal_and_simulation_blockers(
     ]
 
 
-def test_diagnose_schedule_reports_missed_intraday_catchup_jobs(tmp_path):
-    db_path = tmp_path / "runtime.db"
+def test_diagnose_schedule_reports_missed_intraday_catchup_jobs(tmp_path, mysql_runtime):
     jobs_path = tmp_path / "jobs.json"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     jobs_path.write_text(
         json.dumps({
             "jobs": [
@@ -2589,11 +2732,9 @@ def test_diagnose_schedule_reports_missed_intraday_catchup_jobs(tmp_path):
     }
 
 
-def test_diagnose_schedule_reports_recent_failed_jobs(tmp_path):
-    db_path = tmp_path / "runtime.db"
+def test_diagnose_schedule_reports_recent_failed_jobs(tmp_path, mysql_runtime):
     jobs_path = tmp_path / "jobs.json"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     jobs_path.write_text(
         json.dumps({
             "jobs": [
@@ -2640,13 +2781,12 @@ def test_diagnose_schedule_reports_recent_failed_jobs(tmp_path):
 def test_diagnose_schedule_marks_intraday_simulation_degraded_when_critical_step_failed(
     tmp_path,
     monkeypatch,
+    mysql_runtime,
 ):
-    db_path = tmp_path / "runtime.db"
     jobs_path = tmp_path / "jobs.json"
     env_file = tmp_path / ".env"
     monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     jobs_path.write_text(
         json.dumps({
             "jobs": [
@@ -2696,7 +2836,7 @@ def test_diagnose_schedule_marks_intraday_simulation_degraded_when_critical_step
         encoding="utf-8",
     )
     env_file.write_text(
-        "ASTOCK_DATABASE_URL=sqlite:///runtime.db\nASTOCK_CONFIG_PROFILE=trend_swing\n",
+        f"ASTOCK_DATABASE_URL={os.environ['ASTOCK_DATABASE_URL']}\nASTOCK_CONFIG_PROFILE=trend_swing\n",
         encoding="utf-8",
     )
     try:
@@ -2719,11 +2859,9 @@ def test_diagnose_schedule_marks_intraday_simulation_degraded_when_critical_step
     assert simulation["next_action"]["command"] == "atrade diagnose schedule --json"
 
 
-def test_diagnose_schedule_does_not_mark_jobs_created_after_schedule_as_missed(tmp_path):
-    db_path = tmp_path / "runtime.db"
+def test_diagnose_schedule_does_not_mark_jobs_created_after_schedule_as_missed(tmp_path, mysql_runtime):
     jobs_path = tmp_path / "jobs.json"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     jobs_path.write_text(
         json.dumps({
             "jobs": [
@@ -2773,13 +2911,12 @@ def test_diagnose_schedule_does_not_mark_jobs_created_after_schedule_as_missed(t
 def test_diagnose_schedule_surfaces_intraday_simulation_verification_plan(
     tmp_path,
     monkeypatch,
+    mysql_runtime,
 ):
-    db_path = tmp_path / "runtime.db"
     jobs_path = tmp_path / "jobs.json"
     env_file = tmp_path / ".env"
     monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     jobs_path.write_text(
         json.dumps({
             "jobs": [
@@ -2827,7 +2964,7 @@ def test_diagnose_schedule_surfaces_intraday_simulation_verification_plan(
         }),
         encoding="utf-8",
     )
-    env_file.write_text("ASTOCK_DATABASE_URL=sqlite:///runtime.db\n", encoding="utf-8")
+    env_file.write_text(f"ASTOCK_DATABASE_URL={os.environ['ASTOCK_DATABASE_URL']}\n", encoding="utf-8")
     try:
         EventStore(conn).append(
             "strategy:profile_activation",
@@ -2900,14 +3037,13 @@ def test_diagnose_schedule_surfaces_intraday_simulation_verification_plan(
 def test_diagnose_schedule_reports_script_runtime_contract_for_next_window_jobs(
     tmp_path,
     monkeypatch,
+    mysql_runtime,
 ):
-    db_path = tmp_path / "runtime.db"
     jobs_path = tmp_path / "profile" / "cron" / "jobs.json"
     scripts_dir = tmp_path / "profile" / "scripts"
     env_file = tmp_path / ".env"
     monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     jobs_path.parent.mkdir(parents=True)
     scripts_dir.mkdir(parents=True)
     jobs_path.write_text(
@@ -2978,7 +3114,7 @@ def test_diagnose_schedule_reports_script_runtime_contract_for_next_window_jobs(
         encoding="utf-8",
     )
     env_file.write_text(
-        "ASTOCK_DATABASE_URL=sqlite:///runtime.db\nASTOCK_CONFIG_PROFILE=trend_swing\n",
+        f"ASTOCK_DATABASE_URL={os.environ['ASTOCK_DATABASE_URL']}\nASTOCK_CONFIG_PROFILE=trend_swing\n",
         encoding="utf-8",
     )
     try:
@@ -3021,14 +3157,13 @@ def test_diagnose_schedule_reports_script_runtime_contract_for_next_window_jobs(
 def test_diagnose_schedule_runtime_contract_ignores_non_simulation_llm_scripts(
     tmp_path,
     monkeypatch,
+    mysql_runtime,
 ):
-    db_path = tmp_path / "runtime.db"
     jobs_path = tmp_path / "profile" / "cron" / "jobs.json"
     scripts_dir = tmp_path / "profile" / "scripts"
     env_file = tmp_path / ".env"
     monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     jobs_path.parent.mkdir(parents=True)
     scripts_dir.mkdir(parents=True)
     jobs_path.write_text(
@@ -3075,7 +3210,7 @@ def test_diagnose_schedule_runtime_contract_ignores_non_simulation_llm_scripts(
         encoding="utf-8",
     )
     env_file.write_text(
-        "ASTOCK_DATABASE_URL=sqlite:///runtime.db\nASTOCK_CONFIG_PROFILE=trend_swing\n",
+        f"ASTOCK_DATABASE_URL={os.environ['ASTOCK_DATABASE_URL']}\nASTOCK_CONFIG_PROFILE=trend_swing\n",
         encoding="utf-8",
     )
     try:
@@ -3097,10 +3232,8 @@ def test_diagnose_schedule_runtime_contract_ignores_non_simulation_llm_scripts(
     assert payload["intraday_simulation"]["status"] in {"ready", "pending_first_run_verification"}
 
 
-def test_diagnose_schedule_surfaces_intraday_simulation_when_jobs_missing(tmp_path):
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_diagnose_schedule_surfaces_intraday_simulation_when_jobs_missing(tmp_path, mysql_runtime):
+    conn = connect()
     try:
         payload = diagnose_schedule(
             conn,
@@ -3122,13 +3255,12 @@ def test_diagnose_schedule_surfaces_intraday_simulation_when_jobs_missing(tmp_pa
 def test_diagnose_schedule_warns_when_recorded_profile_not_in_runtime_env(
     tmp_path,
     monkeypatch,
+    mysql_runtime,
 ):
-    db_path = tmp_path / "runtime.db"
     jobs_path = tmp_path / "jobs.json"
     env_file = tmp_path / ".env"
     monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     jobs_path.write_text(
         json.dumps({
             "jobs": [
@@ -3146,7 +3278,7 @@ def test_diagnose_schedule_warns_when_recorded_profile_not_in_runtime_env(
         }),
         encoding="utf-8",
     )
-    env_file.write_text("ASTOCK_DATABASE_URL=sqlite:///runtime.db\n", encoding="utf-8")
+    env_file.write_text(f"ASTOCK_DATABASE_URL={os.environ['ASTOCK_DATABASE_URL']}\n", encoding="utf-8")
     try:
         EventStore(conn).append(
             "strategy:profile_activation",
@@ -3203,13 +3335,12 @@ def test_diagnose_schedule_warns_when_recorded_profile_not_in_runtime_env(
 def test_diagnose_schedule_accepts_runtime_env_profile_after_recorded_activation(
     tmp_path,
     monkeypatch,
+    mysql_runtime,
 ):
-    db_path = tmp_path / "runtime.db"
     jobs_path = tmp_path / "jobs.json"
     env_file = tmp_path / ".env"
     monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     jobs_path.write_text(
         json.dumps({
             "jobs": [
@@ -3228,7 +3359,7 @@ def test_diagnose_schedule_accepts_runtime_env_profile_after_recorded_activation
         encoding="utf-8",
     )
     env_file.write_text(
-        "ASTOCK_DATABASE_URL=sqlite:///runtime.db\nASTOCK_CONFIG_PROFILE=trend_swing\n",
+        f"ASTOCK_DATABASE_URL={os.environ['ASTOCK_DATABASE_URL']}\nASTOCK_CONFIG_PROFILE=trend_swing\n",
         encoding="utf-8",
     )
     try:
@@ -3269,7 +3400,7 @@ def test_diagnose_schedule_accepts_runtime_env_profile_after_recorded_activation
     assert payload["runtime_profile"]["source"]["profile_key_present"] is True
 
 
-def test_diagnose_schedule_json_via_bin_trade_with_jobs_path(tmp_path):
+def test_diagnose_schedule_json_via_bin_trade_with_jobs_path(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
     jobs_path = tmp_path / "jobs.json"
@@ -3308,11 +3439,10 @@ def test_diagnose_schedule_json_via_bin_trade_with_jobs_path(tmp_path):
 def test_diagnose_strategy_points_to_schedule_when_buy_signal_missed_catchup(
     tmp_path,
     monkeypatch,
+    mysql_runtime,
 ):
-    db_path = tmp_path / "runtime.db"
     jobs_path = tmp_path / "jobs.json"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     monkeypatch.setenv("ASTOCK_HERMES_JOBS_PATH", str(jobs_path))
     monkeypatch.setattr(
         "astock_trading.platform.agent_diagnostics.utc_now",

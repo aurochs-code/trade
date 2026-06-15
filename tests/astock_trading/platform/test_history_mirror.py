@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 
-from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.history_mirror import (
     archive_signal_history,
     diagnose_signal_history,
@@ -12,10 +11,8 @@ from astock_trading.platform.history_mirror import (
 )
 
 
-def test_archive_and_diagnose_signal_history_bundle(tmp_path):
-    db_path = tmp_path / "history.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_archive_and_diagnose_signal_history_bundle(mysql_conn):
+    conn = mysql_conn
     try:
         group_id = archive_signal_history(
             conn,

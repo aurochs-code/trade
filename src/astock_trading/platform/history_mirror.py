@@ -38,7 +38,7 @@ def archive_signal_history(
     for snapshot_type, payload in payloads.items():
         snapshot_id = _snapshot_id(group_id, snapshot_type)
         conn.execute(
-            """INSERT OR REPLACE INTO signal_history_snapshots
+            """REPLACE INTO signal_history_snapshots
                (snapshot_id, snapshot_date, history_group_id, run_id, phase,
                 snapshot_type, payload_json, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",

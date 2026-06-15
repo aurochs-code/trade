@@ -7,15 +7,12 @@ from astock_trading.platform.cli.data_sources import (
     _latest_screener_source_quality,
     build_data_source_diagnosis,
 )
-from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.data_source_diagnostics import data_source_blockers_for_new_trades
 from astock_trading.platform.history_mirror import archive_signal_history
 
 
-def test_build_data_source_diagnosis_includes_latest_screener_source_quality(tmp_path):
-    db_path = tmp_path / "diagnose.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_build_data_source_diagnosis_includes_latest_screener_source_quality(mysql_conn):
+    conn = mysql_conn
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-20", {"items": [1]})
@@ -73,16 +70,14 @@ def test_build_data_source_diagnosis_includes_latest_screener_source_quality(tmp
         conn.close()
 
 
-def test_build_data_source_diagnosis_reports_paid_primary_provider_policy(tmp_path, monkeypatch):
-    db_path = tmp_path / "diagnose.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_build_data_source_diagnosis_reports_paid_primary_provider_policy(mysql_conn, monkeypatch):
+    conn = mysql_conn
     monkeypatch.setenv("ASTOCK_TUSHARE_TOKEN", "secret-token")
     try:
         payload = build_data_source_diagnosis(conn)
 
         policy = payload["provider_policy"]
-        assert policy["market"]["primary_providers"] == ["MXMarketAdapter", "TushareMarketAdapter"]
+        assert policy["market"]["primary_providers"] == ["TushareMarketAdapter", "MXMarketAdapter"]
         assert "AkShareMarketAdapter" in policy["market"]["fallback_providers"]
         assert policy["financial"]["primary_providers"] == ["TushareFinancialAdapter"]
         assert "TencentFinancialAdapter" in policy["financial"]["fallback_providers"]
@@ -95,10 +90,8 @@ def test_build_data_source_diagnosis_reports_paid_primary_provider_policy(tmp_pa
         conn.close()
 
 
-def test_data_source_diagnosis_does_not_block_new_trades_for_weekend_stale_gate_sources(tmp_path):
-    db_path = tmp_path / "diagnose.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_data_source_diagnosis_does_not_block_new_trades_for_weekend_stale_gate_sources(mysql_conn):
+    conn = mysql_conn
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "latest", {"items": [1]})
@@ -128,10 +121,8 @@ def test_data_source_diagnosis_does_not_block_new_trades_for_weekend_stale_gate_
         conn.close()
 
 
-def test_latest_screener_source_quality_ignores_newer_market_signal_snapshots(tmp_path):
-    db_path = tmp_path / "diagnose.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_latest_screener_source_quality_ignores_newer_market_signal_snapshots(mysql_conn):
+    conn = mysql_conn
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -198,10 +189,8 @@ def test_latest_screener_source_quality_ignores_newer_market_signal_snapshots(tm
         conn.close()
 
 
-def test_new_trade_blockers_ignore_l1_failures_outside_active_candidate_pool(tmp_path):
-    db_path = tmp_path / "diagnose.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_new_trade_blockers_ignore_l1_failures_outside_active_candidate_pool(mysql_conn):
+    conn = mysql_conn
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -238,10 +227,8 @@ def test_new_trade_blockers_ignore_l1_failures_outside_active_candidate_pool(tmp
         conn.close()
 
 
-def test_build_data_source_diagnosis_keeps_non_active_provider_failures_non_actionable(tmp_path):
-    db_path = tmp_path / "diagnose.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_build_data_source_diagnosis_keeps_non_active_provider_failures_non_actionable(mysql_conn):
+    conn = mysql_conn
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -286,10 +273,8 @@ def test_build_data_source_diagnosis_keeps_non_active_provider_failures_non_acti
         conn.close()
 
 
-def test_new_trade_blockers_keep_l1_failures_for_active_candidate_pool(tmp_path):
-    db_path = tmp_path / "diagnose.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_new_trade_blockers_keep_l1_failures_for_active_candidate_pool(mysql_conn):
+    conn = mysql_conn
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -321,10 +306,8 @@ def test_new_trade_blockers_keep_l1_failures_for_active_candidate_pool(tmp_path)
         conn.close()
 
 
-def test_new_trade_blockers_ignore_l1_coverage_gaps_outside_active_candidate_pool(tmp_path):
-    db_path = tmp_path / "diagnose.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_new_trade_blockers_ignore_l1_coverage_gaps_outside_active_candidate_pool(mysql_conn):
+    conn = mysql_conn
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -380,10 +363,8 @@ def test_new_trade_blockers_ignore_l1_coverage_gaps_outside_active_candidate_poo
         conn.close()
 
 
-def test_data_source_diagnosis_does_not_warn_for_tiny_failed_scan_outside_active_pool(tmp_path):
-    db_path = tmp_path / "diagnose.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_data_source_diagnosis_does_not_warn_for_tiny_failed_scan_outside_active_pool(mysql_conn):
+    conn = mysql_conn
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -435,10 +416,8 @@ def test_data_source_diagnosis_does_not_warn_for_tiny_failed_scan_outside_active
         conn.close()
 
 
-def test_latest_screener_source_quality_treats_later_flow_observation_as_repaired(tmp_path):
-    db_path = tmp_path / "diagnose.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_latest_screener_source_quality_treats_later_flow_observation_as_repaired(mysql_conn):
+    conn = mysql_conn
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})

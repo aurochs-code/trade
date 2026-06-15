@@ -5,15 +5,12 @@ from __future__ import annotations
 import pandas as pd
 
 from astock_trading.backtest.engine import BacktestConfig, BacktestEngine
-from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.history_mirror import archive_signal_history
 from astock_trading.strategy.models import MarketSignal, MarketState
 
 
-def test_backtest_engine_uses_signal_history_before_proxy_replay(tmp_path):
-    db_path = tmp_path / "history.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_backtest_engine_uses_signal_history_before_proxy_replay(mysql_conn):
+    conn = mysql_conn
     try:
         archive_signal_history(
             conn,

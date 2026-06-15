@@ -13,6 +13,102 @@ from astock_trading.risk.models import ExitSignal, RiskParams, RiskBreach
 from astock_trading.strategy.models import Style
 
 
+def _distance_pct(current_price: float, trigger_price: float | None) -> float | None:
+    if trigger_price is None or trigger_price <= 0:
+        return None
+    return round((current_price - trigger_price) / trigger_price, 4)
+
+
+def build_threshold_snapshot(
+    code: str,
+    avg_cost: float,
+    current_price: float,
+    entry_date: date,
+    today: date,
+    highest_since_entry: float,
+    entry_day_low: float,
+    params: RiskParams,
+    ma20: float = 0,
+    ma60: float = 0,
+    signals: list[ExitSignal] | None = None,
+) -> dict:
+    """构造单票风控阈值快照，未触发时也保留各条风险线。"""
+    signals = signals or []
+    triggered_signal_types = [signal.signal_type for signal in signals]
+    holding_days = (today - entry_date).days
+    pnl_pct = (current_price - avg_cost) / avg_cost if avg_cost > 0 else 0.0
+
+    stop_price = round(avg_cost * (1 - params.stop_loss), 2)
+    trail_price = (
+        round(highest_since_entry * (1 - params.trailing_stop), 2)
+        if params.trailing_stop and highest_since_entry > 0
+        else None
+    )
+    ma_exit_price = ma20 if params.exit_ma == 20 and ma20 > 0 else None
+    absolute_stop_price = (
+        round(ma60 * 0.98, 2)
+        if params.absolute_stop_ma == 60 and ma60 > 0
+        else None
+    )
+
+    def _signal_triggered(signal_type: str, trigger_price: float | None = None) -> bool:
+        for signal in signals:
+            if signal.signal_type != signal_type:
+                continue
+            if trigger_price is None or round(signal.trigger_price, 2) == round(trigger_price, 2):
+                return True
+        return False
+
+    style = params.style.value if hasattr(params.style, "value") else str(params.style)
+    return {
+        "code": code,
+        "style": style,
+        "avg_cost": round(avg_cost, 4),
+        "current_price": round(current_price, 4),
+        "entry_date": entry_date.isoformat(),
+        "today": today.isoformat(),
+        "holding_days": holding_days,
+        "highest_since_entry": round(highest_since_entry, 4),
+        "entry_day_low": round(entry_day_low, 4),
+        "pnl_pct": round(pnl_pct, 4),
+        "triggered_signal_types": triggered_signal_types,
+        "thresholds": {
+            "stop_loss": {
+                "enabled": True,
+                "trigger_price": stop_price,
+                "distance_pct": _distance_pct(current_price, stop_price),
+                "triggered": _signal_triggered("stop_loss", stop_price),
+            },
+            "trailing_stop": {
+                "enabled": trail_price is not None,
+                "trigger_price": trail_price,
+                "distance_pct": _distance_pct(current_price, trail_price),
+                "triggered": _signal_triggered("trailing_stop", trail_price),
+            },
+            "time_stop": {
+                "enabled": params.time_stop_days > 0,
+                "days_limit": params.time_stop_days,
+                "days_remaining": max(params.time_stop_days - holding_days, 0),
+                "triggered": _signal_triggered("time_stop"),
+            },
+            "ma_exit": {
+                "enabled": ma_exit_price is not None,
+                "ma": params.exit_ma,
+                "trigger_price": ma_exit_price,
+                "distance_pct": _distance_pct(current_price, ma_exit_price),
+                "triggered": _signal_triggered("ma_exit", ma_exit_price),
+            },
+            "absolute_stop": {
+                "enabled": absolute_stop_price is not None,
+                "ma": params.absolute_stop_ma,
+                "trigger_price": absolute_stop_price,
+                "distance_pct": _distance_pct(current_price, absolute_stop_price),
+                "triggered": _signal_triggered("stop_loss", absolute_stop_price),
+            },
+        },
+    }
+
+
 def get_risk_params(style: Style, risk_cfg: Optional[dict] = None) -> RiskParams:
     """根据风格返回对应的风控参数。"""
     risk_cfg = risk_cfg or {}

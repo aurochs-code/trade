@@ -43,6 +43,7 @@ class Decider:
         trial_buy_threshold: float | None = None,
         trial_buy_entry_signal_threshold: float | None = None,
         market_regime_overlays: dict | None = None,
+        route_execution_policy: dict | None = None,
     ):
         self.buy_threshold = buy_threshold
         self.watch_threshold = watch_threshold
@@ -64,6 +65,7 @@ class Decider:
         self.critical_missing_fields_for_buy = set(critical_missing_fields_for_buy or [])
         self.min_position_pct_for_buy = min_position_pct_for_buy
         self.market_regime_overlays = market_regime_overlays or {}
+        self.route_execution_policy = route_execution_policy or {}
 
     def decide(
         self,
@@ -140,9 +142,21 @@ class Decider:
         if weekly_buy_count >= self.weekly_max:
             notes.append(f"本周已买 {weekly_buy_count}/{self.weekly_max}")
 
+        route_policy_name, route_policy = self._route_policy_for_score(market.signal, score)
+        if route_policy:
+            policy_score_min = route_policy.get("score_min")
+            if policy_score_min is not None:
+                route_buy_threshold = float(policy_score_min or buy_threshold)
+                if route_buy_threshold < buy_threshold:
+                    buy_threshold = route_buy_threshold
+                    notes.append(f"路线 {route_policy_name} 买入线 {buy_threshold:.1f}")
+
         # Score-based decision
         if score.total >= buy_threshold and weekly_buy_count < self.weekly_max:
-            position_pct = self.single_max_pct * market.multiplier
+            if route_policy and route_policy.get("position_pct") is not None:
+                position_pct = min(float(route_policy.get("position_pct") or 0.0), self.single_max_pct)
+            else:
+                position_pct = self.single_max_pct * market.multiplier
             remaining = max(0, self.total_max_pct - current_exposure_pct)
             position_pct = min(position_pct, remaining)
 
@@ -246,6 +260,167 @@ class Decider:
             self.decide(s, market, current_exposure_pct, weekly_buy_count)
             for s in scores
         ]
+
+    def build_buy_funnel(
+        self,
+        score: ScoreResult,
+        market: MarketState,
+        *,
+        decision: DecisionIntent | None = None,
+        current_exposure_pct: float = 0.0,
+        weekly_buy_count: int = 0,
+    ) -> dict:
+        """Build replayable BUY-gate diagnostics without changing the decision."""
+        regime = self._regime_rules(market.signal)
+        buy_threshold = float(regime.get("buy_threshold", self.buy_threshold))
+        watch_threshold = float(regime.get("watch_threshold", self.watch_threshold))
+        route_policy_route, route_policy_key, route_policy = self._route_policy_match(
+            market.signal,
+            score,
+        )
+        if route_policy and route_policy.get("score_min") is not None:
+            route_buy_threshold = float(route_policy.get("score_min") or buy_threshold)
+            if route_buy_threshold < buy_threshold:
+                buy_threshold = route_buy_threshold
+
+        if route_policy and route_policy.get("position_pct") is not None:
+            raw_position_pct = min(
+                float(route_policy.get("position_pct") or 0.0),
+                self.single_max_pct,
+            )
+        else:
+            raw_position_pct = self.single_max_pct * float(market.multiplier or 0.0)
+        remaining_pct = max(0.0, self.total_max_pct - current_exposure_pct)
+        position_pct = min(raw_position_pct, remaining_pct)
+
+        reason_keys: list[str] = []
+        gates: dict[str, dict] = {}
+
+        market_blocked = market.signal in (MarketSignal.RED, MarketSignal.CLEAR)
+        gates["market_regime"] = {
+            "status": "blocked" if market_blocked else "pass",
+            "signal": market.signal.value,
+            "multiplier": market.multiplier,
+            "reason_key": "market_blocks_new_positions" if market_blocked else None,
+        }
+        if market_blocked:
+            reason_keys.append("market_blocks_new_positions")
+
+        hard_veto_reasons = list(score.hard_veto or [])
+        gates["hard_veto"] = {
+            "status": "blocked" if score.veto_triggered else "pass",
+            "reasons": hard_veto_reasons,
+        }
+        if score.veto_triggered:
+            reason_keys.extend(hard_veto_reasons or ["veto"])
+
+        score_status = "pass" if score.total >= buy_threshold else (
+            "watch" if score.total >= watch_threshold else "blocked"
+        )
+        gates["score"] = {
+            "status": score_status,
+            "score": score.total,
+            "buy_threshold": buy_threshold,
+            "watch_threshold": watch_threshold,
+            "reason_key": None if score.total >= buy_threshold else "score_below_buy_line",
+        }
+        if score.total < buy_threshold:
+            reason_keys.append("score_below_buy_line" if score.total >= watch_threshold else "score_too_low")
+
+        entry_blocked = self.require_entry_signal_for_buy and not score.entry_signal
+        gates["entry_signal"] = {
+            "status": "blocked" if entry_blocked else "pass",
+            "required": self.require_entry_signal_for_buy,
+            "triggered": bool(score.entry_signal),
+            "reason_key": "entry_signal_missing" if entry_blocked else None,
+        }
+        if entry_blocked:
+            reason_keys.append("entry_signal_missing")
+
+        score_quality = _quality_value(score.data_quality)
+        quality_blocked = (
+            _quality_rank(score_quality) < _quality_rank(self.min_data_quality_for_buy)
+        )
+        gates["data_quality"] = {
+            "status": "blocked" if quality_blocked else "pass",
+            "value": score_quality,
+            "minimum": self.min_data_quality_for_buy,
+            "reason_key": "data_quality_below_min" if quality_blocked else None,
+        }
+        if quality_blocked:
+            reason_keys.append("data_quality_below_min")
+
+        missing = list(score.data_missing_fields or [])
+        missing_too_many = (
+            self.max_missing_fields_for_buy is not None
+            and len(missing) > self.max_missing_fields_for_buy
+        )
+        critical_missing = sorted(self.critical_missing_fields_for_buy.intersection(missing))
+        gates["missing_fields"] = {
+            "status": "blocked" if missing_too_many or critical_missing else "pass",
+            "fields": missing,
+            "max_allowed": self.max_missing_fields_for_buy,
+            "critical_missing": critical_missing,
+        }
+        if missing_too_many:
+            reason_keys.append("too_many_missing_fields")
+        if critical_missing:
+            reason_keys.append("critical_missing_fields")
+
+        weekly_blocked = weekly_buy_count >= self.weekly_max
+        gates["weekly_limit"] = {
+            "status": "blocked" if weekly_blocked else "pass",
+            "weekly_buy_count": weekly_buy_count,
+            "weekly_max": self.weekly_max,
+            "reason_key": "weekly_limit_decision" if weekly_blocked else None,
+        }
+        if weekly_blocked:
+            reason_keys.append("weekly_limit_decision")
+
+        position_blocked = position_pct < self.min_position_pct_for_buy
+        gates["position_space"] = {
+            "status": "blocked" if position_blocked else "pass",
+            "raw_position_pct": raw_position_pct,
+            "remaining_pct": remaining_pct,
+            "position_pct": position_pct,
+            "min_position_pct": self.min_position_pct_for_buy,
+            "reason_key": "position_space_insufficient" if position_blocked else None,
+        }
+        if position_blocked:
+            reason_keys.append("position_space_insufficient")
+
+        route_policy_status = "no_route"
+        primary_route = _primary_route_name(score)
+        active_routes = _active_route_names(score)
+        if route_policy:
+            route_policy_status = "matched"
+        elif primary_route or active_routes:
+            route_policy_status = "not_matched"
+            reason_keys.append("route_policy_not_matched")
+        gates["route_policy"] = {
+            "status": route_policy_status,
+            "market_signal": market.signal.value,
+            "primary_route": primary_route or None,
+            "active_routes": active_routes,
+            "matched_route": route_policy_route or None,
+            "matched_key": route_policy_key or None,
+            "policy": route_policy or {},
+        }
+
+        action = decision.action.value if decision else None
+        status = {
+            "BUY": "executable_buy",
+            "TRIAL_BUY": "trial_only",
+            "WATCH": "watch",
+            "CLEAR": "blocked",
+        }.get(str(action or ""), "unknown")
+        return {
+            "version": 1,
+            "status": status,
+            "action": action,
+            "decision_reason_keys": _dedupe(reason_keys),
+            "gates": gates,
+        }
 
     def _buy_block_reasons(self, score: ScoreResult, position_pct: float) -> list[str]:
         reasons: list[str] = []
@@ -360,6 +535,23 @@ class Decider:
     def _regime_rules(self, signal: MarketSignal) -> dict:
         return dict(self.market_regime_overlays.get(signal.value) or {})
 
+    def _route_policy_for_score(self, signal: MarketSignal, score: ScoreResult) -> tuple[str, dict]:
+        route, _key, policy = self._route_policy_match(signal, score)
+        return route, policy
+
+    def _route_policy_match(self, signal: MarketSignal, score: ScoreResult) -> tuple[str, str, dict]:
+        route_names = []
+        primary = _primary_route_name(score)
+        if primary:
+            route_names.append(primary)
+        route_names.extend(route for route in _active_route_names(score) if route and route not in route_names)
+        for route in route_names:
+            for key in (f"{signal.value}:{route}", f"*:{route}", route):
+                policy = self.route_execution_policy.get(key)
+                if isinstance(policy, dict) and _route_policy_allows_action(policy, "BUY"):
+                    return route, key, policy
+        return "", "", {}
+
 
 def _quality_value(value: str | DataQuality) -> str:
     if isinstance(value, DataQuality):
@@ -406,6 +598,13 @@ def _trial_route_enabled(score: ScoreResult, enabled_routes: tuple[str, ...]) ->
     return any(route in enabled for route in _active_route_names(score))
 
 
+def _route_policy_allows_action(policy: dict, action: str) -> bool:
+    actions = policy.get("actions")
+    if actions is None:
+        return action == "BUY"
+    return action in {str(item) for item in actions or () if str(item)}
+
+
 def _primary_route_name(score: ScoreResult) -> str:
     return str(score.primary_strategy_route or "")
 
@@ -419,6 +618,18 @@ def _active_route_names(score: ScoreResult) -> list[str]:
             or str(_route_value(route, "status", "") or "") == "watch"
         )
     ]
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
 
 
 def build_decider_from_config(cfg: dict) -> Decider:
@@ -443,4 +654,5 @@ def build_decider_from_config(cfg: dict) -> Decider:
         trial_buy_threshold=gates.get("trial_buy_threshold"),
         trial_buy_entry_signal_threshold=gates.get("trial_buy_entry_signal_threshold"),
         market_regime_overlays=regime_overlays,
+        route_execution_policy=scoring_cfg.get("route_execution_policy", {}),
     )

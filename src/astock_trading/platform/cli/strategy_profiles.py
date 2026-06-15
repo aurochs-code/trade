@@ -23,7 +23,7 @@ strategy_app = typer.Typer(name="strategy", help="策略 profile 和多策略评
 @strategy_app.command("profiles")
 def strategy_profiles(
     profiles: str = typer.Option(
-        "trend_swing,short_continuation,defensive_watch",
+        "trend_swing,short_continuation,weak_sideways,defensive_watch",
         "--profiles",
         help="逗号分隔的配置 profile 名称",
     ),
@@ -85,7 +85,7 @@ def strategy_profile_activation(
 @strategy_app.command("allocation")
 def strategy_allocation(
     profiles: str = typer.Option(
-        "trend_swing,short_continuation,defensive_watch",
+        "trend_swing,short_continuation,weak_sideways,defensive_watch",
         "--profiles",
         help="逗号分隔的配置 profile 名称",
     ),

@@ -4,7 +4,7 @@
 MySQL 事件内核 + 6 个粗粒度业务 Context + 可重建 Projection 的模块化单体
 ```
 
-CLI / MCP Server 优先。Runtime 数据库由 `ASTOCK_DATABASE_URL=mysql+pymysql://...` 提供。SQLite 只作为测试替身和一次性历史迁移源。
+CLI / MCP Server 优先。Runtime 数据库由 `ASTOCK_DATABASE_URL=mysql+pymysql://...` 提供；不再维护 SQLite 运行、测试替身或历史迁移入口。
 
 ## 文档
 

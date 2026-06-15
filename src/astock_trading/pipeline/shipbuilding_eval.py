@@ -19,6 +19,7 @@ from astock_trading.pipeline.context import build_context
 from astock_trading.market.service import MarketService
 from astock_trading.market.adapters import (
     AkShareMarketAdapter, AkShareFinancialAdapter, AkShareFlowAdapter,
+    TushareClient, TushareMarketAdapter, TushareFinancialAdapter, TushareFlowAdapter,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -93,10 +94,14 @@ def get_shipbuilding_stocks() -> list[dict]:
 
 def build_shipbuilding_market_service() -> MarketService:
     """构建仅用于造船板块数据抓取的 MarketService。"""
+    tushare_client = TushareClient.from_env()
+    tushare_market = [TushareMarketAdapter(client=tushare_client)] if tushare_client.enabled else []
+    tushare_financial = [TushareFinancialAdapter(client=tushare_client)] if tushare_client.enabled else []
+    tushare_flow = [TushareFlowAdapter(client=tushare_client)] if tushare_client.enabled else []
     return MarketService(
-        market_providers=[AkShareMarketAdapter()],
-        financial_providers=[AkShareFinancialAdapter()],
-        flow_providers=[AkShareFlowAdapter()],
+        market_providers=[*tushare_market, AkShareMarketAdapter()],
+        financial_providers=[*tushare_financial, AkShareFinancialAdapter()],
+        flow_providers=[*tushare_flow, AkShareFlowAdapter()],
         sentiment_providers=[],
         store=None,
         concurrency=5,

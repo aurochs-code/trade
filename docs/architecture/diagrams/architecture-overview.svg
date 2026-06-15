@@ -51,7 +51,7 @@
   <text class="t" x="478" y="268">EventStore</text>
   <text class="s" x="650" y="268">append-only event_log，stream version</text>
   <text class="t" x="478" y="304">Database / SQLAlchemyCompatConnection</text>
-  <text class="s" x="650" y="330">MySQL 运行态，SQLite 仅测试/迁移</text>
+  <text class="s" x="650" y="330">MySQL 运行态，不再维护 SQLite 路径</text>
 
   <rect class="service" x="438" y="440" rx="14" width="218" height="198"/>
   <text class="h" x="468" y="476">market</text>

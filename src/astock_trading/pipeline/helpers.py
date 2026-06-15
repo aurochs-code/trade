@@ -14,7 +14,7 @@ from astock_trading.pipeline.context import PipelineContext
 from astock_trading.execution.models import Position
 from astock_trading.platform.time import local_date_bounds_utc, local_now, local_today, utc_now_iso
 from astock_trading.risk.models import ExitSignal
-from astock_trading.risk.rules import check_exit_signals, get_risk_params
+from astock_trading.risk.rules import get_risk_params
 from astock_trading.strategy.models import Style
 
 _logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ def check_position_risks(
 
         ma_info = ma_data.get(pos.code, {})
 
-        signals = check_exit_signals(
+        signals = ctx.risk_svc.assess_position(
             code=pos.code,
             avg_cost=pos.avg_cost,
             current_price=pos.current_price or pos.avg_cost,
@@ -78,7 +78,8 @@ def check_position_risks(
             today=local_today(),
             highest_since_entry=pos.highest_since_entry_cents / 100 if pos.highest_since_entry_cents else pos.avg_cost,
             entry_day_low=pos.entry_day_low_cents / 100 if pos.entry_day_low_cents else pos.avg_cost,
-            params=params,
+            risk_params=params,
+            run_id=run_id,
             ma20=ma_info.get("ma20", 0),
             ma60=ma_info.get("ma60", 0),
         )

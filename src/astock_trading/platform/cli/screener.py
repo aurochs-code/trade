@@ -101,6 +101,7 @@ def _score_stock_batch(ctx, stock_list: list[dict], run_id: str) -> dict:
             include_sector_context=True,
             per_snapshot_timeout_seconds=snapshot_timeout,
             sector_context_timeout_seconds=sector_context_timeout,
+            paid_sector_context_only=True,
         )
     )
     market_state, index_data = asyncio.run(ctx.market_svc.collect_market_state(run_id))

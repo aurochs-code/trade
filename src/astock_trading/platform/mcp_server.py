@@ -178,7 +178,12 @@ def trade_score_batch(codes: str = "") -> str:
         stock_list = [{"code": r["code"], "name": r["name"] or ""} for r in rows]
 
     snapshots = asyncio.run(
-        _market_svc.collect_batch(stock_list, run_id, include_sector_context=True)
+        _market_svc.collect_batch(
+            stock_list,
+            run_id,
+            include_sector_context=True,
+            paid_sector_context_only=True,
+        )
     )
     market_state, index_data = asyncio.run(_market_svc.collect_market_state(run_id))
     _strategy_svc.evaluate(snapshots, market_state, run_id, config_version)
@@ -404,7 +409,12 @@ def trade_screener(query: str = "") -> str:
     config_version = _config_snapshot.version if _config_snapshot else "unknown"
     run_id = f"screener_{local_now_str('%H%M%S')}"
     snapshots = asyncio.run(
-        _market_svc.collect_batch(stock_list, run_id, include_sector_context=True)
+        _market_svc.collect_batch(
+            stock_list,
+            run_id,
+            include_sector_context=True,
+            paid_sector_context_only=True,
+        )
     )
     market_state, index_data = asyncio.run(_market_svc.collect_market_state(run_id))
     _strategy_svc.evaluate(snapshots, market_state, run_id, config_version)
@@ -544,7 +554,7 @@ def trade_industry_comparison(top_n: int = 20) -> str:
 @_safe
 def trade_announcements(code: str, limit: int = 20) -> str:
     """查询巨潮公告列表。"""
-    data = asyncio.run(_market_svc.collect_announcements(code, limit, run_id="mcp_announcements"))
+    data = _market_svc.cached_observation_items("announcements", code, limit=limit)
     return json.dumps({"code": code, "count": len(data), "announcements": data}, ensure_ascii=False, default=str)
 
 
@@ -560,7 +570,7 @@ def trade_research_reports(code: str, max_pages: int = 2) -> str:
 @_safe
 def trade_stock_news(code: str, limit: int = 20) -> str:
     """查询个股新闻。"""
-    data = asyncio.run(_market_svc.collect_stock_news(code, limit, run_id="mcp_stock_news"))
+    data = _market_svc.cached_observation_items("stock_news", code, limit=limit)
     return json.dumps({"code": code, "count": len(data), "news": data}, ensure_ascii=False, default=str)
 
 
@@ -568,7 +578,7 @@ def trade_stock_news(code: str, limit: int = 20) -> str:
 @_safe
 def trade_cls_flash(limit: int = 20) -> str:
     """查询财联社快讯。"""
-    data = asyncio.run(_market_svc.collect_cls_flash(limit, run_id="mcp_cls"))
+    data = _market_svc.cached_observation_items("cls_flash", "cn_a", limit=limit)
     return json.dumps({"count": len(data), "news": data}, ensure_ascii=False, default=str)
 
 
@@ -576,7 +586,9 @@ def trade_cls_flash(limit: int = 20) -> str:
 @_safe
 def trade_global_news(limit: int = 20) -> str:
     """查询东财全球财经资讯。"""
-    data = asyncio.run(_market_svc.collect_global_news(limit, run_id="mcp_global_news"))
+    data = _market_svc.cached_observation_items("global_news", "global", limit=limit)
+    if not data:
+        data = _market_svc.cached_observation_items("global_risk_news", "global", limit=limit)
     return json.dumps({"count": len(data), "news": data}, ensure_ascii=False, default=str)
 
 

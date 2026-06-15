@@ -16,7 +16,7 @@ from astock_trading.platform.cli.screener import _scan_limit
 
 def _cli_env(tmp_path: Path) -> dict:
     env = os.environ.copy()
-    db_url = f"sqlite:///{tmp_path / 'runtime.db'}"
+    db_url = os.environ['ASTOCK_DATABASE_URL']
     env_file = tmp_path / ".env"
     env_file.write_text(f"ASTOCK_DATABASE_URL={db_url}\n", encoding="utf-8")
     env["ASTOCK_DATABASE_URL"] = db_url
@@ -97,11 +97,11 @@ def test_source_quality_summary_reports_per_stock_coverage():
     assert any("逐票资金流覆盖率" in item for item in summary["warnings"])
 
 
-def test_screener_run_archives_history_snapshot(monkeypatch, tmp_path):
+def test_screener_run_archives_history_snapshot(monkeypatch, tmp_path, mysql_runtime):
     from astock_trading.platform.cli import app
     import astock_trading.platform.cli.screener as screener_cli
     from astock_trading.market.models import StockQuote, StockSnapshot, TechnicalIndicators
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.reporting.projectors import ProjectionUpdater
 
@@ -165,9 +165,7 @@ def test_screener_run_archives_history_snapshot(monkeypatch, tmp_path):
             ],
         }
 
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    raw_conn = connect(db_path)
+    raw_conn = connect()
     conn = NonClosingConn(raw_conn)
     event_store = EventStore(conn)
     ctx = SimpleNamespace(
@@ -555,7 +553,7 @@ def test_screener_refresh_json_returns_timeout_payload_when_scoring_hangs(monkey
     }
 
 
-def test_doctor_json_via_bin_trade(tmp_path):
+def test_doctor_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -576,13 +574,11 @@ def test_doctor_json_via_bin_trade(tmp_path):
     assert payload["timezone"] == "Asia/Shanghai"
 
 
-def test_hermes_opportunity_watch_alerts_when_pool_turns_non_empty(monkeypatch, tmp_path):
+def test_hermes_opportunity_watch_alerts_when_pool_turns_non_empty(monkeypatch, tmp_path, mysql_runtime):
     from astock_trading.platform.cli import app
-    from astock_trading.platform.db import connect, init_db
-
-    db_path = tmp_path / "runtime.db"
+    from astock_trading.platform.db import connect
     state_file = tmp_path / "opportunity-watch.json"
-    monkeypatch.setenv("ASTOCK_DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.setenv("ASTOCK_DATABASE_URL", os.environ['ASTOCK_DATABASE_URL'])
 
     first = CliRunner().invoke(
         app,
@@ -593,9 +589,7 @@ def test_hermes_opportunity_watch_alerts_when_pool_turns_non_empty(monkeypatch, 
     assert first_payload["status"] == "baseline_recorded"
     assert first_payload["should_notify"] is False
     assert first_payload["current_counts"]["all_candidates"] == 0
-
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         conn.execute(
             """INSERT INTO projection_candidate_pool
@@ -640,22 +634,18 @@ def test_hermes_opportunity_watch_alerts_when_pool_turns_non_empty(monkeypatch, 
     assert "主动提醒" in payload["summary"]
 
 
-def test_hermes_opportunity_watch_alerts_on_new_radar_candidate(monkeypatch, tmp_path):
+def test_hermes_opportunity_watch_alerts_on_new_radar_candidate(monkeypatch, tmp_path, mysql_runtime):
     from astock_trading.platform.cli import app
-    from astock_trading.platform.db import connect, init_db
-
-    db_path = tmp_path / "runtime.db"
+    from astock_trading.platform.db import connect
     state_file = tmp_path / "opportunity-watch.json"
-    monkeypatch.setenv("ASTOCK_DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.setenv("ASTOCK_DATABASE_URL", os.environ['ASTOCK_DATABASE_URL'])
 
     first = CliRunner().invoke(
         app,
         ["opportunity-watch", "--state-file", str(state_file), "--json"],
     )
     assert first.exit_code == 0
-
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         conn.execute(
             """INSERT INTO projection_candidate_pool
@@ -690,14 +680,11 @@ def test_hermes_opportunity_watch_alerts_on_new_radar_candidate(monkeypatch, tmp
     assert "新强势观察候选" in payload["summary"]
 
 
-def test_hermes_opportunity_watch_alerts_when_evidence_action_appears(monkeypatch, tmp_path):
+def test_hermes_opportunity_watch_alerts_when_evidence_action_appears(monkeypatch, tmp_path, mysql_runtime):
     import astock_trading.platform.hermes_commands as hermes_commands
-    from astock_trading.platform.db import connect, init_db
-
-    db_path = tmp_path / "runtime.db"
+    from astock_trading.platform.db import connect
     state_file = tmp_path / "opportunity-watch.json"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     previous_attention_key = "|".join([
         "profile_review_required",
         "review_runtime_profile_activation",
@@ -792,7 +779,7 @@ def test_hermes_opportunity_watch_alerts_when_evidence_action_appears(monkeypatc
     assert "record_positive_trial_review" in payload["snapshot"]["attention_key"]
 
 
-def test_notify_opportunity_watch_dry_run_json_via_bin_trade(tmp_path):
+def test_notify_opportunity_watch_dry_run_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
     env = _cli_env(tmp_path)
@@ -807,11 +794,9 @@ def test_notify_opportunity_watch_dry_run_json_via_bin_trade(tmp_path):
         text=True,
     )
 
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
 
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         conn.execute(
             """INSERT INTO projection_candidate_pool
@@ -919,6 +904,7 @@ def test_backtest_help_includes_history_mirror_via_bin_trade():
     result = subprocess.run(
         [str(cli), "backtest", "--help"],
         cwd=root,
+        env={**os.environ, "COLUMNS": "240"},
         check=True,
         capture_output=True,
         text=True,
@@ -957,7 +943,7 @@ def test_backtest_batch_help_via_bin_trade():
     assert "试买意向" in result.stdout
 
 
-def test_calibrate_json_via_bin_trade(tmp_path):
+def test_calibrate_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -977,7 +963,7 @@ def test_calibrate_json_via_bin_trade(tmp_path):
     assert result.stderr == ""
 
 
-def test_risk_adaptive_json_via_bin_trade(tmp_path):
+def test_risk_adaptive_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -997,7 +983,7 @@ def test_risk_adaptive_json_via_bin_trade(tmp_path):
     assert result.stderr == ""
 
 
-def test_strategy_profiles_json_via_bin_trade(tmp_path):
+def test_strategy_profiles_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -1017,6 +1003,7 @@ def test_strategy_profiles_json_via_bin_trade(tmp_path):
         "trend_swing",
         "short_continuation",
         "defensive_watch",
+        "weak_sideways",
     }
     short_profile = next(item for item in payload["profiles"] if item["name"] == "short_continuation")
     assert short_profile["key_parameters"]["auto_trade_dry_run"] is True
@@ -1025,7 +1012,7 @@ def test_strategy_profiles_json_via_bin_trade(tmp_path):
     assert result.stderr == ""
 
 
-def test_strategy_profile_activation_json_via_bin_trade(tmp_path):
+def test_strategy_profile_activation_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -1094,12 +1081,12 @@ def test_strategy_profile_activation_json_via_bin_trade(tmp_path):
     assert result.stderr == ""
 
 
-def test_strategy_profile_activation_apply_env_requires_yes_via_bin_trade(tmp_path):
+def test_strategy_profile_activation_apply_env_requires_yes_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
     env_file = tmp_path / ".env"
     env_file.write_text(
-        f"ASTOCK_DATABASE_URL=sqlite:///{tmp_path / 'runtime.db'}\n",
+        f"ASTOCK_DATABASE_URL={os.environ['ASTOCK_DATABASE_URL']}\n",
         encoding="utf-8",
     )
     env = _cli_env(tmp_path)
@@ -1135,7 +1122,7 @@ def test_strategy_profile_activation_apply_env_requires_yes_via_bin_trade(tmp_pa
     assert "ASTOCK_CONFIG_PROFILE" not in env_file.read_text(encoding="utf-8")
 
 
-def test_strategy_profile_activation_already_active_next_action_is_read_only(tmp_path):
+def test_strategy_profile_activation_already_active_next_action_is_read_only(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
     env = _cli_env(tmp_path)
@@ -1161,12 +1148,12 @@ def test_strategy_profile_activation_already_active_next_action_is_read_only(tmp
     assert payload["next_action"]["risk_level"] == "read_only"
 
 
-def test_strategy_profile_activation_apply_env_yes_via_bin_trade(tmp_path):
+def test_strategy_profile_activation_apply_env_yes_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
     env_file = tmp_path / ".env"
     env_file.write_text(
-        f"ASTOCK_DATABASE_URL=sqlite:///{tmp_path / 'runtime.db'}\n",
+        f"ASTOCK_DATABASE_URL={os.environ['ASTOCK_DATABASE_URL']}\n",
         encoding="utf-8",
     )
     env = _cli_env(tmp_path)
@@ -1208,7 +1195,7 @@ def test_strategy_profile_activation_apply_env_yes_via_bin_trade(tmp_path):
     assert result.stderr == ""
 
 
-def test_strategy_allocation_json_via_bin_trade(tmp_path):
+def test_strategy_allocation_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -1228,7 +1215,7 @@ def test_strategy_allocation_json_via_bin_trade(tmp_path):
     assert result.stderr == ""
 
 
-def test_strategy_health_json_via_bin_trade(tmp_path):
+def test_strategy_health_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -1248,7 +1235,7 @@ def test_strategy_health_json_via_bin_trade(tmp_path):
     assert result.stderr == ""
 
 
-def test_dashboard_snapshot_json_via_bin_trade(tmp_path):
+def test_dashboard_snapshot_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -1319,7 +1306,7 @@ def test_screener_explain_help_via_bin_trade():
     assert "--json" in result.stdout
 
 
-def test_health_json_via_bin_trade(tmp_path):
+def test_health_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -1341,18 +1328,15 @@ def test_health_json_via_bin_trade(tmp_path):
     assert "checks" in payload["data_sources"]
 
 
-def test_health_json_treats_recovered_failed_runs_as_non_actionable(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_health_json_treats_recovered_failed_runs_as_non_actionable(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
     env = os.environ.copy()
-    env["ASTOCK_DATABASE_URL"] = f"sqlite:///{db_path}"
+    env["ASTOCK_DATABASE_URL"] = os.environ['ASTOCK_DATABASE_URL']
     env["ASTOCK_TEST_NOW"] = "2026-05-22T15:00:00+08:00"
-
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         rows = [
             (
@@ -1444,7 +1428,7 @@ def test_data_sources_diagnose_help_via_bin_trade():
     assert "--json" in result.stdout
 
 
-def test_data_sources_diagnose_json_via_bin_trade(tmp_path):
+def test_data_sources_diagnose_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -1483,7 +1467,7 @@ def test_data_sources_coverage_help_via_bin_trade():
     assert "--json" in result.stdout
 
 
-def test_data_sources_coverage_json_via_bin_trade(tmp_path):
+def test_data_sources_coverage_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -1539,7 +1523,7 @@ def test_data_sources_select_universe_help_via_bin_trade():
     assert "--json" in result.stdout
 
 
-def test_data_sources_select_universe_json_empty_via_bin_trade(tmp_path):
+def test_data_sources_select_universe_json_empty_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -1695,7 +1679,7 @@ def test_db_maintenance_help_via_bin_trade():
         assert expected in result.stdout
 
 
-def test_db_status_initializes_schema_version_via_bin_trade(tmp_path):
+def test_db_status_initializes_schema_version_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -1712,15 +1696,13 @@ def test_db_status_initializes_schema_version_via_bin_trade(tmp_path):
     assert payload["schema_version"] == 7
 
 
-def test_history_signal_json_via_bin_trade(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_history_signal_json_via_bin_trade(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.platform.history_mirror import archive_signal_history
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         archive_signal_history(
             conn,
@@ -1764,7 +1746,7 @@ def test_history_signal_json_via_bin_trade(tmp_path):
     assert "观察" in payload["code_analysis"]["miss_reason"]
 
 
-def test_removed_sqlite_maintenance_commands_via_bin_trade():
+def test_removed_legacy_db_maintenance_commands_via_bin_trade():
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -1794,14 +1776,12 @@ def test_runs_cleanup_stale_help_via_bin_trade():
     assert "--yes" in result.stdout
 
 
-def test_runs_failed_json_outputs_recent_failures(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_runs_failed_json_outputs_recent_failures(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         conn.execute(
             """INSERT INTO run_log
@@ -2232,14 +2212,12 @@ def test_notify_llm_summary_card_rejects_missing_evidence_id(tmp_path):
     assert "缺少 evidence_id" in payload["error"]
 
 
-def test_llm_context_markdown_includes_evidence_registry(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_llm_context_markdown_includes_evidence_registry(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.platform.llm_context import build_llm_context, render_llm_context_markdown
 
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         event_id = EventStore(conn).append(
             "strategy:002138",
@@ -2329,7 +2307,7 @@ def test_daily_inspection_summary_includes_opportunity_card():
     assert summary["opportunity_next_action"]["command"] == "atrade health --json"
 
 
-def test_machine_readable_runtime_commands_via_bin_trade(tmp_path):
+def test_machine_readable_runtime_commands_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
     env = _cli_env(tmp_path)
@@ -2392,7 +2370,7 @@ def test_market_intel_help_via_bin_trade():
     assert "watchlist-sync" in result.stdout
 
 
-def test_risk_position_json_via_bin_trade(tmp_path):
+def test_risk_position_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -2428,7 +2406,7 @@ def test_risk_position_json_via_bin_trade(tmp_path):
     assert payload["pct"] <= 0.22 * 0.4 + 0.001
 
 
-def test_risk_portfolio_json_labels_local_projection_scope(tmp_path):
+def test_risk_portfolio_json_labels_local_projection_scope(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -2449,7 +2427,7 @@ def test_risk_portfolio_json_labels_local_projection_scope(tmp_path):
     assert "本地投影" in payload["paper_account"]["note"]
 
 
-def test_risk_trial_guard_json_via_bin_trade(tmp_path):
+def test_risk_trial_guard_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -2471,18 +2449,16 @@ def test_risk_trial_guard_json_via_bin_trade(tmp_path):
     assert payload["checked_order"]["within_cap"] is False
 
 
-def test_risk_trial_guard_surfaces_candidate_flow_and_profile_gate(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_risk_trial_guard_surfaces_candidate_flow_and_profile_gate(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
     env_file = tmp_path / ".env"
-    env_file.write_text(f"ASTOCK_DATABASE_URL=sqlite:///{db_path}\n", encoding="utf-8")
-    init_db(db_path)
-    conn = connect(db_path)
+    env_file.write_text(f"ASTOCK_DATABASE_URL={os.environ['ASTOCK_DATABASE_URL']}\n", encoding="utf-8")
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -2596,7 +2572,7 @@ def test_risk_trial_guard_surfaces_candidate_flow_and_profile_gate(tmp_path):
     assert payload["next_action"]["writes_order"] is False
 
 
-def test_risk_check_json_reports_missing_position_via_bin_trade(tmp_path):
+def test_risk_check_json_reports_missing_position_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -2648,11 +2624,18 @@ def test_market_intel_brief_json(monkeypatch):
     import astock_trading.platform.cli.market_intel as market_intel_cli
 
     class FakeMarketService:
+        def cached_observation_items(self, kind, symbol, limit=20, max_age_seconds=None):
+            if kind == "finance_flash":
+                return [{"time": "09:01", "title": "机器人板块走强", "source": "cache"}]
+            if kind == "global_risk_news":
+                return [{"title": "Fed rate cut expectations fade", "source": "cache"}]
+            return []
+
         async def collect_finance_flash(self, limit=20, run_id=None):
-            return [{"time": "09:01", "title": "机器人板块走强", "source": "eastmoney"}]
+            raise AssertionError("brief should read cached finance_flash")
 
         async def collect_global_risk_news(self, limit=12, run_id=None):
-            return [{"title": "Fed rate cut expectations fade", "source": "bloomberg"}]
+            raise AssertionError("brief should read cached global_risk_news")
 
         async def collect_cross_platform_hot_stocks(self, limit=10, run_id=None):
             return [{"rank": 1, "name": "双环传动", "code": "002472", "source_count": 3}]
@@ -2686,9 +2669,63 @@ def test_market_intel_brief_json(monkeypatch):
     payload = json.loads(result.stdout)
     assert payload["query"] == "今天热点新闻和强势板块"
     assert payload["finance_flash"][0]["title"] == "机器人板块走强"
+    assert payload["finance_flash"][0]["source"] == "cache"
     assert payload["hot_stocks"][0]["code"] == "002472"
     assert payload["strong_sectors"][0]["name"] == "机器人"
     assert payload["money_flow_sectors"][0]["sort"] == "money-flow"
+
+
+def test_market_intel_hydrate_news_collects_external_sources(monkeypatch):
+    from astock_trading.platform.cli import app
+    import astock_trading.platform.cli.market_intel as market_intel_cli
+
+    class FakeMarketService:
+        async def collect_finance_flash(self, limit=20, run_id=None):
+            return [{"time": "09:01", "title": "机器人板块走强", "source": "eastmoney"}]
+
+        async def collect_global_risk_news(self, limit=12, run_id=None):
+            return [{"title": "Fed rate cut expectations fade", "source": "bloomberg"}]
+
+        async def collect_market_announcements(self, limit=20, run_id=None):
+            return [{"title": "交易所公告"}]
+
+        async def collect_stock_news(self, code, limit=20, run_id=None):
+            return [{"title": f"{code} 新闻"}]
+
+        async def collect_announcements(self, code, limit=20, run_id=None):
+            return [{"title": f"{code} 公告"}]
+
+    class FakeConn:
+        class Rows(list):
+            def fetchall(self):
+                return self
+
+        def execute(self, sql):
+            if "projection_candidate_pool" in sql:
+                return self.Rows([{"code": "002472", "pool_tier": "watch", "name": "双环传动"}])
+            if "projection_positions" in sql:
+                return self.Rows([])
+            return self.Rows([])
+
+        def close(self):
+            pass
+
+    class FakeContext:
+        market_svc = FakeMarketService()
+        conn = FakeConn()
+
+    monkeypatch.setattr(market_intel_cli, "build_context", lambda: FakeContext())
+
+    result = CliRunner().invoke(
+        app,
+        ["market-intel", "hydrate-news", "--limit", "2", "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["counts"]["finance_flash"] == 1
+    assert payload["counts"]["market_announcements"] == 1
+    assert payload["counts"]["stock_news"] == 1
 
 
 def test_market_intel_brief_falls_back_to_sector_heatmap(monkeypatch):
@@ -2729,7 +2766,85 @@ def test_market_intel_brief_falls_back_to_sector_heatmap(monkeypatch):
     assert payload["strong_sectors"][0]["source"] == "sector_heatmap"
 
 
-def test_screener_candidates_json_via_bin_trade(tmp_path):
+def test_market_intel_hydrate_news_collects_market_and_symbol_items(monkeypatch):
+    from astock_trading.platform.cli import app
+    import astock_trading.platform.cli.market_intel as market_intel_cli
+
+    calls = []
+
+    class FakeMarketService:
+        async def collect_finance_flash(self, limit=20, run_id=None):
+            calls.append(("finance_flash", limit, run_id))
+            return [{"title": "机器人板块走强"}]
+
+        async def collect_market_announcements(self, limit=20, run_id=None):
+            calls.append(("market_announcements", limit, run_id))
+            return [{"title": "交易所公告"}]
+
+        async def collect_global_risk_news(self, limit=12, run_id=None):
+            calls.append(("global_risk_news", limit, run_id))
+            return [{"title": "海外风险"}]
+
+        async def collect_stock_news(self, code, limit=20, run_id=None):
+            calls.append(("stock_news", code, limit, run_id))
+            return [{"title": f"{code} 新闻"}]
+
+        async def collect_announcements(self, code, limit=20, run_id=None):
+            calls.append(("announcements", code, limit, run_id))
+            return [{"title": f"{code} 公告"}]
+
+    class FakeConn:
+        class Rows(list):
+            def fetchall(self):
+                return self
+
+        def execute(self, sql):
+            if "projection_candidate_pool" in sql:
+                return self.Rows([
+                    {
+                        "code": "300475",
+                        "name": "香农芯创",
+                        "pool_tier": "watch",
+                        "score": 8.2,
+                        "added_at": "",
+                        "last_scored_at": "",
+                        "streak_days": 1,
+                        "note": "",
+                    }
+                ])
+            if "projection_positions" in sql:
+                return self.Rows([{"code": "688498", "name": "源杰科技", "shares": 100}])
+            return self.Rows([])
+
+        def close(self):
+            pass
+
+    class FakeContext:
+        market_svc = FakeMarketService()
+        conn = FakeConn()
+
+    monkeypatch.setattr(market_intel_cli, "build_context", lambda: FakeContext())
+
+    result = CliRunner().invoke(
+        app,
+        ["market-intel", "hydrate-news", "--limit", "3", "--max-symbols", "5", "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ok"
+    assert payload["writes_state"] is True
+    assert payload["symbols"] == ["688498", "300475"]
+    assert payload["counts"]["finance_flash"] == 1
+    assert payload["counts"]["market_announcements"] == 1
+    assert payload["counts"]["global_risk_news"] == 1
+    assert payload["counts"]["stock_news"] == 2
+    assert payload["counts"]["announcements"] == 2
+    assert ("stock_news", "300475", 3, payload["run_id"]) in calls
+    assert ("announcements", "688498", 3, payload["run_id"]) in calls
+
+
+def test_screener_candidates_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -2745,7 +2860,7 @@ def test_screener_candidates_json_via_bin_trade(tmp_path):
     assert json.loads(result.stdout) == []
 
 
-def test_screener_promote_updates_candidates_via_bin_trade(tmp_path):
+def test_screener_promote_updates_candidates_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
     env = _cli_env(tmp_path)
@@ -2806,7 +2921,7 @@ def test_screener_promote_updates_candidates_via_bin_trade(tmp_path):
     assert "primary_strategy_route_label" in candidates[0]
 
 
-def test_portfolio_status_json_via_bin_trade(tmp_path):
+def test_portfolio_status_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -2829,7 +2944,7 @@ def test_portfolio_status_json_via_bin_trade(tmp_path):
     }
 
 
-def test_record_buy_json_via_bin_trade(tmp_path):
+def test_record_buy_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
 
@@ -2869,7 +2984,7 @@ def test_record_buy_json_via_bin_trade(tmp_path):
     assert payload["position_after"]["code"] == "002138"
 
 
-def test_record_buy_json_accepts_broker_cost_price(tmp_path):
+def test_record_buy_json_accepts_broker_cost_price(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
     env = _cli_env(tmp_path)
@@ -2912,7 +3027,7 @@ def test_record_buy_json_accepts_broker_cost_price(tmp_path):
     assert portfolio["total_cost_cents"] == 2162910
 
 
-def test_adjust_position_cost_json_via_bin_trade(tmp_path):
+def test_adjust_position_cost_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
     env = _cli_env(tmp_path)
@@ -2961,13 +3076,12 @@ def test_adjust_position_cost_json_via_bin_trade(tmp_path):
     assert payload["position_after"]["cost_price"] == pytest.approx(72.097)
 
 
-def test_record_buy_json_accepts_decision_signal_and_manual_reason_aliases(tmp_path):
+def test_record_buy_json_accepts_decision_signal_and_manual_reason_aliases(tmp_path, mysql_runtime):
     from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
 
     result = subprocess.run(
         [
@@ -2995,7 +3109,7 @@ def test_record_buy_json_accepts_decision_signal_and_manual_reason_aliases(tmp_p
     )
 
     payload = json.loads(result.stdout)
-    conn = connect(db_path)
+    conn = connect()
     try:
         events = EventStore(conn).query(stream=f"trade:002138:{payload['order_id']}")
     finally:
@@ -3006,7 +3120,7 @@ def test_record_buy_json_accepts_decision_signal_and_manual_reason_aliases(tmp_p
     assert hypothesis["hypothesis"]["manual_reason"] == "人工确认突破后回踩不破"
 
 
-def test_record_sell_json_via_bin_trade(tmp_path):
+def test_record_sell_json_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
     env = _cli_env(tmp_path)
@@ -3062,7 +3176,7 @@ def test_record_sell_json_via_bin_trade(tmp_path):
     assert payload["position_after"] is None
 
 
-def test_record_sell_json_supports_partial_sell_via_bin_trade(tmp_path):
+def test_record_sell_json_supports_partial_sell_via_bin_trade(tmp_path, mysql_runtime):
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
     env = _cli_env(tmp_path)
@@ -3121,16 +3235,14 @@ def test_record_sell_json_supports_partial_sell_via_bin_trade(tmp_path):
     assert payload["audit"]["ok"] is True
 
 
-def test_review_shadow_json_reports_paper_real_deviation_via_bin_trade(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_review_shadow_json_reports_paper_real_deviation_via_bin_trade(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.platform.domain_events import AUTO_TRADE_EXECUTED
     from astock_trading.platform.events import EventStore
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         event_id = EventStore(conn).append(
             stream="paper:002138",
@@ -3172,15 +3284,13 @@ def test_review_shadow_json_reports_paper_real_deviation_via_bin_trade(tmp_path)
     assert payload["items"][0]["rule_deviation"] == "shadow_divergence"
 
 
-def test_hermes_digest_suggest_explain_json_via_bin_trade(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_hermes_digest_suggest_explain_json_via_bin_trade(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = EventStore(conn)
         score_event_id = store.append(
@@ -3313,17 +3423,15 @@ manual_confirmation:
     assert explain_payload["next_action"]["risk_level"] == "read_only"
 
 
-def test_hermes_suggest_pauses_new_trade_judgment_when_l1_coverage_degraded(tmp_path):
+def test_hermes_suggest_pauses_new_trade_judgment_when_l1_coverage_degraded(tmp_path, mysql_runtime):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.platform.history_mirror import archive_signal_history
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-20", {"items": [1]})
@@ -3402,17 +3510,15 @@ def test_hermes_suggest_pauses_new_trade_judgment_when_l1_coverage_degraded(tmp_
     assert payload["execution_allowed"] is False
 
 
-def test_hermes_suggest_reports_score_quality_blocker_separately(tmp_path):
+def test_hermes_suggest_reports_score_quality_blocker_separately(tmp_path, mysql_runtime):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.platform.history_mirror import archive_signal_history
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-20", {"items": [1]})
@@ -3486,17 +3592,15 @@ def test_hermes_suggest_reports_score_quality_blocker_separately(tmp_path):
     assert payload["execution_allowed"] is False
 
 
-def test_hermes_suggest_reports_empty_pool_as_no_qualified_candidates(tmp_path):
+def test_hermes_suggest_reports_empty_pool_as_no_qualified_candidates(tmp_path, mysql_runtime):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.platform.history_mirror import archive_signal_history
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-20", {"items": [1]})
@@ -3574,17 +3678,15 @@ def test_hermes_suggest_reports_empty_pool_as_no_qualified_candidates(tmp_path):
     assert payload["next_action"]["risk_level"] == "read_only"
 
 
-def test_hermes_opportunity_json_reports_no_qualified_candidates(tmp_path):
+def test_hermes_opportunity_json_reports_no_qualified_candidates(tmp_path, mysql_runtime):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.platform.history_mirror import archive_signal_history
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-20", {"items": [1]})
@@ -3643,15 +3745,13 @@ def test_hermes_opportunity_json_reports_no_qualified_candidates(tmp_path):
     assert "不降低买入线" in payload["decision_brief"]
 
 
-def test_hermes_opportunity_does_not_block_on_provider_failures_outside_active_candidates(tmp_path):
+def test_hermes_opportunity_does_not_block_on_provider_failures_outside_active_candidates(tmp_path, mysql_runtime):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -3702,15 +3802,13 @@ def test_hermes_opportunity_does_not_block_on_provider_failures_outside_active_c
     )
 
 
-def test_hermes_opportunity_uses_chinese_label_for_active_l1_provider_blocker(tmp_path):
+def test_hermes_opportunity_uses_chinese_label_for_active_l1_provider_blocker(tmp_path, mysql_runtime):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -3750,17 +3848,15 @@ def test_hermes_opportunity_uses_chinese_label_for_active_l1_provider_blocker(tm
     assert "unresolved_l1_provider_failures" not in blockers
 
 
-def test_hermes_suggest_ignores_historical_failed_runs_for_current_opportunity(tmp_path):
+def test_hermes_suggest_ignores_historical_failed_runs_for_current_opportunity(tmp_path, mysql_runtime):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.platform.history_mirror import archive_signal_history
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         conn.execute(
             """INSERT INTO run_log
@@ -3827,14 +3923,12 @@ def test_hermes_suggest_ignores_historical_failed_runs_for_current_opportunity(t
     assert payload["digest"]["failed_runs"] == []
 
 
-def test_hermes_suggest_ignores_recovered_failed_runs_for_current_opportunity(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_hermes_suggest_ignores_recovered_failed_runs_for_current_opportunity(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         rows = [
             (
@@ -3882,16 +3976,14 @@ def test_hermes_suggest_ignores_recovered_failed_runs_for_current_opportunity(tm
     assert "失败运行 0" in payload["digest"]["summary"]
 
 
-def test_hermes_opportunity_json_highlights_radar_candidates(tmp_path):
+def test_hermes_opportunity_json_highlights_radar_candidates(tmp_path, mysql_runtime):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -3939,17 +4031,15 @@ def test_hermes_opportunity_json_highlights_radar_candidates(tmp_path):
     assert payload["next_action"]["command"] == "atrade paper trial-plan --json"
 
 
-def test_hermes_opportunity_json_surfaces_core_candidates_in_summary(tmp_path):
+def test_hermes_opportunity_json_surfaces_core_candidates_in_summary(tmp_path, mysql_runtime):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -4066,20 +4156,20 @@ def test_hermes_opportunity_json_surfaces_core_candidates_in_summary(tmp_path):
 def test_hermes_opportunity_prioritizes_runtime_profile_review_for_stale_core_buy_signal(
     tmp_path,
     monkeypatch,
+    mysql_runtime,
 ):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
     env_file = tmp_path / ".env"
     jobs_path = tmp_path / "jobs.json"
     scripts_dir = tmp_path / "scripts"
     monkeypatch.setenv("ASTOCK_TEST_NOW", "2026-05-23T10:00:00+08:00")
-    env_file.write_text(f"ASTOCK_DATABASE_URL=sqlite:///{db_path}\n", encoding="utf-8")
+    env_file.write_text(f"ASTOCK_DATABASE_URL={os.environ['ASTOCK_DATABASE_URL']}\n", encoding="utf-8")
     jobs_path.write_text(
         json.dumps({
             "jobs": [
@@ -4132,8 +4222,7 @@ def test_hermes_opportunity_prioritizes_runtime_profile_review_for_stale_core_bu
         ),
         encoding="utf-8",
     )
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -4632,19 +4721,18 @@ def test_hermes_opportunity_prioritizes_runtime_profile_review_for_stale_core_bu
 def test_hermes_opportunity_prioritizes_paper_readiness_for_weekend_stale_core_buy_signal(
     tmp_path,
     monkeypatch,
+    mysql_runtime,
 ):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.platform.history_mirror import archive_signal_history
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
     monkeypatch.setenv("ASTOCK_TEST_NOW", "2026-05-24T08:34:00+08:00")
     monkeypatch.setenv("ASTOCK_CONFIG_PROFILE", "trend_swing")
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "latest", {"items": [1]})
@@ -4814,8 +4902,8 @@ def test_hermes_opportunity_prioritizes_paper_readiness_for_weekend_stale_core_b
     assert "模拟盘自动交易预检" in payload["summary"]
 
 
-def test_hermes_surfaces_recent_unusable_buy_signal_in_digest_and_opportunity(tmp_path, monkeypatch):
-    from astock_trading.platform.db import connect, init_db
+def test_hermes_surfaces_recent_unusable_buy_signal_in_digest_and_opportunity(tmp_path, monkeypatch, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.platform.hermes_commands import build_digest, build_opportunity_card
     from astock_trading.reporting.projectors import ProjectionUpdater
@@ -4823,9 +4911,7 @@ def test_hermes_surfaces_recent_unusable_buy_signal_in_digest_and_opportunity(tm
     monkeypatch.setenv("ASTOCK_TEST_NOW", "2026-05-23T10:00:00+08:00")
     monkeypatch.setenv("ASTOCK_HERMES_JOBS_PATH", str(tmp_path / "missing-jobs.json"))
     monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -4928,21 +5014,21 @@ def test_hermes_surfaces_recent_unusable_buy_signal_in_digest_and_opportunity(tm
 
 def test_hermes_opportunity_prioritizes_runtime_profile_review_for_pending_core_buy_signal(
     tmp_path,
+    mysql_runtime,
 ):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.platform.time import local_today_str
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
     env_file = tmp_path / ".env"
     config_dir = tmp_path / "config"
     jobs_path = tmp_path / "jobs.json"
     today = local_today_str()
-    env_file.write_text(f"ASTOCK_DATABASE_URL=sqlite:///{db_path}\n", encoding="utf-8")
+    env_file.write_text(f"ASTOCK_DATABASE_URL={os.environ['ASTOCK_DATABASE_URL']}\n", encoding="utf-8")
     config_dir.mkdir()
     (config_dir / "strategy.yaml").write_text(
         """
@@ -4986,8 +5072,7 @@ manual_confirmation:
         }),
         encoding="utf-8",
     )
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", today, {"items": [1]})
@@ -5138,19 +5223,17 @@ manual_confirmation:
     )
 
 
-def test_hermes_opportunity_json_surfaces_positive_shadow_trials(tmp_path):
+def test_hermes_opportunity_json_surfaces_positive_shadow_trials(tmp_path, mysql_runtime):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.platform.time import local_today_str
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
     today = local_today_str()
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -5221,19 +5304,17 @@ def test_hermes_opportunity_json_surfaces_positive_shadow_trials(tmp_path):
     assert "影子试运行表现为正" in payload["summary"]
 
 
-def test_hermes_opportunity_prioritizes_actionable_positive_shadow_trials(tmp_path):
+def test_hermes_opportunity_prioritizes_actionable_positive_shadow_trials(tmp_path, mysql_runtime):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.platform.time import local_today_str
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
     today = local_today_str()
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -5340,19 +5421,17 @@ def test_hermes_opportunity_prioritizes_actionable_positive_shadow_trials(tmp_pa
     assert payload["next_action"]["command"] == "atrade stock analyze 688981 --json"
 
 
-def test_hermes_opportunity_refreshes_recorded_positive_trial_from_current_pool(tmp_path):
+def test_hermes_opportunity_refreshes_recorded_positive_trial_from_current_pool(tmp_path, mysql_runtime):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.platform.time import local_today_str
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
     today = local_today_str()
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -5418,21 +5497,21 @@ def test_hermes_opportunity_refreshes_recorded_positive_trial_from_current_pool(
 def test_hermes_opportunity_positive_shadow_trial_exposes_profile_gate_and_next_window(
     tmp_path,
     monkeypatch,
+    mysql_runtime,
 ):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.platform.time import local_today_str
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
     env_file = tmp_path / ".env"
     jobs_path = tmp_path / "jobs.json"
     monkeypatch.setenv("ASTOCK_TEST_NOW", "2026-05-25T10:00:00+08:00")
     today = local_today_str()
-    env_file.write_text(f"ASTOCK_DATABASE_URL=sqlite:///{db_path}\n", encoding="utf-8")
+    env_file.write_text(f"ASTOCK_DATABASE_URL={os.environ['ASTOCK_DATABASE_URL']}\n", encoding="utf-8")
     jobs_path.write_text(
         json.dumps({
             "jobs": [
@@ -5464,8 +5543,7 @@ def test_hermes_opportunity_positive_shadow_trial_exposes_profile_gate_and_next_
         }),
         encoding="utf-8",
     )
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -5600,17 +5678,15 @@ def test_hermes_opportunity_positive_shadow_trial_exposes_profile_gate_and_next_
     )
 
 
-def test_hermes_opportunity_previews_unrecorded_positive_shadow_trials(tmp_path):
+def test_hermes_opportunity_previews_unrecorded_positive_shadow_trials(tmp_path, mysql_runtime):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -5651,7 +5727,7 @@ def test_hermes_opportunity_previews_unrecorded_positive_shadow_trials(tmp_path)
         text=True,
     )
 
-    conn = connect(db_path)
+    conn = connect()
     try:
         conn.execute(
             """INSERT INTO market_observations
@@ -5702,19 +5778,17 @@ def test_hermes_opportunity_previews_unrecorded_positive_shadow_trials(tmp_path)
     }
 
 
-def test_hermes_opportunity_merges_recorded_and_preview_positive_shadow_trials(tmp_path):
+def test_hermes_opportunity_merges_recorded_and_preview_positive_shadow_trials(tmp_path, mysql_runtime):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.platform.time import local_today_str
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
     today = local_today_str()
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -5874,19 +5948,17 @@ def test_hermes_opportunity_merges_recorded_and_preview_positive_shadow_trials(t
     assert payload["next_action"]["command_contract_id"] == "paper_trial_review_record"
 
 
-def test_hermes_opportunity_does_not_prioritize_removed_positive_trial(tmp_path):
+def test_hermes_opportunity_does_not_prioritize_removed_positive_trial(tmp_path, mysql_runtime):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.platform.time import local_today_str
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
     today = local_today_str()
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         market_store = MarketStore(conn)
         market_store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -6013,15 +6085,13 @@ def test_hermes_opportunity_does_not_prioritize_removed_positive_trial(tmp_path)
     assert any("过期" in item or "错过" in item for item in payload["blockers"])
 
 
-def test_manual_trades_expire_stale_appends_auditable_resolution(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_manual_trades_expire_stale_appends_auditable_resolution(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         event_store = EventStore(conn)
         manual_event_id = event_store.append(
@@ -6079,15 +6149,13 @@ def test_manual_trades_expire_stale_appends_auditable_resolution(tmp_path):
     assert all_payload[0]["resolution"]["reason"] == "stale_confirmation"
 
 
-def test_paper_trial_plan_json_surfaces_watch_and_radar_candidates(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_paper_trial_plan_json_surfaces_watch_and_radar_candidates(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -6145,13 +6213,10 @@ def test_paper_trial_plan_json_surfaces_watch_and_radar_candidates(tmp_path):
     assert payload["next_action"]["risk_level"] == "read_only"
 
 
-def test_paper_trial_plan_empty_next_action_marks_screener_refresh_as_state_write(tmp_path):
-    from astock_trading.platform.db import init_db
+def test_paper_trial_plan_empty_next_action_marks_screener_refresh_as_state_write(tmp_path, mysql_runtime):
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
 
     result = subprocess.run(
         [str(cli), "paper", "trial-plan", "--json"],
@@ -6173,15 +6238,12 @@ def test_paper_trial_plan_empty_next_action_marks_screener_refresh_as_state_writ
     assert payload["next_action"]["risk_level"] == "state_write"
 
 
-def test_paper_auto_readiness_json_reports_paper_order_mode(tmp_path):
-    from astock_trading.platform.db import init_db
+def test_paper_auto_readiness_json_reports_paper_order_mode(tmp_path, mysql_runtime):
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
     config_dir = tmp_path / "config"
     config_dir.mkdir()
-    init_db(db_path)
     (config_dir / "strategy.yaml").write_text(
         """
 auto_trade:
@@ -6226,16 +6288,14 @@ scoring:
     assert payload["guardrails"]["real_order_auto_execution_allowed"] is False
 
 
-def test_paper_trial_plan_json_includes_entry_signal_evidence(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_paper_trial_plan_json_includes_entry_signal_evidence(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         event_store = EventStore(conn)
         ProjectionUpdater(event_store, conn).sync_candidate_pool([
@@ -6293,16 +6353,14 @@ def test_paper_trial_plan_json_includes_entry_signal_evidence(tmp_path):
     assert payload["current_entry_signals"] == [payload["candidate_summary"]["top_core_candidate"]]
 
 
-def test_paper_trial_plan_record_writes_shadow_trial_events(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_paper_trial_plan_record_writes_shadow_trial_events(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -6329,7 +6387,7 @@ def test_paper_trial_plan_record_writes_shadow_trial_events(tmp_path):
     assert payload["recorded_count"] == 1
     assert payload["guardrails"]["paper_order_submitted"] is False
 
-    conn = connect(db_path)
+    conn = connect()
     try:
         events = EventStore(conn).query(event_type="paper.trial.recorded")
     finally:
@@ -6341,16 +6399,14 @@ def test_paper_trial_plan_record_writes_shadow_trial_events(tmp_path):
     assert events[0]["metadata"]["source"] == "paper.trial-plan"
 
 
-def test_paper_trial_plan_record_includes_start_price_from_latest_snapshot(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_paper_trial_plan_record_includes_start_price_from_latest_snapshot(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -6391,7 +6447,7 @@ def test_paper_trial_plan_record_includes_start_price_from_latest_snapshot(tmp_p
     assert payload["candidates"][0]["trial_start_price"] == 10.0
     assert payload["candidates"][0]["trial_start_price_source"] == "market_observations.snapshot"
 
-    conn = connect(db_path)
+    conn = connect()
     try:
         events = EventStore(conn).query(event_type="paper.trial.recorded")
     finally:
@@ -6400,16 +6456,14 @@ def test_paper_trial_plan_record_includes_start_price_from_latest_snapshot(tmp_p
     assert events[0]["payload"]["trial_start_price_source"] == "market_observations.snapshot"
 
 
-def test_paper_trial_review_json_reports_shadow_candidate_outcome(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_paper_trial_review_json_reports_shadow_candidate_outcome(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -6446,7 +6500,7 @@ def test_paper_trial_review_json_reports_shadow_candidate_outcome(tmp_path):
         text=True,
     )
 
-    conn = connect(db_path)
+    conn = connect()
     try:
         conn.execute(
             """INSERT INTO market_observations
@@ -6500,7 +6554,7 @@ def test_paper_trial_review_json_reports_shadow_candidate_outcome(tmp_path):
     assert payload["next_action"]["requires_user_approval"] is False
     assert payload["next_action"]["risk_level"] == "read_only"
 
-    conn = connect(db_path)
+    conn = connect()
     try:
         events = EventStore(conn).query(event_type="paper.trial.reviewed")
     finally:
@@ -6509,15 +6563,13 @@ def test_paper_trial_review_json_reports_shadow_candidate_outcome(tmp_path):
     assert events[0]["payload"]["review_status"] == "positive"
 
 
-def test_paper_trial_review_reports_current_candidate_state_after_promotion(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_paper_trial_review_reports_current_candidate_state_after_promotion(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         updater = ProjectionUpdater(None, conn)
         updater.sync_candidate_pool([
@@ -6555,7 +6607,7 @@ def test_paper_trial_review_reports_current_candidate_state_after_promotion(tmp_
         text=True,
     )
 
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -6602,15 +6654,13 @@ def test_paper_trial_review_reports_current_candidate_state_after_promotion(tmp_
     assert item["candidate_state_change_label"] == "观察 -> 核心"
 
 
-def test_paper_trial_review_marks_removed_candidate_as_state_change(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_paper_trial_review_marks_removed_candidate_as_state_change(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -6647,7 +6697,7 @@ def test_paper_trial_review_marks_removed_candidate_as_state_change(tmp_path):
         text=True,
     )
 
-    conn = connect(db_path)
+    conn = connect()
     try:
         conn.execute("DELETE FROM projection_candidate_pool WHERE code = ?", ("688981",))
         conn.execute(
@@ -6685,15 +6735,13 @@ def test_paper_trial_review_marks_removed_candidate_as_state_change(tmp_path):
     assert item["candidate_state_change_label"] == "观察 -> 已移出候选池"
 
 
-def test_paper_trial_review_marks_same_day_impossible_return_as_price_anomaly(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_paper_trial_review_marks_same_day_impossible_return_as_price_anomaly(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -6730,7 +6778,7 @@ def test_paper_trial_review_marks_same_day_impossible_return_as_price_anomaly(tm
         text=True,
     )
 
-    conn = connect(db_path)
+    conn = connect()
     try:
         conn.execute(
             """INSERT INTO market_observations
@@ -6768,15 +6816,13 @@ def test_paper_trial_review_marks_same_day_impossible_return_as_price_anomaly(tm
     assert payload["next_action"]["type"] == "inspect_price_anomaly"
 
 
-def test_paper_trial_review_skips_latest_outlier_when_recent_stable_price_exists(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_paper_trial_review_skips_latest_outlier_when_recent_stable_price_exists(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -6813,7 +6859,7 @@ def test_paper_trial_review_skips_latest_outlier_when_recent_stable_price_exists
         text=True,
     )
 
-    conn = connect(db_path)
+    conn = connect()
     try:
         conn.execute(
             """INSERT INTO market_observations
@@ -6863,16 +6909,14 @@ def test_paper_trial_review_skips_latest_outlier_when_recent_stable_price_exists
     assert payload["items"][0]["review_status"] == "positive"
 
 
-def test_paper_trial_review_record_appends_correction_when_status_changes(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_paper_trial_review_record_appends_correction_when_status_changes(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -6909,7 +6953,7 @@ def test_paper_trial_review_record_appends_correction_when_status_changes(tmp_pa
         text=True,
     )
 
-    conn = connect(db_path)
+    conn = connect()
     try:
         conn.execute(
             """INSERT INTO market_observations
@@ -6937,7 +6981,7 @@ def test_paper_trial_review_record_appends_correction_when_status_changes(tmp_pa
         text=True,
     )
 
-    conn = connect(db_path)
+    conn = connect()
     try:
         conn.execute(
             """INSERT INTO market_observations
@@ -6967,7 +7011,7 @@ def test_paper_trial_review_record_appends_correction_when_status_changes(tmp_pa
 
     payload = json.loads(result.stdout)
     assert payload["recorded_count"] == 1
-    conn = connect(db_path)
+    conn = connect()
     try:
         events = EventStore(conn).query(
             stream=f"paper_trial_review:{payload['date']}:688981",
@@ -6983,18 +7027,16 @@ def test_paper_trial_review_record_appends_correction_when_status_changes(tmp_pa
     assert events[-1]["payload"]["previous_event_id"] == events[0]["event_id"]
 
 
-def test_paper_trial_plan_record_supplements_legacy_trial_event_with_start_price(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_paper_trial_plan_record_supplements_legacy_trial_event_with_start_price(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
     from astock_trading.platform.time import local_today_str
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
     trial_date = local_today_str()
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -7047,7 +7089,7 @@ def test_paper_trial_plan_record_supplements_legacy_trial_event_with_start_price
     payload = json.loads(result.stdout)
     assert payload["recorded_count"] == 1
 
-    conn = connect(db_path)
+    conn = connect()
     try:
         events = EventStore(conn).query(
             stream=f"paper_trial:{trial_date}:688981",
@@ -7060,15 +7102,13 @@ def test_paper_trial_plan_record_supplements_legacy_trial_event_with_start_price
     assert events[-1]["payload"]["baseline_supplemented"] is True
 
 
-def test_notify_opportunity_dry_run_json_via_bin_trade(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_notify_opportunity_dry_run_json_via_bin_trade(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         ProjectionUpdater(None, conn).sync_candidate_pool([
             {
@@ -7102,16 +7142,14 @@ def test_notify_opportunity_dry_run_json_via_bin_trade(tmp_path):
     assert "不自动交易" in values
 
 
-def test_notify_opportunity_embed_labels_candidate_pool_when_core_present(tmp_path):
+def test_notify_opportunity_embed_labels_candidate_pool_when_core_present(tmp_path, mysql_runtime):
     from astock_trading.market.store import MarketStore
-    from astock_trading.platform.db import connect, init_db
+    from astock_trading.platform.db import connect
     from astock_trading.reporting.projectors import ProjectionUpdater
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = MarketStore(conn)
         store.save_observation("astock_signal", "hot_stocks", "2026-05-22", {"items": [1]})
@@ -7155,15 +7193,13 @@ def test_notify_opportunity_embed_labels_candidate_pool_when_core_present(tmp_pa
     assert "伟测科技(688372) 观察" in values
 
 
-def test_hermes_digest_localizes_clear_action(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_hermes_digest_localizes_clear_action(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         EventStore(conn).append(
             stream="decision:603215",
@@ -7197,15 +7233,13 @@ def test_hermes_digest_localizes_clear_action(tmp_path):
     assert "603215 观望" in payload["summary"]
 
 
-def test_hermes_digest_uses_latest_decision_beyond_default_event_page(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_hermes_digest_uses_latest_decision_beyond_default_event_page(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = EventStore(conn)
         for index in range(205):
@@ -7262,15 +7296,13 @@ def test_hermes_digest_uses_latest_decision_beyond_default_event_page(tmp_path):
     assert "688981 买入意向" in payload["summary"]
 
 
-def test_hermes_digest_prioritizes_pending_buy_intent_over_later_clear_decision(tmp_path):
-    from astock_trading.platform.db import connect, init_db
+def test_hermes_digest_prioritizes_pending_buy_intent_over_later_clear_decision(tmp_path, mysql_runtime):
+    from astock_trading.platform.db import connect
     from astock_trading.platform.events import EventStore
 
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
-    db_path = tmp_path / "runtime.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = connect()
     try:
         store = EventStore(conn)
         buy_decision_id = store.append(
@@ -7343,30 +7375,3 @@ def test_hermes_digest_prioritizes_pending_buy_intent_over_later_clear_decision(
     assert payload["signal_focus"]["action_label"] == "买入意向"
     assert "当前重点 688981 中芯国际 买入意向 6.4 分" in payload["summary"]
     assert "最新决策 002342 观望" not in payload["summary"]
-
-
-def test_sqlite_to_mysql_migration_dry_run_json_via_bin_trade(tmp_path):
-    root = Path(__file__).resolve().parents[3]
-    cli = root / "bin" / "trade"
-    sqlite_path = tmp_path / "archived_astock_trading.db"
-
-    result = subprocess.run(
-        [
-            str(cli),
-            "db",
-            "migrate-sqlite-to-mysql",
-            "--sqlite-path",
-            str(sqlite_path),
-            "--dry-run",
-            "--json",
-        ],
-        cwd=root,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    payload = json.loads(result.stdout)
-    assert payload["dry_run"] is True
-    assert "event_log" in payload["source_counts"]
-    assert payload["target"] == "not_written"

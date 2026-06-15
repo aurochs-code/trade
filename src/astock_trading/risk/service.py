@@ -17,7 +17,11 @@ from astock_trading.risk.models import (
     RiskBreach,
     RiskParams,
 )
-from astock_trading.risk.rules import check_exit_signals, check_portfolio_risk
+from astock_trading.risk.rules import (
+    build_threshold_snapshot,
+    check_exit_signals,
+    check_portfolio_risk,
+)
 from astock_trading.risk.sizing import calc_position_size
 
 
@@ -61,6 +65,26 @@ class RiskService:
         )
 
         metadata = {"run_id": run_id}
+
+        self._event_store.append(
+            stream=f"risk:{code}",
+            stream_type="risk",
+            event_type="risk.threshold_snapshot",
+            payload=build_threshold_snapshot(
+                code=code,
+                avg_cost=avg_cost,
+                current_price=current_price,
+                entry_date=entry_date,
+                today=today,
+                highest_since_entry=highest_since_entry,
+                entry_day_low=entry_day_low,
+                params=risk_params,
+                ma20=ma20,
+                ma60=ma60,
+                signals=signals,
+            ),
+            metadata=metadata,
+        )
 
         for sig in signals:
             self._event_store.append(

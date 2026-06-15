@@ -28,6 +28,7 @@ data/runs/
 data/locks/
 data/ledger/
 data/backtest/
+reports/
 交易记录/
 每日快照/
 venv312/

@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 from astock_trading.platform.dashboard import build_dashboard_snapshot
-from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.events import EventStore
 
 
-def test_dashboard_snapshot_summarizes_operational_state(tmp_path):
-    db_path = tmp_path / "dashboard.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_dashboard_snapshot_summarizes_operational_state(mysql_conn):
+    conn = mysql_conn
     try:
         store = EventStore(conn)
         conn.execute(
@@ -71,10 +68,8 @@ def test_dashboard_snapshot_summarizes_operational_state(tmp_path):
     assert payload["guardrails"]["trading_actions_enabled"] is False
 
 
-def test_dashboard_snapshot_empty_db_still_returns_sections(tmp_path):
-    db_path = tmp_path / "empty_dashboard.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_dashboard_snapshot_empty_db_still_returns_sections(mysql_conn):
+    conn = mysql_conn
     try:
         payload = build_dashboard_snapshot(conn)
     finally:

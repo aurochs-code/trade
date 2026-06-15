@@ -128,6 +128,132 @@ def test_green_regime_overlay_raises_buy_line_without_switching_profile():
     assert "市场制度 GREEN 买入线 6.5" in " ".join(d.notes)
 
 
+def test_route_policy_can_promote_valid_entry_route_to_buy_below_regime_line():
+    decider = Decider(
+        buy_threshold=6.5,
+        watch_threshold=5.0,
+        single_max_pct=0.22,
+        require_entry_signal_for_buy=True,
+        min_data_quality_for_buy="ok",
+        max_missing_fields_for_buy=0,
+        route_execution_policy={
+            "GREEN:short_continuation": {
+                "score_min": 6.0,
+                "position_pct": 0.22,
+                "priority": 70,
+            }
+        },
+    )
+    score = _make_score(
+        6.1,
+        entry_signal=True,
+        data_quality=DataQuality.OK,
+        data_missing_fields=[],
+        primary_strategy_route="short_continuation",
+        strategy_routes=[
+            StrategyRouteEvidence(
+                route="short_continuation",
+                display_name="短续接力",
+                family="short_continuation",
+                confidence=0.9,
+                entry_signal=True,
+            )
+        ],
+    )
+
+    d = decider.decide(score, MarketState(signal=MarketSignal.GREEN, multiplier=1.0))
+
+    assert d.action == Action.BUY
+    assert d.position_pct == 0.22
+    assert "路线 short_continuation 买入线 6.0" in " ".join(d.notes)
+
+
+def test_route_policy_does_not_promote_red_market_to_auto_buy():
+    decider = Decider(
+        buy_threshold=6.5,
+        watch_threshold=5.0,
+        require_entry_signal_for_buy=True,
+        min_data_quality_for_buy="ok",
+        max_missing_fields_for_buy=0,
+        route_execution_policy={
+            "RED:pullback_to_ma20": {
+                "score_min": 6.0,
+                "position_pct": 0.066,
+                "priority": 65,
+            }
+        },
+    )
+    score = _make_score(
+        6.4,
+        entry_signal=True,
+        data_quality=DataQuality.OK,
+        data_missing_fields=[],
+        primary_strategy_route="pullback_to_ma20",
+        strategy_routes=[
+            StrategyRouteEvidence(
+                route="pullback_to_ma20",
+                display_name="均线回踩转强",
+                family="trend_swing",
+                confidence=0.86,
+                entry_signal=True,
+            )
+        ],
+    )
+
+    d = decider.decide(score, MarketState(signal=MarketSignal.RED, multiplier=0.0))
+
+    assert d.action == Action.TRIAL_BUY
+    assert d.position_pct == 0.0
+    assert "禁止新开仓" in " ".join(d.notes)
+
+
+def test_build_decider_from_config_reads_route_execution_policy_for_buy_decisions():
+    decider = build_decider_from_config(
+        {
+            "scoring": {
+                "thresholds": {"buy": 6.0, "watch": 5.0, "reject": 4.0},
+                "decision_gates": {
+                    "require_entry_signal_for_buy": True,
+                    "min_data_quality_for_buy": "ok",
+                    "max_missing_fields_for_buy": 0,
+                },
+                "market_regime_overlays": {
+                    "YELLOW": {"buy_threshold": 6.5, "allow_trial_buy": False}
+                },
+                "route_execution_policy": {
+                    "YELLOW:pullback_to_ma20": {
+                        "score_min": 6.0,
+                        "position_pct": 0.11,
+                        "priority": 65,
+                    }
+                },
+            },
+            "risk": {"position": {"single_max": 0.22, "total_max": 0.67}},
+        }
+    )
+    score = _make_score(
+        6.1,
+        entry_signal=True,
+        data_quality=DataQuality.OK,
+        data_missing_fields=[],
+        primary_strategy_route="pullback_to_ma20",
+        strategy_routes=[
+            StrategyRouteEvidence(
+                route="pullback_to_ma20",
+                display_name="均线回踩转强",
+                family="trend_swing",
+                confidence=0.86,
+                entry_signal=True,
+            )
+        ],
+    )
+
+    d = decider.decide(score, MarketState(signal=MarketSignal.YELLOW, multiplier=0.5))
+
+    assert d.action == Action.BUY
+    assert d.position_pct == 0.11
+
+
 def test_yellow_regime_overlay_disables_trial_buy_and_raises_buy_line():
     decider = build_decider_from_config(
         {

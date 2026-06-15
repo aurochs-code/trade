@@ -13,12 +13,12 @@ from astock_trading.backtest.engine import (
     Position,
     _date_ranges,
     _financial_periods,
+    _is_market_reduce_signal,
     _score_weights_for_mode,
     load_config,
     run_backtest,
 )
 from astock_trading.market.store import MarketStore
-from astock_trading.platform.db import connect, init_db
 from astock_trading.strategy.models import Action, DecisionIntent, MarketSignal, MarketState, ScoreResult
 
 
@@ -62,6 +62,301 @@ def test_risk_check_triggers_trailing_stop_from_high_watermark():
     assert engine._trades[-1]["return_pct"] == 5.0
 
 
+def test_market_reduction_depends_on_signal_not_multiplier():
+    assert _is_market_reduce_signal(MarketState(signal=MarketSignal.RED, multiplier=0.3)) is True
+    assert _is_market_reduce_signal(MarketState(signal=MarketSignal.CLEAR, multiplier=0.0)) is True
+    assert _is_market_reduce_signal(MarketState(signal=MarketSignal.YELLOW, multiplier=0.5)) is False
+
+
+def test_backtest_can_disable_market_reduce_sell_for_research():
+    engine = BacktestEngine(BacktestConfig(disable_market_reduce_sell=True))
+
+    assert engine._should_market_reduce_position(MarketState(signal=MarketSignal.RED, multiplier=0.3)) is False
+
+
+def test_backtest_watch_loss_cooldown_blocks_watch_but_not_buy():
+    engine = BacktestEngine(
+        BacktestConfig(
+            watch_loss_cooldown_days=3,
+            execute_watch_trial_pairs=("GREEN:trend_cooling_off",),
+            execute_watch_trial_score_min=0.0,
+        )
+    )
+    engine._current_date_index = 2
+    engine._register_loss_cooldown({"side": "sell", "pnl": -100.0, "reason": "止损"}, date_index=2)
+    watch_intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.WATCH,
+        confidence=4.2,
+        score=4.2,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+    )
+    buy_intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.BUY,
+        confidence=6.8,
+        score=6.8,
+        position_pct=0.22,
+        market_signal=MarketSignal.GREEN,
+    )
+
+    assert engine._intent_execution_status(
+        watch_intent,
+        "002138",
+        "trend_cooling_off",
+        score_total=4.2,
+        market=MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
+    ) == {"executable": False, "reason": "watch_loss_cooldown"}
+    assert engine._intent_execution_status(
+        buy_intent,
+        "002138",
+        "short_continuation",
+        score_total=6.8,
+        market=MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
+    ) == {"executable": True, "reason": "buy"}
+
+
+def test_backtest_watch_loss_cooldown_expires_by_trading_index():
+    engine = BacktestEngine(
+        BacktestConfig(
+            watch_loss_cooldown_days=2,
+            execute_watch_trial_pairs=("GREEN:trend_cooling_off",),
+            execute_watch_trial_score_min=0.0,
+        )
+    )
+    engine._current_date_index = 5
+    engine._register_loss_cooldown({"side": "sell", "pnl": -100.0, "reason": "大盘RED减仓"}, date_index=2)
+    intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.WATCH,
+        confidence=4.2,
+        score=4.2,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+    )
+
+    assert engine._intent_execution_status(
+        intent,
+        "002138",
+        "trend_cooling_off",
+        score_total=4.2,
+        market=MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
+    ) == {"executable": True, "reason": "watch_trial_pair"}
+
+
+def test_backtest_watch_loss_cooldown_can_be_limited_to_market_phases():
+    engine = BacktestEngine(
+        BacktestConfig(
+            watch_loss_cooldown_days=5,
+            watch_loss_cooldown_phase_buckets=("below_ma20_slope_up",),
+            execute_watch_trial_pairs=("GREEN:trend_cooling_off",),
+            execute_watch_trial_score_min=0.0,
+        )
+    )
+    engine._current_date_index = 3
+    engine._register_loss_cooldown({"side": "sell", "pnl": -100.0, "reason": "止损"}, date_index=2)
+    intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.WATCH,
+        confidence=4.2,
+        score=4.2,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+    )
+
+    assert engine._intent_execution_status(
+        intent,
+        "002138",
+        "trend_cooling_off",
+        score_total=4.2,
+        market=MarketState(
+            signal=MarketSignal.GREEN,
+            multiplier=1.0,
+            detail={
+                "index_ma20_deviation_pct": -1.0,
+                "index_ma20_slope_5d_pct": 0.8,
+                "ma120": 3050.0,
+                "above_ma120": False,
+                "index_ma120_slope_20d_pct": -1.2,
+            },
+        ),
+    ) == {"executable": False, "reason": "watch_loss_cooldown"}
+    assert engine._intent_execution_status(
+        intent,
+        "002138",
+        "trend_cooling_off",
+        score_total=4.2,
+        market=MarketState(
+            signal=MarketSignal.GREEN,
+            multiplier=1.0,
+            detail={"index_ma20_deviation_pct": 4.0, "index_ma20_slope_5d_pct": 0.8},
+        ),
+    ) == {"executable": True, "reason": "watch_trial_pair"}
+
+
+def test_backtest_watch_trial_can_require_above_ma20_days_for_specific_phase():
+    engine = BacktestEngine(
+        BacktestConfig(
+            execute_watch_trial_pairs=("GREEN:trend_cooling_off",),
+            execute_watch_trial_score_min=0.0,
+            execute_watch_trial_phase_buckets=("extended_above_ma20_slope_up",),
+            execute_watch_trial_min_above_ma20_days=6,
+            execute_watch_trial_min_above_ma20_days_phase_buckets=("extended_above_ma20_slope_up",),
+        )
+    )
+    intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.WATCH,
+        confidence=4.2,
+        score=4.2,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+    )
+
+    assert engine._intent_execution_status(
+        intent,
+        "002138",
+        "trend_cooling_off",
+        score_total=4.2,
+        market=MarketState(
+            signal=MarketSignal.GREEN,
+            multiplier=1.0,
+            detail={
+                "index_ma20_deviation_pct": 4.0,
+                "index_ma20_slope_5d_pct": 1.0,
+                "above_ma20_days": 5,
+            },
+        ),
+    ) == {"executable": False, "reason": "watch_above_ma20_days_below_min"}
+    assert engine._intent_execution_status(
+        intent,
+        "002138",
+        "trend_cooling_off",
+        score_total=4.2,
+        market=MarketState(
+            signal=MarketSignal.GREEN,
+            multiplier=1.0,
+            detail={
+                "index_ma20_deviation_pct": 4.0,
+                "index_ma20_slope_5d_pct": 1.0,
+                "above_ma20_days": 6,
+            },
+        ),
+    ) == {"executable": True, "reason": "watch_trial_pair"}
+
+
+def test_backtest_watch_trial_can_require_above_ma60_for_specific_phase():
+    engine = BacktestEngine(
+        BacktestConfig(
+            execute_watch_trial_pairs=("GREEN:trend_cooling_off",),
+            execute_watch_trial_score_min=0.0,
+            execute_watch_trial_phase_buckets=("extended_above_ma20_slope_up",),
+            execute_watch_trial_require_above_ma60_phase_buckets=("extended_above_ma20_slope_up",),
+        )
+    )
+    intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.WATCH,
+        confidence=4.2,
+        score=4.2,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+    )
+
+    assert engine._intent_execution_status(
+        intent,
+        "002138",
+        "trend_cooling_off",
+        score_total=4.2,
+        market=MarketState(
+            signal=MarketSignal.GREEN,
+            multiplier=1.0,
+            detail={
+                "price": 3100.0,
+                "ma60": 3200.0,
+                "index_ma20_deviation_pct": 4.0,
+                "index_ma20_slope_5d_pct": 1.0,
+            },
+        ),
+    ) == {"executable": False, "reason": "watch_above_ma60_required"}
+    assert engine._intent_execution_status(
+        intent,
+        "002138",
+        "trend_cooling_off",
+        score_total=4.2,
+        market=MarketState(
+            signal=MarketSignal.GREEN,
+            multiplier=1.0,
+            detail={
+                "price": 3300.0,
+                "ma60": 3200.0,
+                "index_ma20_deviation_pct": 4.0,
+                "index_ma20_slope_5d_pct": 1.0,
+            },
+        ),
+    ) == {"executable": True, "reason": "watch_trial_pair"}
+
+
+def test_backtest_watch_trial_can_require_above_ma120_for_specific_phase():
+    engine = BacktestEngine(
+        BacktestConfig(
+            execute_watch_trial_pairs=("GREEN:trend_cooling_off",),
+            execute_watch_trial_score_min=0.0,
+            execute_watch_trial_phase_buckets=("extended_above_ma20_slope_up",),
+            execute_watch_trial_require_above_ma120_phase_buckets=("extended_above_ma20_slope_up",),
+        )
+    )
+    intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.WATCH,
+        confidence=4.2,
+        score=4.2,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+    )
+
+    assert engine._intent_execution_status(
+        intent,
+        "002138",
+        "trend_cooling_off",
+        score_total=4.2,
+        market=MarketState(
+            signal=MarketSignal.GREEN,
+            multiplier=1.0,
+            detail={
+                "price": 3100.0,
+                "ma120": 3200.0,
+                "index_ma20_deviation_pct": 4.0,
+                "index_ma20_slope_5d_pct": 1.0,
+            },
+        ),
+    ) == {"executable": False, "reason": "watch_above_ma120_required"}
+    assert engine._intent_execution_status(
+        intent,
+        "002138",
+        "trend_cooling_off",
+        score_total=4.2,
+        market=MarketState(
+            signal=MarketSignal.GREEN,
+            multiplier=1.0,
+            detail={
+                "price": 3300.0,
+                "ma120": 3200.0,
+                "index_ma20_deviation_pct": 4.0,
+                "index_ma20_slope_5d_pct": 1.0,
+            },
+        ),
+    ) == {"executable": True, "reason": "watch_trial_pair"}
+
+
 def test_runtime_base_config_matches_final_route_candidate_risk_profile():
     for config_path in (
         "config/strategy.yaml",
@@ -78,6 +373,120 @@ def test_runtime_base_config_matches_final_route_candidate_risk_profile():
         assert position["total_max"] == final_candidate["total_max_pct"] == 0.67
         assert position["weekly_max"] == final_candidate["weekly_max"] == 5
         assert position["holding_max"] == final_candidate["holding_max"] == 5
+
+
+def test_backtest_preset_can_carry_research_execution_fields():
+    cfg = load_config("攻_C_phase_filtered_watch08")
+
+    assert cfg.execute_buy_phase_buckets == (
+        "extended_above_ma20_slope_up",
+        "extended_above_ma20_slope_flat",
+        "below_ma20_slope_flat",
+        "below_ma20_slope_up",
+    )
+    assert cfg.execute_watch_trial_pairs == (
+        "GREEN:trend_cooling_off",
+        "RED:relative_strength_overheat",
+        "YELLOW:trend_cooling_off",
+    )
+    assert cfg.execute_watch_trial_score_min == 0.0
+    assert cfg.execute_watch_trial_score_max == 4.5
+    assert cfg.execute_watch_trial_position_pct == 0.08
+    assert cfg.execute_watch_trial_phase_buckets == (
+        "extended_above_ma20_slope_up",
+        "extended_above_ma20_slope_flat",
+        "below_ma20_slope_flat",
+        "below_ma20_slope_up",
+    )
+    assert cfg.market_multipliers["RED"] == 0.3
+
+
+def test_backtest_final_candidate_preset_carries_phase_limited_loss_cooldown():
+    cfg = load_config("攻_C_phase_filtered_watch08_cooldown20")
+
+    assert cfg.watch_loss_cooldown_days == 20
+    assert cfg.watch_loss_cooldown_phase_buckets == (
+        "extended_above_ma20_slope_flat",
+        "below_ma20_slope_flat",
+        "below_ma20_slope_up",
+    )
+    assert cfg.execute_watch_trial_position_pct == 0.075
+    assert cfg.execute_watch_trial_score_max == 4.5
+    assert "below_ma20_slope_down" in cfg.execute_watch_trial_phase_buckets
+    assert cfg.execute_watch_trial_require_above_ma120_phase_buckets == (
+        "extended_above_ma20_slope_up",
+        "extended_above_ma20_slope_flat",
+    )
+    assert cfg.scale_in_enabled is True
+    assert cfg.scale_in_profit_threshold == 0.10
+    assert cfg.scale_in_step_position_pct == 0.075
+    assert cfg.scale_in_max_position_pct == 0.22
+    assert cfg.scale_in_max_adds == 2
+    assert cfg.scale_in_min_days_between == 5
+    assert cfg.scale_in_routes == (
+        "short_continuation",
+        "volume_breakout",
+        "dragon_head",
+        "trend_structure_watch",
+        "pullback_to_ma20",
+        "trend_cooling_off",
+        "relative_strength_overheat",
+    )
+    assert cfg.scale_in_market_signals == ("GREEN", "YELLOW", "RED")
+    assert cfg.scale_in_actions == ("BUY", "WATCH", "TRIAL_BUY")
+    assert cfg.scale_in_require_entry_signal is False
+    assert cfg.scale_in_score_min == 4.0
+    assert cfg.scale_in_reset_time_stop is True
+    assert cfg.scale_in_aggressive_max_position_pct == 0.30
+    assert cfg.scale_in_aggressive_step_position_pct == 0.08
+    assert cfg.scale_in_aggressive_market_signals == ("GREEN", "YELLOW")
+    assert cfg.scale_in_aggressive_routes == (
+        "short_continuation",
+        "volume_breakout",
+        "dragon_head",
+        "trend_structure_watch",
+    )
+    assert cfg.scale_in_aggressive_phase_buckets == (
+        "extended_above_ma20_slope_up",
+        "extended_above_ma20_slope_flat",
+        "near_ma20_slope_up",
+        "below_ma20_slope_up",
+    )
+
+
+def test_backtest_execution_semantics_reports_scale_in_research_mode():
+    engine = BacktestEngine(
+        BacktestConfig(
+            scale_in_enabled=True,
+            scale_in_profit_threshold=0.10,
+            scale_in_step_position_pct=0.075,
+            scale_in_max_position_pct=0.22,
+            scale_in_max_adds=1,
+            scale_in_market_signals=("GREEN", "YELLOW"),
+            scale_in_routes=("trend_cooling_off",),
+            scale_in_actions=("WATCH", "TRIAL_BUY"),
+            scale_in_require_entry_signal=False,
+            scale_in_aggressive_max_position_pct=0.30,
+            scale_in_aggressive_step_position_pct=0.08,
+            scale_in_aggressive_market_signals=("GREEN", "YELLOW"),
+            scale_in_aggressive_routes=("short_continuation",),
+            scale_in_aggressive_phase_buckets=("extended_above_ma20_slope_up",),
+        )
+    )
+
+    semantics = engine._execution_semantics()
+
+    assert semantics["mode"] == "research_what_if"
+    assert semantics["buy_only"] is False
+    assert semantics["scale_in_enabled"] is True
+    assert semantics["scale_in_routes"] == ["trend_cooling_off"]
+    assert semantics["scale_in_actions"] == ["WATCH", "TRIAL_BUY"]
+    assert semantics["scale_in_require_entry_signal"] is False
+    assert semantics["scale_in_aggressive_max_position_pct"] == 0.30
+    assert semantics["scale_in_aggressive_step_position_pct"] == 0.08
+    assert semantics["scale_in_aggressive_markets"] == ["GREEN", "YELLOW"]
+    assert semantics["scale_in_aggressive_routes"] == ["short_continuation"]
+    assert semantics["scale_in_aggressive_phases"] == ["extended_above_ma20_slope_up"]
 
 
 def test_backtest_buy_uses_decision_position_pct():
@@ -97,6 +506,319 @@ def test_backtest_buy_uses_decision_position_pct():
         intent,
         MarketState(signal=MarketSignal.YELLOW, multiplier=0.5),
     ) == 0.10
+
+
+def test_backtest_scale_in_budget_only_buys_delta_to_target_pct():
+    engine = BacktestEngine(
+        BacktestConfig(
+            initial_cash=100000.0,
+            total_max_pct=0.67,
+        )
+    )
+    trade_date = "2026-01-05"
+    engine._cash = 85000.0
+    engine._bars = {
+        "002138": pd.DataFrame({
+            "日期": [trade_date],
+            "收盘": [15.0],
+        })
+    }
+    engine._positions = {
+        "002138": Position(
+            code="002138",
+            shares=1000,
+            entry_price=10.0,
+            entry_date=trade_date,
+            high_water=15.0,
+            position_pct=0.15,
+        )
+    }
+
+    assert engine._allocation_budget_to_target_position(trade_date, "002138", 0.22) == 7000.0
+    assert engine._allocation_budget_to_target_position(trade_date, "002138", 0.15) == 0.0
+
+
+def test_backtest_scale_in_adds_to_profitable_trend_position():
+    engine = BacktestEngine(
+        BacktestConfig(
+            initial_cash=100000.0,
+            single_max_pct=0.22,
+            total_max_pct=0.67,
+            scale_in_enabled=True,
+            scale_in_profit_threshold=0.10,
+            scale_in_step_position_pct=0.075,
+            scale_in_max_position_pct=0.22,
+            scale_in_max_adds=2,
+            scale_in_min_days_between=1,
+            scale_in_routes=("short_continuation",),
+            scale_in_market_signals=("GREEN",),
+            scale_in_score_min=5.0,
+        )
+    )
+    dates = ["2026-01-02", "2026-01-05"]
+    engine._sorted_dates = dates
+    engine._cash = 95000.0
+    engine._bars = {
+        "002138": pd.DataFrame({
+            "日期": dates,
+            "收盘": [10.0, 12.0],
+        })
+    }
+    engine._positions = {
+        "002138": Position(
+            code="002138",
+            shares=500,
+            entry_price=10.0,
+            entry_date=dates[0],
+            high_water=12.0,
+            position_pct=0.075,
+        )
+    }
+    score = ScoreResult(
+        code="002138",
+        name="双环传动",
+        total=6.6,
+        entry_signal=True,
+        primary_strategy_route="short_continuation",
+    )
+    intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.BUY,
+        confidence=6.6,
+        score=6.6,
+        position_pct=0.22,
+        market_signal=MarketSignal.GREEN,
+    )
+
+    engine._scale_in_positions(
+        trade_date=dates[1],
+        day_index=1,
+        intents=[(score, intent)],
+        market=MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
+    )
+
+    pos = engine._positions["002138"]
+    assert pos.shares == 1200
+    assert round(pos.entry_price, 4) == 11.1667
+    assert pos.position_pct == 0.15
+    assert pos.add_count == 1
+    assert pos.last_add_date == dates[1]
+    assert engine._trades[-1]["source_action"] == "SCALE_IN"
+    assert engine._trades[-1]["reason"] == "趋势加仓"
+    assert engine._trades[-1]["position_pct"] == 0.15
+
+
+def test_backtest_scale_in_rejects_weak_or_disallowed_confirmation():
+    engine = BacktestEngine(
+        BacktestConfig(
+            scale_in_enabled=True,
+            scale_in_profit_threshold=0.10,
+            scale_in_routes=("short_continuation",),
+            scale_in_market_signals=("GREEN",),
+            scale_in_score_min=5.0,
+        )
+    )
+    engine._positions = {
+        "002138": Position(
+            code="002138",
+            shares=500,
+            entry_price=10.0,
+            entry_date="2026-01-02",
+            high_water=12.0,
+            position_pct=0.075,
+        )
+    }
+    weak_score = ScoreResult(
+        code="002138",
+        name="双环传动",
+        total=6.6,
+        entry_signal=True,
+        primary_strategy_route="trend_cooling_off",
+    )
+
+    assert engine._scale_in_execution_status(
+        weak_score,
+        MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
+        price=12.0,
+        day_index=1,
+    ) == {"executable": False, "reason": "scale_in_route_blocked"}
+
+
+def test_backtest_scale_in_can_use_trial_buy_confirmation_without_new_entry_signal():
+    engine = BacktestEngine(
+        BacktestConfig(
+            initial_cash=100000.0,
+            single_max_pct=0.22,
+            total_max_pct=0.67,
+            scale_in_enabled=True,
+            scale_in_profit_threshold=0.10,
+            scale_in_step_position_pct=0.075,
+            scale_in_max_position_pct=0.22,
+            scale_in_max_adds=1,
+            scale_in_min_days_between=1,
+            scale_in_routes=("trend_cooling_off",),
+            scale_in_market_signals=("GREEN",),
+            scale_in_actions=("TRIAL_BUY",),
+            scale_in_require_entry_signal=False,
+            scale_in_score_min=5.0,
+        )
+    )
+    dates = ["2026-01-02", "2026-01-05"]
+    engine._sorted_dates = dates
+    engine._cash = 95000.0
+    engine._bars = {
+        "002138": pd.DataFrame({
+            "日期": dates,
+            "收盘": [10.0, 12.0],
+        })
+    }
+    engine._positions = {
+        "002138": Position(
+            code="002138",
+            shares=500,
+            entry_price=10.0,
+            entry_date=dates[0],
+            high_water=12.0,
+            position_pct=0.075,
+        )
+    }
+    score = ScoreResult(
+        code="002138",
+        name="双环传动",
+        total=5.6,
+        entry_signal=False,
+        primary_strategy_route="trend_cooling_off",
+    )
+    intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.TRIAL_BUY,
+        confidence=5.6,
+        score=5.6,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+    )
+
+    engine._scale_in_positions(
+        trade_date=dates[1],
+        day_index=1,
+        intents=[(score, intent)],
+        market=MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
+    )
+
+    assert engine._positions["002138"].add_count == 1
+    assert engine._trades[-1]["source_action"] == "SCALE_IN"
+
+
+def test_backtest_scale_in_dynamic_aggressive_target_for_strong_market_route():
+    engine = BacktestEngine(
+        BacktestConfig(
+            initial_cash=100000.0,
+            single_max_pct=0.22,
+            total_max_pct=0.67,
+            scale_in_enabled=True,
+            scale_in_step_position_pct=0.075,
+            scale_in_max_position_pct=0.22,
+            scale_in_aggressive_step_position_pct=0.08,
+            scale_in_aggressive_max_position_pct=0.30,
+            scale_in_aggressive_market_signals=("GREEN", "YELLOW"),
+            scale_in_aggressive_routes=("short_continuation",),
+            scale_in_aggressive_phase_buckets=("extended_above_ma20_slope_up",),
+        )
+    )
+    trade_date = "2026-01-05"
+    engine._cash = 76000.0
+    engine._bars = {
+        "002138": pd.DataFrame({
+            "日期": [trade_date],
+            "收盘": [12.0],
+        })
+    }
+    engine._positions = {
+        "002138": Position(
+            code="002138",
+            shares=2000,
+            entry_price=10.0,
+            entry_date=trade_date,
+            high_water=12.0,
+            position_pct=0.22,
+        )
+    }
+    score = ScoreResult(
+        code="002138",
+        name="双环传动",
+        total=6.8,
+        entry_signal=True,
+        primary_strategy_route="short_continuation",
+    )
+    market = MarketState(
+        signal=MarketSignal.GREEN,
+        multiplier=1.0,
+        detail={
+            "price": 3300.0,
+            "ma20": 3100.0,
+            "index_ma20_deviation_pct": 6.0,
+            "index_ma20_slope_5d_pct": 1.0,
+        },
+    )
+
+    assert engine._scale_in_target_position_pct(trade_date, "002138", score=score, market=market) == 0.30
+
+
+def test_backtest_scale_in_dynamic_target_keeps_red_or_weak_route_at_base_cap():
+    engine = BacktestEngine(
+        BacktestConfig(
+            initial_cash=100000.0,
+            single_max_pct=0.22,
+            total_max_pct=0.67,
+            scale_in_enabled=True,
+            scale_in_step_position_pct=0.075,
+            scale_in_max_position_pct=0.22,
+            scale_in_aggressive_step_position_pct=0.08,
+            scale_in_aggressive_max_position_pct=0.30,
+            scale_in_aggressive_market_signals=("GREEN", "YELLOW"),
+            scale_in_aggressive_routes=("short_continuation",),
+            scale_in_aggressive_phase_buckets=("extended_above_ma20_slope_up",),
+        )
+    )
+    trade_date = "2026-01-05"
+    engine._cash = 76000.0
+    engine._bars = {
+        "002138": pd.DataFrame({
+            "日期": [trade_date],
+            "收盘": [12.0],
+        })
+    }
+    engine._positions = {
+        "002138": Position(
+            code="002138",
+            shares=2000,
+            entry_price=10.0,
+            entry_date=trade_date,
+            high_water=12.0,
+            position_pct=0.22,
+        )
+    }
+    weak_score = ScoreResult(
+        code="002138",
+        name="双环传动",
+        total=6.8,
+        entry_signal=False,
+        primary_strategy_route="relative_strength_overheat",
+    )
+    red_market = MarketState(
+        signal=MarketSignal.RED,
+        multiplier=0.3,
+        detail={
+            "price": 3000.0,
+            "ma20": 3100.0,
+            "index_ma20_deviation_pct": -3.0,
+            "index_ma20_slope_5d_pct": -1.0,
+        },
+    )
+
+    assert engine._scale_in_target_position_pct(trade_date, "002138", score=weak_score, market=red_market) == 0.22
 
 
 def test_backtest_can_counterfactually_execute_red_trial_buy_at_small_size():
@@ -191,6 +913,200 @@ def test_backtest_can_counterfactually_execute_watch_route_with_score_floor():
     ) == 0.20
 
 
+def test_backtest_can_counterfactually_execute_watch_route_with_score_ceiling():
+    engine = BacktestEngine(
+        BacktestConfig(
+            execute_watch_trial_pairs=("GREEN:trend_cooling_off",),
+            execute_watch_trial_score_min=4.5,
+            execute_watch_trial_score_max=5.0,
+        )
+    )
+    intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.WATCH,
+        confidence=4.8,
+        score=4.8,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+        market_multiplier=1.0,
+    )
+
+    assert engine._intent_executable_for_backtest(
+        intent,
+        "002138",
+        "trend_cooling_off",
+        score_total=4.8,
+    ) is True
+    assert engine._intent_executable_for_backtest(
+        intent,
+        "002138",
+        "trend_cooling_off",
+        score_total=5.1,
+    ) is False
+
+
+def test_backtest_can_counterfactually_size_watch_route_with_position_override():
+    engine = BacktestEngine(
+        BacktestConfig(
+            single_max_pct=0.22,
+            execute_watch_trial_pairs=("GREEN:trend_cooling_off",),
+            execute_watch_trial_position_pct=0.08,
+        )
+    )
+    intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.WATCH,
+        confidence=4.8,
+        score=4.8,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+        market_multiplier=1.0,
+    )
+
+    assert engine._execution_position_pct(
+        intent,
+        MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
+        "trend_cooling_off",
+    ) == 0.08
+
+
+def test_backtest_can_counterfactually_filter_watch_route_by_market_phase():
+    engine = BacktestEngine(
+        BacktestConfig(
+            execute_watch_trial_pairs=("GREEN:trend_cooling_off",),
+            execute_watch_trial_score_min=0.0,
+            execute_watch_trial_phase_buckets=("below_ma20_slope_up",),
+        )
+    )
+    intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.WATCH,
+        confidence=4.8,
+        score=4.8,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+        market_multiplier=1.0,
+    )
+
+    assert engine._intent_executable_for_backtest(
+        intent,
+        "002138",
+        "trend_cooling_off",
+        score_total=4.8,
+        market=MarketState(
+            signal=MarketSignal.GREEN,
+            multiplier=1.0,
+            detail={
+                "index_ma20_deviation_pct": -1.0,
+                "index_ma20_slope_5d_pct": 0.8,
+                "ma120": 3050.0,
+                "above_ma120": False,
+                "index_ma120_slope_20d_pct": -1.2,
+            },
+        ),
+    ) is True
+    assert engine._intent_executable_for_backtest(
+        intent,
+        "002138",
+        "trend_cooling_off",
+        score_total=4.8,
+        market=MarketState(
+            signal=MarketSignal.GREEN,
+            multiplier=1.0,
+            detail={"index_ma20_deviation_pct": 4.0, "index_ma20_slope_5d_pct": -0.8},
+        ),
+    ) is False
+
+
+def test_backtest_buy_trade_record_includes_market_phase_context():
+    engine = BacktestEngine(BacktestConfig())
+    score = ScoreResult(
+        code="002138",
+        name="双环传动",
+        total=4.2,
+        primary_strategy_route="trend_cooling_off",
+    )
+    intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.WATCH,
+        confidence=4.2,
+        score=4.2,
+        market_signal=MarketSignal.GREEN,
+    )
+
+    record = engine._buy_trade_record(
+        trade_date="2026-01-02",
+        score=score,
+        intent=intent,
+        market=MarketState(
+            signal=MarketSignal.GREEN,
+            multiplier=1.0,
+            detail={
+                "index_ma20_deviation_pct": -1.0,
+                "index_ma20_slope_5d_pct": 0.8,
+                "ma120": 3050.0,
+                "above_ma120": False,
+                "index_ma120_slope_20d_pct": -1.2,
+            },
+        ),
+        price=10.0,
+        shares=100,
+        position_pct=0.09,
+    )
+
+    assert record["market_signal"] == "GREEN"
+    assert record["market_phase_bucket"] == "below_ma20_slope_up"
+    assert record["market_context"]["index_ma20_deviation_pct"] == -1.0
+    assert record["market_context"]["ma120"] == 3050.0
+    assert record["market_context"]["above_ma120"] is False
+    assert record["market_context"]["index_ma120_slope_20d_pct"] == -1.2
+    assert record["source_route"] == "trend_cooling_off"
+
+
+def test_backtest_can_counterfactually_filter_buy_by_market_phase():
+    engine = BacktestEngine(
+        BacktestConfig(
+            execute_buy_phase_buckets=("extended_above_ma20_slope_up",),
+        )
+    )
+    intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.BUY,
+        confidence=6.8,
+        score=6.8,
+        position_pct=0.22,
+        market_signal=MarketSignal.GREEN,
+    )
+
+    assert engine._intent_executable_for_backtest(
+        intent,
+        "002138",
+        "short_continuation",
+        score_total=6.8,
+        market=MarketState(
+            signal=MarketSignal.GREEN,
+            multiplier=1.0,
+            detail={"index_ma20_deviation_pct": 3.5, "index_ma20_slope_5d_pct": 1.0},
+        ),
+    ) is True
+    assert engine._intent_executable_for_backtest(
+        intent,
+        "002138",
+        "pullback_to_ma20",
+        score_total=6.8,
+        market=MarketState(
+            signal=MarketSignal.GREEN,
+            multiplier=1.0,
+            detail={"index_ma20_deviation_pct": 1.0, "index_ma20_slope_5d_pct": -0.8},
+        ),
+    ) is False
+
+
 def test_backtest_can_filter_counterfactual_watch_route_by_market_route_pair():
     engine = BacktestEngine(
         BacktestConfig(
@@ -280,6 +1196,8 @@ def test_backtest_config_loads_route_execution_policy_v3_from_preset():
     cfg = load_config("攻_C_route_policy_v3")
 
     assert cfg.route_execution_policy["GREEN:dragon_head"]["priority"] == 85
+    assert cfg.route_execution_policy["YELLOW:pullback_to_ma20"]["position_pct"] == 0.11
+    assert cfg.route_execution_policy["YELLOW:volume_breakout"]["priority"] == 80
     assert cfg.route_execution_policy["RED:volume_breakout"]["position_pct"] == 0.066
     assert "RED:relative_strength_overheat" not in cfg.route_execution_policy
 
@@ -293,6 +1211,8 @@ def test_backtest_config_loads_route_policy_v3_weekly5_trail18_from_preset():
     assert cfg.trailing_stop == 0.18
     assert cfg.time_stop_days == 30
     assert cfg.route_execution_policy["GREEN:dragon_head"]["priority"] == 85
+    assert cfg.route_execution_policy["YELLOW:pullback_to_ma20"]["position_pct"] == 0.11
+    assert cfg.route_execution_policy["YELLOW:volume_breakout"]["priority"] == 80
     assert cfg.route_execution_policy["RED:volume_breakout"]["position_pct"] == 0.066
 
 
@@ -304,6 +1224,7 @@ def test_run_backtest_can_override_trailing_stop_without_new_preset(monkeypatch)
             captured["cfg"] = cfg
 
         def load_data(self, code_list, start, end, pre_start):
+            captured["pre_start"] = pre_start
             return {}
 
         def run(self):
@@ -323,6 +1244,7 @@ def test_run_backtest_can_override_trailing_stop_without_new_preset(monkeypatch)
     )
 
     assert result["trailing_stop"] == 0.18
+    assert captured["pre_start"] == "2024-04-16"
 
 
 def test_backtest_uses_market_specific_weekly_limit_when_present():
@@ -337,12 +1259,75 @@ def test_backtest_uses_market_specific_weekly_limit_when_present():
     assert engine._weekly_max_for_market(MarketState(signal=MarketSignal.YELLOW, multiplier=0.5)) == 2
 
 
-def test_backtest_route_policy_can_execute_watch_pair_with_own_score_floor_and_size():
+def test_backtest_route_policy_defaults_to_buy_only_and_does_not_execute_watch():
     engine = BacktestEngine(
         BacktestConfig(
             single_max_pct=0.22,
             route_execution_policy={
                 "YELLOW:shrink_pullback": {
+                    "score_min": 5.8,
+                    "position_pct": 0.11,
+                    "priority": 35,
+                }
+            },
+        )
+    )
+    intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.WATCH,
+        confidence=5.9,
+        score=5.9,
+        position_pct=0.0,
+        market_signal=MarketSignal.YELLOW,
+        market_multiplier=0.5,
+    )
+    market = MarketState(signal=MarketSignal.YELLOW, multiplier=0.5)
+
+    status = engine._intent_execution_status(
+        intent,
+        "002138",
+        "shrink_pullback",
+        score_total=5.9,
+    )
+    assert status == {"executable": False, "reason": "watch_not_enabled"}
+    assert engine._intent_executable_for_backtest(
+        intent,
+        "002138",
+        "shrink_pullback",
+        score_total=5.9,
+    ) is False
+
+    buy_intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.BUY,
+        confidence=6.6,
+        score=6.6,
+        position_pct=0.22,
+        market_signal=MarketSignal.YELLOW,
+        market_multiplier=0.5,
+    )
+    assert engine._intent_execution_status(
+        buy_intent,
+        "002138",
+        "shrink_pullback",
+        score_total=6.6,
+    ) == {"executable": True, "reason": "buy"}
+    assert engine._execution_position_pct(
+        buy_intent,
+        market,
+        route="shrink_pullback",
+    ) == 0.11
+
+
+def test_backtest_route_policy_can_execute_watch_pair_only_when_action_is_explicit():
+    engine = BacktestEngine(
+        BacktestConfig(
+            single_max_pct=0.22,
+            route_execution_policy={
+                "YELLOW:shrink_pullback": {
+                    "actions": ["WATCH"],
                     "score_min": 5.8,
                     "position_pct": 0.11,
                     "priority": 35,
@@ -385,6 +1370,40 @@ def test_backtest_route_policy_can_execute_watch_pair_with_own_score_floor_and_s
         market,
         route="shrink_pullback",
     ) == 0.11
+
+
+def test_backtest_explicit_watch_pair_overrides_buy_only_route_policy_for_research():
+    engine = BacktestEngine(
+        BacktestConfig(
+            single_max_pct=0.22,
+            route_execution_policy={
+                "YELLOW:shrink_pullback": {
+                    "score_min": 6.0,
+                    "position_pct": 0.11,
+                    "priority": 35,
+                }
+            },
+            execute_watch_trial_pairs=("YELLOW:shrink_pullback",),
+            execute_watch_trial_score_min=5.5,
+        )
+    )
+    intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.WATCH,
+        confidence=5.9,
+        score=5.9,
+        position_pct=0.0,
+        market_signal=MarketSignal.YELLOW,
+        market_multiplier=0.5,
+    )
+
+    assert engine._intent_execution_status(
+        intent,
+        "002138",
+        "shrink_pullback",
+        score_total=5.9,
+    ) == {"executable": True, "reason": "watch_trial_pair"}
 
 
 def test_backtest_route_policy_can_execute_trial_buy_with_own_score_floor_and_size():
@@ -432,7 +1451,7 @@ def test_backtest_route_policy_can_execute_trial_buy_with_own_score_floor_and_si
     ) == 0.11
 
 
-def test_backtest_route_policy_defaults_to_watch_only_for_trial_buy():
+def test_backtest_route_policy_defaults_to_buy_only_for_trial_buy():
     engine = BacktestEngine(
         BacktestConfig(
             route_execution_policy={
@@ -476,18 +1495,20 @@ def test_backtest_route_policy_priority_can_outrank_raw_score():
     shrink_intent = DecisionIntent(
         code="002138",
         name="双环传动",
-        action=Action.WATCH,
+        action=Action.BUY,
         confidence=6.0,
         score=6.0,
+        position_pct=0.11,
         market_signal=MarketSignal.YELLOW,
         market_multiplier=0.5,
     )
     short_intent = DecisionIntent(
         code="300475",
         name="香农芯创",
-        action=Action.WATCH,
+        action=Action.BUY,
         confidence=7.0,
         score=7.0,
+        position_pct=0.11,
         market_signal=MarketSignal.YELLOW,
         market_multiplier=0.5,
     )
@@ -542,6 +1563,165 @@ def test_backtest_execution_funnel_reports_zero_position_skip_by_market_route():
     )
 
 
+def test_backtest_execution_funnel_reports_decision_reason_counts():
+    engine = BacktestEngine(BacktestConfig())
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+    score = ScoreResult(
+        code="300475",
+        name="香农芯创",
+        total=6.7,
+        entry_signal=False,
+        primary_strategy_route="relative_strength_overheat",
+    )
+    intent = DecisionIntent(
+        code="300475",
+        name="香农芯创",
+        action=Action.WATCH,
+        confidence=6.7,
+        score=6.7,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+        market_multiplier=1.0,
+        notes=["入场信号未触发", "数据质量 degraded 低于要求 ok"],
+    )
+
+    engine._record_execution_funnel_intents("2026-01-02", [(score, intent)], market)
+    report = engine._build_report()
+
+    assert report["execution_funnel"]["decision_reasons"]["entry_signal_missing"] == 1
+    assert report["execution_funnel"]["decision_reasons"]["data_quality_below_min"] == 1
+    route_bucket = report["execution_funnel"]["by_market_route"]["GREEN:relative_strength_overheat"]
+    assert route_bucket["decision_reasons"]["entry_signal_missing"] == 1
+    assert route_bucket["decision_reasons"]["data_quality_below_min"] == 1
+
+
+def test_backtest_execution_funnel_reports_entry_and_veto_reason_counts():
+    engine = BacktestEngine(BacktestConfig())
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+    score = ScoreResult(
+        code="300475",
+        name="香农芯创",
+        total=0.0,
+        entry_signal=True,
+        primary_strategy_route="volume_breakout",
+        veto_triggered=True,
+        hard_veto=["below_ma20"],
+    )
+    intent = DecisionIntent(
+        code="300475",
+        name="香农芯创",
+        action=Action.CLEAR,
+        confidence=0.0,
+        score=0.0,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+        market_multiplier=1.0,
+        notes=["一票否决"],
+    )
+
+    engine._record_execution_funnel_intents("2026-01-02", [(score, intent)], market)
+    report = engine._build_report()
+
+    assert report["execution_funnel"]["entry_signal_total"] == 1
+    assert report["execution_funnel"]["veto_reasons"]["below_ma20"] == 1
+    route_bucket = report["execution_funnel"]["by_market_route"]["GREEN:volume_breakout"]
+    assert route_bucket["entry_signal_total"] == 1
+    assert route_bucket["veto_reasons"]["below_ma20"] == 1
+
+
+def test_backtest_execution_funnel_labels_missing_route_as_no_entry_route():
+    engine = BacktestEngine(BacktestConfig())
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+    score = ScoreResult(
+        code="300475",
+        name="香农芯创",
+        total=6.7,
+        entry_signal=False,
+        primary_strategy_route="",
+    )
+    intent = DecisionIntent(
+        code="300475",
+        name="香农芯创",
+        action=Action.WATCH,
+        confidence=6.7,
+        score=6.7,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+        market_multiplier=1.0,
+        notes=["入场信号未触发"],
+    )
+
+    engine._record_execution_funnel_intents("2026-01-02", [(score, intent)], market)
+    engine._record_signal_validation_rows("2026-01-02", [(score, intent)], market)
+    report = engine._build_report()
+
+    assert report["execution_funnel"]["routes"]["no_entry_route"] == 1
+    assert "unknown" not in report["execution_funnel"]["routes"]
+    assert report["execution_funnel"]["by_market_route"]["GREEN:no_entry_route"]["signals"] == 1
+    assert report["signal_validation"]["signals"][0]["primary_strategy_route"] == "no_entry_route"
+    assert report["signal_validation"]["unknown_route_count"] == 0
+
+
+def test_backtest_execution_funnel_labels_route_less_entry_signal_as_generic_route():
+    engine = BacktestEngine(BacktestConfig())
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+    score = ScoreResult(
+        code="300223",
+        name="北京君正",
+        total=3.6,
+        entry_signal=True,
+        primary_strategy_route="",
+    )
+    intent = DecisionIntent(
+        code="300223",
+        name="北京君正",
+        action=Action.WATCH,
+        confidence=3.6,
+        score=3.6,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+        market_multiplier=1.0,
+        notes=["市场制度禁止新开仓"],
+    )
+
+    engine._record_execution_funnel_intents("2026-06-03", [(score, intent)], market)
+    engine._record_signal_validation_rows("2026-06-03", [(score, intent)], market)
+    report = engine._build_report()
+
+    assert report["execution_funnel"]["routes"]["generic_entry_signal_watch"] == 1
+    assert "unknown" not in report["execution_funnel"]["routes"]
+    assert report["execution_funnel"]["by_market_route"]["GREEN:generic_entry_signal_watch"]["signals"] == 1
+    assert report["signal_validation"]["signals"][0]["primary_strategy_route"] == "generic_entry_signal_watch"
+    assert report["signal_validation"]["unknown_route_count"] == 0
+
+
+def test_backtest_report_labels_production_buy_only_execution_semantics():
+    engine = BacktestEngine(BacktestConfig())
+
+    report = engine._build_report()
+
+    assert report["execution_semantics"]["mode"] == "production_buy_only"
+    assert report["execution_semantics"]["route_policy_default_actions"] == ["BUY"]
+    assert report["execution_semantics"]["watch_trial_enabled"] is False
+
+
+def test_backtest_report_labels_research_watch_trial_execution_semantics():
+    engine = BacktestEngine(
+        BacktestConfig(
+            execute_watch_trial_pairs=("GREEN:relative_strength_overheat",),
+            watch_loss_cooldown_days=20,
+            watch_loss_cooldown_phase_buckets=("below_ma20_slope_up",),
+        )
+    )
+
+    report = engine._build_report()
+
+    assert report["execution_semantics"]["mode"] == "research_what_if"
+    assert report["execution_semantics"]["watch_trial_enabled"] is True
+    assert report["execution_semantics"]["watch_loss_cooldown_days"] == 20
+    assert report["execution_semantics"]["watch_loss_cooldown_phases"] == ["below_ma20_slope_up"]
+
+
 def test_backtest_report_can_skip_signal_alpha_summary_for_fast_execution_checks():
     engine = BacktestEngine(BacktestConfig(include_signal_alpha=False))
     engine._signal_records = [{"code": "300475", "primary_strategy_route": "relative_strength_overheat"}]
@@ -551,6 +1731,38 @@ def test_backtest_report_can_skip_signal_alpha_summary_for_fast_execution_checks
     assert report["signal_alpha"] == {"skipped": True, "sample_size": 1}
     assert report["signal_validation"]["sample_size"] == 1
     assert "execution_funnel" in report
+
+
+def test_backtest_report_keeps_full_trade_log_for_persistence():
+    engine = BacktestEngine(BacktestConfig(include_signal_alpha=False))
+    engine._trades = [
+        {
+            "date": "2026-01-02",
+            "code": f"60{index:04d}",
+            "name": f"样本{index}",
+            "side": "buy" if index % 2 == 0 else "sell",
+            "price": 10.0 + index,
+            "shares": 100,
+            "pnl": 0,
+            "return_pct": 0,
+        }
+        for index in range(60)
+    ]
+
+    report = engine._build_report()
+
+    assert len(report["trade_log"]) == 60
+    assert len(report["trades"]) == 50
+    assert report["trades"][0]["code"] == "600010"
+    assert report["trade_log"][0]["code"] == "600000"
+
+    engine.cfg.trade_record_limit = None
+    full_report = engine._build_report()
+    assert len(full_report["trades"]) == 60
+
+    engine.cfg.trade_record_limit = 0
+    empty_report = engine._build_report()
+    assert empty_report["trades"] == []
 
 
 def test_backtest_allocation_respects_total_position_limit():
@@ -622,6 +1834,50 @@ def test_backtest_load_data_can_skip_slow_financial_fetch(monkeypatch):
     assert called is False
 
 
+def test_backtest_load_data_uses_market_calendar_not_stock_date_intersection(monkeypatch):
+    def kline_for(dates: list[str], close_start: float) -> pd.DataFrame:
+        return pd.DataFrame({
+            "日期": dates,
+            "开盘": [close_start + i for i, _ in enumerate(dates)],
+            "最高": [close_start + i + 0.5 for i, _ in enumerate(dates)],
+            "最低": [close_start + i - 0.5 for i, _ in enumerate(dates)],
+            "收盘": [close_start + i for i, _ in enumerate(dates)],
+            "成交量": [1000000 + i for i, _ in enumerate(dates)],
+            "成交额": [10000000 + i for i, _ in enumerate(dates)],
+            "涨跌幅": [0.0 for _ in dates],
+            "证券名称": ["样本"] * len(dates),
+            "名称": ["样本"] * len(dates),
+        })
+
+    market_dates = ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]
+    klines = {
+        "000001": kline_for(market_dates, 3000.0),
+        "600036": kline_for(market_dates, 10.0),
+        "300803": kline_for(["2024-01-04", "2024-01-05"], 20.0),
+    }
+
+    class FakeBaoStockMarketAdapter:
+        async def get_kline(self, code, **kwargs):
+            return klines[code].copy()
+
+    monkeypatch.setattr(
+        market_adapters,
+        "BaoStockMarketAdapter",
+        lambda: FakeBaoStockMarketAdapter(),
+    )
+
+    engine = BacktestEngine(BacktestConfig(load_financials=False))
+
+    result = engine.load_data(["600036", "300803"], "2024-01-02", "2024-01-05", "2023-10-01")
+
+    assert result["loaded"] == 2
+    assert result["trading_days"] == 4
+    assert engine._sorted_dates == market_dates
+    assert engine._close_on_or_before(engine._bars["600036"], "2024-01-02") == 10.0
+    assert engine._close_on_or_before(engine._bars["300803"], "2024-01-02") is None
+    assert engine._close_on_or_before(engine._bars["300803"], "2024-01-04") == 20.0
+
+
 def test_backtest_progress_log_writes_to_stderr(capsys):
     engine = BacktestEngine(BacktestConfig(progress_log=True))
 
@@ -685,10 +1941,8 @@ def test_backtest_load_data_fetches_final_date_range_with_no_row_cap(monkeypatch
     assert all(item["count"] == 0 for item in stock_calls)
 
 
-def test_backtest_load_data_uses_market_bars_cache_when_available(tmp_path, monkeypatch):
-    db_path = tmp_path / "astock_trading.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_backtest_load_data_uses_market_bars_cache_when_available(mysql_conn, monkeypatch):
+    conn = mysql_conn
     try:
         store = MarketStore(conn)
         cached = pd.DataFrame({
@@ -726,10 +1980,8 @@ def test_backtest_load_data_uses_market_bars_cache_when_available(tmp_path, monk
         conn.close()
 
 
-def test_backtest_load_data_hydrates_market_bars_after_remote_fetch(tmp_path, monkeypatch):
-    db_path = tmp_path / "astock_trading.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_backtest_load_data_hydrates_market_bars_after_remote_fetch(mysql_conn, monkeypatch):
+    conn = mysql_conn
     try:
         kline = pd.DataFrame({
             "日期": ["2024-01-02", "2025-12-31"],
@@ -773,10 +2025,8 @@ def test_backtest_load_data_hydrates_market_bars_after_remote_fetch(tmp_path, mo
         conn.close()
 
 
-def test_backtest_load_financials_uses_cached_snapshot(tmp_path):
-    db_path = tmp_path / "astock_trading.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_backtest_load_financials_uses_cached_snapshot(mysql_conn):
+    conn = mysql_conn
     try:
         store = MarketStore(conn)
         store.save_financial_snapshot(

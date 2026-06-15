@@ -140,7 +140,7 @@ class ProjectionUpdater:
 
             if pos_data:
                 self._conn.execute(
-                    """INSERT OR REPLACE INTO projection_positions
+                    """REPLACE INTO projection_positions
                        (code, name, style, shares, avg_cost_cents, cost_basis_cents, entry_date,
                         entry_day_low_cents, highest_since_entry_cents,
                         current_price_cents, unrealized_pnl_cents, updated_at)
@@ -202,7 +202,7 @@ class ProjectionUpdater:
 
             if order_data:
                 self._conn.execute(
-                    """INSERT OR REPLACE INTO projection_orders
+                    """REPLACE INTO projection_orders
                        (order_id, code, side, shares, price_cents, status,
                         broker, created_at, filled_at, updated_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -238,7 +238,7 @@ class ProjectionUpdater:
             ma60_pct = ((price / ma60 - 1) * 100) if price and ma60 and ma60 > 0 else None
             
             self._conn.execute(
-                """INSERT OR REPLACE INTO projection_market_state
+                """REPLACE INTO projection_market_state
                    (index_symbol, name, `signal`, price_cents, change_pct,
                     ma20_pct, ma60_pct, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -274,7 +274,7 @@ class ProjectionUpdater:
                 ma20_pct = ((price / ma20 - 1) * 100) if price and ma20 and ma20 > 0 else None
                 ma60_pct = ((price / ma60 - 1) * 100) if price and ma60 and ma60 > 0 else None
                 self._conn.execute(
-                    """INSERT OR REPLACE INTO projection_market_state
+                    """REPLACE INTO projection_market_state
                        (index_symbol, name, `signal`, price_cents, change_pct,
                         ma20_pct, ma60_pct, updated_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -334,7 +334,7 @@ class ProjectionUpdater:
                 continue
             tier = entry.get("pool_tier", entry.get("bucket", "watch"))
             self._conn.execute(
-                """INSERT OR REPLACE INTO projection_candidate_pool
+                """REPLACE INTO projection_candidate_pool
                    (code, pool_tier, name, score, added_at, last_scored_at,
                     streak_days, note)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -406,7 +406,7 @@ class ProjectionUpdater:
         count = 0
         for entry in candidates.values():
             self._conn.execute(
-                """INSERT OR REPLACE INTO projection_candidate_pool
+                """REPLACE INTO projection_candidate_pool
                    (code, pool_tier, name, score, added_at, last_scored_at,
                     streak_days, note)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -441,7 +441,7 @@ class ProjectionUpdater:
         """同步 projection_balances。"""
         now = _now_iso()
         self._conn.execute(
-            """INSERT OR REPLACE INTO projection_balances
+            """REPLACE INTO projection_balances
                (scope, cash_cents, total_asset_cents, weekly_buy_count,
                 daily_pnl_cents, consecutive_loss_days, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -474,7 +474,7 @@ class ProjectionUpdater:
 
         for row in balances.values():
             self._conn.execute(
-                """INSERT OR REPLACE INTO projection_balances
+                """REPLACE INTO projection_balances
                    (scope, cash_cents, total_asset_cents, weekly_buy_count,
                     daily_pnl_cents, consecutive_loss_days, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -520,7 +520,7 @@ class ProjectionUpdater:
 
             metadata = ev.get("metadata", {})
             self._conn.execute(
-                """INSERT OR REPLACE INTO report_artifacts
+                """REPLACE INTO report_artifacts
                    (artifact_id, run_id, report_type, format, content, delivered_to, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (

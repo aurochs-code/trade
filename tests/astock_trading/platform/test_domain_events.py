@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.events import EventStore
 
 
@@ -30,28 +29,23 @@ def test_domain_event_names_are_stable():
     assert events.CANDIDATE_ADDED == "candidate.added"
 
 
-def test_domain_event_publisher_appends_event(tmp_path):
+def test_domain_event_publisher_appends_event(mysql_conn):
     from astock_trading.platform.domain_events import DomainEvent, DomainEventPublisher, SCORE_CALCULATED
 
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
     store = EventStore(conn)
     publisher = DomainEventPublisher(store)
 
-    try:
-        event_id = publisher.publish(
-            DomainEvent(
-                stream="strategy:002138",
-                stream_type="strategy",
-                event_type=SCORE_CALCULATED,
-                payload={"code": "002138", "total_score": 7.1},
-                metadata={"run_id": "run_1"},
-            )
+    event_id = publisher.publish(
+        DomainEvent(
+            stream="strategy:002138",
+            stream_type="strategy",
+            event_type=SCORE_CALCULATED,
+            payload={"code": "002138", "total_score": 7.1},
+            metadata={"run_id": "run_1"},
         )
-        rows = store.query(event_type=SCORE_CALCULATED)
-    finally:
-        conn.close()
+    )
+    rows = store.query(event_type=SCORE_CALCULATED)
 
     assert event_id
     assert rows[0]["payload"]["code"] == "002138"

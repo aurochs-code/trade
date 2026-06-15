@@ -1,0 +1,50 @@
+strategy:
+  scoring:
+    thresholds:
+      buy: 6.2
+      watch: 5.0
+      reject: 4.0
+    decision_gates:
+      require_entry_signal_for_buy: true
+      min_data_quality_for_buy: ok
+      max_missing_fields_for_buy: 0
+      critical_missing_fields_for_buy: []
+      min_position_pct_for_buy: 0.01
+      trial_buy_threshold: 6.0
+      trial_buy_entry_signal_threshold: 5.7
+    market_regime_overlays:
+      GREEN:
+        buy_threshold: 6.8
+        allow_trial_buy: false
+      YELLOW:
+        buy_threshold: 6.4
+        allow_trial_buy: false
+        disabled_trial_routes: [trend_cooling_off, shrink_pullback]
+      RED:
+        buy_threshold: 7.0
+        allow_trial_buy: true
+        enabled_trial_routes: [pullback_to_ma20]
+      CLEAR:
+        buy_threshold: 7.2
+        allow_trial_buy: false
+        disabled_trial_routes: [trend_cooling_off, shrink_pullback]
+    route_execution_policy:
+      YELLOW:pullback_to_ma20:
+        score_min: 6.2
+        position_pct: 0.08
+        priority: 70
+      YELLOW:volume_breakout:
+        score_min: 6.4
+        position_pct: 0.08
+        priority: 75
+      RED:pullback_to_ma20:
+        score_min: 6.0
+        position_pct: 0.066
+        priority: 65
+  pool_management:
+    promote_min_score: 6.2
+    promote_streak_days: 2
+    entry_signal_promote_streak_days: 1
+  auto_trade:
+    enabled: true
+    dry_run: true

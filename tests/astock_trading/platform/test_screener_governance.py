@@ -22,7 +22,6 @@ from astock_trading.platform.cli.screener import (
     _scan_limit,
     _watch_threshold,
 )
-from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.events import EventStore
 from astock_trading.reporting.projectors import ProjectionUpdater
 
@@ -58,10 +57,8 @@ def test_refresh_scan_limit_uses_operational_budget_without_narrowing_run_scan()
     assert _scan_limit({"market_scan_limit": 300}, None, refresh_pool=True) == 10
 
 
-def test_candidate_rows_include_latest_entry_signal_and_strategy_route(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_candidate_rows_include_latest_entry_signal_and_strategy_route(mysql_conn):
+    conn = mysql_conn
     try:
         event_store = EventStore(conn)
         ProjectionUpdater(event_store, conn).sync_candidate_pool([
@@ -100,13 +97,11 @@ def test_candidate_rows_include_latest_entry_signal_and_strategy_route(tmp_path)
         conn.close()
 
 
-def test_refresh_applies_score_limit_after_hot_and_existing_recall(tmp_path, monkeypatch):
+def test_refresh_applies_score_limit_after_hot_and_existing_recall(mysql_conn, monkeypatch):
     from astock_trading.market.store import MarketStore
     from astock_trading.platform import cli as cli_package
 
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
     store = MarketStore(conn)
     store.save_observation(
         "astock_signal",
@@ -604,10 +599,8 @@ def test_build_screener_iteration_plan_keeps_guardrails_and_next_command():
     assert payload["guardrails"]["manual_confirmation_required"] is True
 
 
-def test_record_screener_iteration_appends_strategy_event(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_record_screener_iteration_appends_strategy_event(mysql_conn):
+    conn = mysql_conn
     try:
         store = EventStore(conn)
         ctx = SimpleNamespace(event_store=store)
@@ -645,10 +638,8 @@ def test_screener_iterate_help_via_bin_trade():
     assert "--json" in result.stdout
 
 
-def test_add_watch_candidates_records_candidate_event(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_add_watch_candidates_records_candidate_event(mysql_conn):
+    conn = mysql_conn
     try:
         store = EventStore(conn)
         ctx = SimpleNamespace(
@@ -681,10 +672,8 @@ def test_add_watch_candidates_records_candidate_event(tmp_path):
         conn.close()
 
 
-def test_refresh_replays_existing_candidates_into_governed_pool(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_refresh_replays_existing_candidates_into_governed_pool(mysql_conn):
+    conn = mysql_conn
     try:
         store = EventStore(conn)
         projector = ProjectionUpdater(store, conn)
@@ -782,10 +771,8 @@ def test_refresh_replays_existing_candidates_into_governed_pool(tmp_path):
         conn.close()
 
 
-def test_refresh_adds_near_watch_score_to_radar_pool(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_refresh_adds_near_watch_score_to_radar_pool(mysql_conn):
+    conn = mysql_conn
     try:
         store = EventStore(conn)
         ctx = SimpleNamespace(
@@ -917,12 +904,10 @@ def test_refresh_scoring_candidates_can_recall_recent_entry_signal():
     }
 
 
-def test_hot_recall_candidates_reads_recent_hot_stock_observations(tmp_path):
+def test_hot_recall_candidates_reads_recent_hot_stock_observations(mysql_conn):
     from astock_trading.market.store import MarketStore
 
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
     try:
         store = MarketStore(conn)
         store.save_observation(
@@ -962,10 +947,8 @@ def test_hot_recall_candidates_reads_recent_hot_stock_observations(tmp_path):
         conn.close()
 
 
-def test_recent_signal_recall_candidates_reads_entry_and_near_watch_scores(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_recent_signal_recall_candidates_reads_entry_and_near_watch_scores(mysql_conn):
+    conn = mysql_conn
     try:
         store = EventStore(conn)
         store.append(
@@ -1048,10 +1031,8 @@ def test_recent_signal_recall_candidates_reads_entry_and_near_watch_scores(tmp_p
         conn.close()
 
 
-def test_refresh_requires_promote_streak_before_core_promotion(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_refresh_requires_promote_streak_before_core_promotion(mysql_conn):
+    conn = mysql_conn
     try:
         store = EventStore(conn)
         projector = ProjectionUpdater(store, conn)
@@ -1128,10 +1109,8 @@ def test_refresh_requires_promote_streak_before_core_promotion(tmp_path):
         conn.close()
 
 
-def test_refresh_requires_entry_strategy_route_before_core_promotion(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_refresh_requires_entry_strategy_route_before_core_promotion(mysql_conn):
+    conn = mysql_conn
     try:
         store = EventStore(conn)
         projector = ProjectionUpdater(store, conn)
@@ -1213,10 +1192,8 @@ def test_refresh_requires_entry_strategy_route_before_core_promotion(tmp_path):
         conn.close()
 
 
-def test_refresh_can_promote_entry_route_with_shorter_entry_streak(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_refresh_can_promote_entry_route_with_shorter_entry_streak(mysql_conn):
+    conn = mysql_conn
     try:
         store = EventStore(conn)
         projector = ProjectionUpdater(store, conn)

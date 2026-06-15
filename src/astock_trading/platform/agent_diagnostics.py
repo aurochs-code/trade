@@ -592,13 +592,23 @@ def diagnose_strategy(conn: Any) -> dict:
     need_multiple_profiles = bool(continuation and backtest_presets)
     current_profile = os.getenv("ASTOCK_CONFIG_PROFILE", "default")
     available_profiles = _available_strategy_profiles()
-    required_profiles = {"trend_swing", "short_continuation", "defensive_watch"}
+    required_profiles = {
+        "trend_swing",
+        "short_continuation",
+        "weak_sideways",
+        "defensive_watch",
+    }
     profiles_available = required_profiles.issubset({item["name"] for item in available_profiles})
+    market_regime_profile_guidance = _market_regime_profile_guidance(
+        conn,
+        current_profile=current_profile,
+    )
     execution_profile = _strategy_execution_profile_state(
         conn,
         current_profile=current_profile,
         need_multiple_profiles=need_multiple_profiles,
         profiles_available=profiles_available,
+        target_profile=str(market_regime_profile_guidance.get("activation_profile") or "trend_swing"),
     )
     actionable_state = _actionable_state_with_execution_profile(actionable_state, execution_profile)
     recommendations = _recommendations_with_execution_profile(recommendations, execution_profile)
@@ -627,6 +637,7 @@ def diagnose_strategy(conn: Any) -> dict:
         "findings": findings,
         "recommendations": _dedupe(recommendations),
         "candidate_flow": candidate_flow,
+        "market_regime_profile_guidance": market_regime_profile_guidance,
         "actionable_state": actionable_state,
         "inputs": {
             "weights": weights,
@@ -671,6 +682,17 @@ def diagnose_strategy(conn: Any) -> dict:
                     },
                 },
                 {
+                    "name": "weak_sideways",
+                    "purpose": "weak or sideways regime route-gated small-position validation",
+                    "use_when": "confirmed YELLOW/RED market snapshot after intraday or close refresh",
+                    "key_parameters": {
+                        "execution_allowed": "route-gated only",
+                        "yellow_routes": ["pullback_to_ma20", "volume_breakout"],
+                        "red_routes": ["pullback_to_ma20"],
+                        "auto_trade_dry_run": True,
+                    },
+                },
+                {
                     "name": "defensive_watch",
                     "purpose": "weak market observation-only mode",
                     "use_when": "market signal is RED/CLEAR or core pool is empty",
@@ -683,6 +705,107 @@ def diagnose_strategy(conn: Any) -> dict:
             ],
         },
     }
+
+
+_CONFIRMED_PROFILE_SWITCH_PHASES = {
+    "noon",
+    "intraday_monitor",
+    "scoring",
+    "evening",
+    "auto_trade",
+}
+
+
+def _market_regime_profile_guidance(conn: Any, *, current_profile: str) -> dict[str, Any]:
+    snapshot = _latest_market_history_snapshot(conn)
+    market_signal = str((snapshot.get("payload") or {}).get("signal") or "")
+    if not market_signal:
+        market_signal = _dominant_projection_market_signal(conn)
+    candidate_profile = _profile_for_market_signal(market_signal)
+    phase = str(snapshot.get("phase") or "")
+    switch_allowed = bool(
+        market_signal
+        and phase in _CONFIRMED_PROFILE_SWITCH_PHASES
+        and candidate_profile != "default"
+    )
+    if phase == "morning":
+        reason_key = "pre_market_reference_only"
+        reason = "盘前快照只代表前收/缓存参考，不允许据此切换弱市/震荡策略。"
+    elif not market_signal:
+        reason_key = "market_signal_missing"
+        reason = "暂无可确认的大盘综合信号，不生成策略切换建议。"
+    elif switch_allowed:
+        reason_key = "confirmed_market_snapshot"
+        reason = "已取得盘中或收盘确认快照，可作为人工复核 profile 切换依据。"
+    else:
+        reason_key = "confirmed_snapshot_required"
+        reason = "需要午间、盘中、评分或收盘快照确认后，才建议切换执行 profile。"
+
+    fallback_activation = current_profile if current_profile != "default" else "trend_swing"
+    activation_profile = candidate_profile if switch_allowed else fallback_activation
+    return {
+        "status": "ready" if switch_allowed else "reference_only",
+        "market_signal": market_signal or "UNKNOWN",
+        "snapshot_phase": phase or "",
+        "snapshot_created_at": snapshot.get("created_at") or "",
+        "candidate_profile": candidate_profile,
+        "activation_profile": activation_profile,
+        "current_profile": current_profile,
+        "switch_allowed": switch_allowed,
+        "reason_key": reason_key,
+        "reason": reason,
+        "guardrails": {
+            "auto_switch_profile": False,
+            "manual_approval_required": True,
+            "pre_market_snapshot_can_switch": False,
+        },
+    }
+
+
+def _latest_market_history_snapshot(conn: Any) -> dict[str, Any]:
+    try:
+        row = conn.execute(
+            """SELECT phase, payload_json, created_at
+               FROM signal_history_snapshots
+               WHERE snapshot_type = 'market'
+               ORDER BY created_at DESC
+               LIMIT 1"""
+        ).fetchone()
+    except Exception:
+        return {}
+    if not row:
+        return {}
+    return {
+        "phase": row["phase"],
+        "created_at": row["created_at"],
+        "payload": _decode_json(row["payload_json"]),
+    }
+
+
+def _dominant_projection_market_signal(conn: Any) -> str:
+    try:
+        rows = conn.execute(
+            """SELECT `signal`, COUNT(*) AS count
+               FROM projection_market_state
+               WHERE `signal` IS NOT NULL AND `signal` != ''
+               GROUP BY `signal`
+               ORDER BY count DESC
+               LIMIT 1"""
+        ).fetchall()
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    return str(rows[0]["signal"] or "")
+
+
+def _profile_for_market_signal(signal: str) -> str:
+    return {
+        "GREEN": "trend_swing",
+        "YELLOW": "weak_sideways",
+        "RED": "weak_sideways",
+        "CLEAR": "defensive_watch",
+    }.get(str(signal or ""), "trend_swing")
 
 
 def _strategy_diagnosis_summary(
@@ -939,9 +1062,9 @@ def _strategy_execution_profile_state(
     current_profile: str,
     need_multiple_profiles: bool,
     profiles_available: bool,
+    target_profile: str = "trend_swing",
 ) -> dict[str, Any]:
     if current_profile == "default" and need_multiple_profiles and profiles_available:
-        target_profile = "trend_swing"
         latest_request = latest_strategy_profile_activation_request(
             conn,
             target_profile=target_profile,
@@ -2064,6 +2187,7 @@ def _strategy_candidate_flow(
         missing_field_counts.update(str(field) for field in (payload.get("data_missing_fields") or []))
     for item in latest_decisions:
         decision_veto_counts.update(str(reason) for reason in (item["payload"].get("veto_reasons") or []))
+    buy_funnel = _buy_funnel_summary(latest_scores, latest_decisions)
 
     return {
         "pool": candidate_pool,
@@ -2097,11 +2221,119 @@ def _strategy_candidate_flow(
             "latest_usable_buy_signal": _latest_decision_with_action(usable_buy_events, "BUY"),
             "top_decisions": [_decision_summary(item) for item in _ranked_decision_events(latest_decisions)[:10]],
         },
+        "buy_funnel": buy_funnel,
         "automation": {
             "latest_summary": _latest_auto_trade_summary(conn),
             "schedule": diagnose_schedule(conn),
         },
     }
+
+
+def _buy_funnel_summary(
+    latest_scores: list[dict[str, Any]],
+    latest_decisions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    scores_by_code = {
+        str((event.get("payload") or {}).get("code") or ""): event.get("payload") or {}
+        for event in latest_scores
+        if (event.get("payload") or {}).get("code")
+    }
+    reason_counts: Counter[str] = Counter()
+    gate_status_counts: dict[str, Counter[str]] = {}
+    route_policy_counts: Counter[str] = Counter()
+    market_regime_counts: Counter[str] = Counter()
+    top_blocked: list[dict[str, Any]] = []
+
+    for event in latest_decisions:
+        payload = event.get("payload") or {}
+        code = str(payload.get("code") or "")
+        funnel = payload.get("buy_funnel") or _fallback_buy_funnel(payload, scores_by_code.get(code, {}))
+        for reason in funnel.get("decision_reason_keys") or []:
+            reason_counts.update([str(reason)])
+        gates = funnel.get("gates") or {}
+        for gate_name, gate in gates.items():
+            if not isinstance(gate, dict):
+                continue
+            status = str(gate.get("status") or "unknown")
+            gate_status_counts.setdefault(str(gate_name), Counter()).update([status])
+            if gate_name == "route_policy":
+                route_policy_counts.update([status])
+            if gate_name == "market_regime":
+                market_regime_counts.update([status])
+        if str(payload.get("action") or "") != "BUY":
+            blocked = _decision_summary(event)
+            blocked["buy_funnel"] = funnel
+            top_blocked.append(blocked)
+
+    top_blocked = sorted(
+        top_blocked,
+        key=lambda item: (_score_value(item), str(item.get("occurred_at") or "")),
+        reverse=True,
+    )[:10]
+    return {
+        "reason_counts": dict(reason_counts.most_common()),
+        "gate_status_counts": {
+            gate: dict(counter.most_common())
+            for gate, counter in sorted(gate_status_counts.items())
+        },
+        "route_policy_counts": dict(route_policy_counts.most_common()),
+        "market_regime_counts": dict(market_regime_counts.most_common()),
+        "top_blocked": top_blocked,
+    }
+
+
+def _fallback_buy_funnel(decision_payload: dict[str, Any], score_payload: dict[str, Any]) -> dict[str, Any]:
+    reason_keys: list[str] = []
+    veto_reasons = list(decision_payload.get("veto_reasons") or [])
+    hard_veto = list(score_payload.get("hard_veto_signals") or [])
+    reason_keys.extend(veto_reasons or hard_veto)
+    if not _truthy(score_payload.get("entry_signal")):
+        reason_keys.append("entry_signal_missing")
+    market_signal = str(decision_payload.get("market_signal") or "")
+    if market_signal in {"RED", "CLEAR"}:
+        reason_keys.append("market_blocks_new_positions")
+    primary_route = (
+        decision_payload.get("primary_strategy_route")
+        or score_payload.get("primary_strategy_route")
+    )
+    if primary_route:
+        reason_keys.append("route_policy_unknown")
+    return {
+        "version": 0,
+        "status": "executable_buy" if decision_payload.get("action") == "BUY" else "unknown",
+        "action": decision_payload.get("action"),
+        "decision_reason_keys": _dedupe_strings(reason_keys),
+        "gates": {
+            "hard_veto": {
+                "status": "blocked" if (veto_reasons or hard_veto) else "unknown",
+                "reasons": veto_reasons or hard_veto,
+            },
+            "entry_signal": {
+                "status": "pass" if _truthy(score_payload.get("entry_signal")) else "unknown",
+                "triggered": _truthy(score_payload.get("entry_signal")),
+            },
+            "market_regime": {
+                "status": "blocked" if market_signal in {"RED", "CLEAR"} else "unknown",
+                "signal": market_signal,
+            },
+            "route_policy": {
+                "status": "unknown" if primary_route else "no_route",
+                "primary_route": primary_route,
+            },
+        },
+    }
+
+
+def _dedupe_strings(values: list[Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
 
 
 def _strategy_actionable_state(candidate_flow: dict[str, Any]) -> dict[str, Any]:

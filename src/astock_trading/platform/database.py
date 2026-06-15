@@ -1,4 +1,4 @@
-"""Runtime database settings and SQLAlchemy-backed compatibility connection."""
+"""Runtime MySQL settings and SQLAlchemy-backed direct-SQL connection."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
+from sqlalchemy.engine import make_url
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
@@ -30,11 +31,16 @@ class DatabaseSettings:
                 "ASTOCK_DATABASE_URL is required for runtime DB access. "
                 "Set it to mysql+pymysql://user:password@host:3306/database."
             )
+        parsed = make_url(url)
+        if parsed.drivername != "mysql+pymysql":
+            raise MissingDatabaseUrl(
+                "ASTOCK_DATABASE_URL must use mysql+pymysql://user:password@host:3306/database."
+            )
         return cls(url=url)
 
 
 class CompatRow:
-    """Small sqlite.Row-like wrapper for DBAPI tuples."""
+    """Small row wrapper for DBAPI tuples."""
 
     def __init__(self, keys: list[str], values: tuple[Any, ...]):
         self._keys = keys
@@ -112,6 +118,10 @@ class SQLAlchemyCompatConnection:
         self._engine = engine
         self._raw = engine.raw_connection()
         self._dialect = engine.dialect.name
+        if not self._dialect.startswith("mysql"):
+            raise MissingDatabaseUrl(
+                "Runtime database must be MySQL. Set ASTOCK_DATABASE_URL to mysql+pymysql://..."
+            )
         self._in_tx = False
 
     @property
@@ -121,7 +131,7 @@ class SQLAlchemyCompatConnection:
     def execute(self, sql: str, params: Any = None) -> CompatResult:
         statement = sql.strip()
         upper = statement.upper()
-        if upper in {"BEGIN", "BEGIN IMMEDIATE"}:
+        if upper == "BEGIN":
             self._begin()
             return CompatResult([], [])
         if upper == "COMMIT":
@@ -178,7 +188,7 @@ class SQLAlchemyCompatConnection:
     def _begin(self) -> None:
         cursor = self._raw.cursor()
         try:
-            cursor.execute("START TRANSACTION" if self._dialect.startswith("mysql") else "BEGIN")
+            cursor.execute("START TRANSACTION")
             self._in_tx = True
         finally:
             cursor.close()
@@ -190,17 +200,12 @@ class SQLAlchemyCompatConnection:
         return list(cursor.fetchall()), keys
 
     def _translate_sql(self, sql: str) -> str:
-        if not self._dialect.startswith("mysql"):
-            return sql
-
         sql = re.sub(
             r"json_extract\((\w+), '\$\.(\w+)'\)",
             r"JSON_UNQUOTE(JSON_EXTRACT(\1, '$.\2'))",
             sql,
             flags=re.IGNORECASE,
         )
-        sql = sql.replace("INSERT OR REPLACE", "REPLACE")
-        sql = sql.replace("INSERT OR IGNORE", "INSERT IGNORE")
         sql = re.sub(r"\bAUTOINCREMENT\b", "AUTO_INCREMENT", sql, flags=re.IGNORECASE)
         return sql.replace("?", "%s")
 

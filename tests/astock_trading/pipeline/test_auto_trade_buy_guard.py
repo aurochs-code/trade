@@ -15,7 +15,6 @@ from astock_trading.pipeline.auto_trade import (
     run,
 )
 from astock_trading.pipeline.paper_account import PaperBalance, PaperPosition
-from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.events import EventStore
 from astock_trading.platform.time import MARKET_TZ
 from astock_trading.strategy.models import MarketSignal, MarketState
@@ -148,10 +147,8 @@ class FakeObsidian:
 
 
 @pytest.fixture
-def auto_trade_ctx(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def auto_trade_ctx(mysql_conn):
+    conn = mysql_conn
     ctx = SimpleNamespace(
         conn=conn,
         event_store=FakeEventStore(),
@@ -196,10 +193,8 @@ def _set_trading_now(monkeypatch, *, hour: int = 10, minute: int = 0) -> datetim
     return trade_time.astimezone(timezone.utc)
 
 
-def test_highest_since_entry_uses_local_market_bars(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_highest_since_entry_uses_local_market_bars(mysql_conn):
+    conn = mysql_conn
     try:
         conn.execute(
             """INSERT INTO market_bars

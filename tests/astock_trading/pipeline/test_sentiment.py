@@ -2,7 +2,6 @@
 
 from types import SimpleNamespace
 
-from astock_trading.platform.db import connect, init_db
 
 from astock_trading.pipeline.sentiment import (
     _classify_item,
@@ -220,10 +219,8 @@ class TestExtractBrief:
         assert _extract_brief(None) == ""
 
 
-def test_sentiment_watch_stocks_includes_positions_and_all_candidate_tiers(tmp_path):
-    db_path = tmp_path / "sentiment.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_sentiment_watch_stocks_includes_positions_and_all_candidate_tiers(mysql_conn):
+    conn = mysql_conn
     try:
         conn.executemany(
             """INSERT INTO projection_candidate_pool

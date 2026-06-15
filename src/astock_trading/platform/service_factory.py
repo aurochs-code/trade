@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Optional
 
 from astock_trading.execution.service import ExecutionService
@@ -124,8 +123,8 @@ def build_market_service(conn: Any, store: Optional[MarketStore] = None) -> Mark
     )
     return MarketService(
         market_providers=[
-            MXMarketAdapter(),
             *tushare_market_providers,
+            MXMarketAdapter(),
             AStockSignalAdapter(),
             OpenCliFinanceAdapter(),
             MootdxMarketAdapter(),
@@ -199,10 +198,10 @@ def build_execution_service(
     )
 
 
-def build_runtime_services(db_path: Optional[Path] = None) -> RuntimeServices:
+def build_runtime_services() -> RuntimeServices:
     """Build the full service graph for a single operational runtime."""
-    init_db(db_path)
-    conn = connect(db_path)
+    init_db()
+    conn = connect()
     event_store = EventStore(conn)
     run_journal = RunJournal(conn)
     config_snapshot, cfg = load_config_snapshot(conn)

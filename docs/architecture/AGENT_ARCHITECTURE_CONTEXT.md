@@ -14,8 +14,8 @@
 - 源码 checkout 内开发验证：可以使用 `bin/trade ...` 和 `bin/trade mcp`
 - 自动化输出：优先使用 `--json`
 - 不要直接执行 `src/astock_trading/**/*.py`
-- 运行库只通过 `ASTOCK_DATABASE_URL` 连接 MySQL
-- SQLite 只用于测试替身和历史迁移源：`atrade db migrate-sqlite-to-mysql --sqlite-path PATH_TO_ARCHIVED_SQLITE_DB`
+- 运行库只通过 `ASTOCK_DATABASE_URL=mysql+pymysql://...` 连接 MySQL
+- 不再维护 SQLite 运行、测试替身或历史迁移入口；不要使用本地 `.db` 文件作为运行库
 - 执行类任务不要自行切换 `ASTOCK_CONFIG_PROFILE`，除非用户明确批准
 
 快速自检入口：
@@ -71,11 +71,13 @@ atrade db check --json
 
 当前付费主数据源策略：
 
-- MX 是实时/日线级行情、指数行情和选股搜索主入口。
 - Tushare SDK 是 A 股日线/复权 K 线、指数日线、每日指标、财务指标、个股资金流、
-  股票基础信息、龙虎榜、限售解禁和沪深股通持股等常规积分接口主源。
-- `ASTOCK_TUSHARE_TOKEN` 存在时，provider 顺序为 MX / Tushare 优先，AkShare、Baidu、
-  BaoStock、OpenCli、Mootdx 等只作为 fallback。
+  股票基础信息、龙虎榜、限售解禁、沪深股通持股，以及可用时的同花顺热榜 L2
+  行业/概念上下文主源。
+- MX 是实时/日线级行情、指数行情、选股搜索和情绪数据的重要补充源；当 Tushare
+  token 不存在或具体接口不可用时，MX 继续承担 market fallback。
+- `ASTOCK_TUSHARE_TOKEN` 存在时，A 股 market / financial / fund_flow 的 provider
+  顺序为 Tushare 优先，MX、AkShare、Baidu、BaoStock、OpenCli、Mootdx 等作为 fallback。
 - Tushare token 不写入代码、文档、测试或日志；运行时从 `.env` / 环境变量读取。
 - Tushare 6000 积分档只按常规积分接口使用；分钟、新闻、公告、特色数据仍需按官方独立权限
   或更高积分要求单独开通，不能在代码里默认可用。

@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from astock_trading.pipeline.adaptive_risk import run_adaptive_risk
-from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.events import EventStore
 
 
@@ -18,7 +17,7 @@ def _seed_market_bars(conn, *, symbol: str = "000001", days: int = 20, intraday_
         high_cents = int(close_cents * (1 + half_range))
         low_cents = int(close_cents * (1 - half_range))
         conn.execute(
-            """INSERT OR REPLACE INTO market_bars
+            """REPLACE INTO market_bars
                (symbol, bar_date, period, open_cents, high_cents, low_cents, close_cents,
                 volume, amount_cents, source, fetched_at)
                VALUES (?, ?, 'daily', ?, ?, ?, ?, 1000, 100000, 'test', ?)""",
@@ -52,10 +51,8 @@ def _append_balance(store: EventStore, *, total_asset_cents: int, loss_days: int
     )
 
 
-def test_adaptive_risk_suggests_wider_stop_lower_position_and_higher_buy_threshold(tmp_path):
-    db_path = tmp_path / "adaptive.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_adaptive_risk_suggests_wider_stop_lower_position_and_higher_buy_threshold(mysql_conn):
+    conn = mysql_conn
     try:
         store = EventStore(conn)
         _seed_market_bars(conn, intraday_range_pct=0.07)
@@ -82,10 +79,8 @@ def test_adaptive_risk_suggests_wider_stop_lower_position_and_higher_buy_thresho
     assert events[0]["payload"]["guardrails"]["manual_confirmation_required"] is True
 
 
-def test_adaptive_risk_reports_insufficient_data_without_guessing(tmp_path):
-    db_path = tmp_path / "empty.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_adaptive_risk_reports_insufficient_data_without_guessing(mysql_conn):
+    conn = mysql_conn
     try:
         payload = run_adaptive_risk(conn, lookback_days=20, record=False, config_version="v_test")
     finally:

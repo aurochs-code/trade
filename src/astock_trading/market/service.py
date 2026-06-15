@@ -104,6 +104,10 @@ def _provider_name(provider) -> str:
     return provider.__class__.__name__
 
 
+def _is_paid_l2_provider(provider) -> bool:
+    return _provider_name(provider).startswith("Tushare")
+
+
 def _provider_last_error(provider, symbol: str) -> dict | None:
     getter = getattr(provider, "get_last_error", None)
     if callable(getter):
@@ -148,6 +152,10 @@ def _snapshot_observation_payload(snapshot: StockSnapshot) -> dict:
             "has_sector": snapshot.sector is not None,
         },
     }
+
+
+def _technical_observation_payload(technical: TechnicalIndicators) -> dict:
+    return _jsonable_market_payload(technical)
 
 
 def _financial_has_data(report: FinancialReport) -> bool:
@@ -416,6 +424,7 @@ class MarketService:
 
             # 存储观测；即使本次抓取全量失败，也保留一次审计痕迹。
             if self._store and run_id:
+                self._save_technical_observation(code, technical, run_id=run_id)
                 observation_id = self._store.save_observation(
                     source="market_service",
                     kind="snapshot",
@@ -434,6 +443,7 @@ class MarketService:
         include_sector_context: bool = False,
         per_snapshot_timeout_seconds: float | None = None,
         sector_context_timeout_seconds: float | None = None,
+        paid_sector_context_only: bool = False,
     ) -> list[StockSnapshot]:
         """
         批量抓取（受 semaphore 限流）。
@@ -443,6 +453,7 @@ class MarketService:
             include_sector_context: 是否补充行业排名和相对强度上下文。
             per_snapshot_timeout_seconds: 单票完整快照总超时；超时后返回空快照继续整批。
             sector_context_timeout_seconds: 行业/概念上下文总超时；超时后保留原快照。
+            paid_sector_context_only: 行业上下文只走付费/可控 provider，避免免费网页解析崩溃拖垮评分。
         """
         async def _collect(item: dict) -> StockSnapshot:
             coro = self.collect_snapshot(item["code"], item.get("name", ""), run_id)
@@ -476,7 +487,14 @@ class MarketService:
 
         if include_sector_context:
             try:
-                sector_coro = self._attach_sector_context(snapshots, run_id)
+                if paid_sector_context_only:
+                    sector_coro = self._attach_sector_context(
+                        snapshots,
+                        run_id,
+                        paid_only=True,
+                    )
+                else:
+                    sector_coro = self._attach_sector_context(snapshots, run_id)
                 if sector_context_timeout_seconds and sector_context_timeout_seconds > 0:
                     snapshots = await asyncio.wait_for(
                         sector_coro,
@@ -496,15 +514,40 @@ class MarketService:
         self,
         snapshots: list[StockSnapshot],
         run_id: Optional[str] = None,
+        paid_only: bool = False,
     ) -> list[StockSnapshot]:
         if not snapshots:
             return []
 
+        providers = [
+            provider
+            for provider in self._market
+            if not paid_only or _is_paid_l2_provider(provider)
+        ]
+        if not providers:
+            return snapshots
+
         async def _collect_blocks(snapshot: StockSnapshot):
             async with self._sem:
-                return await self.collect_concept_blocks(snapshot.code, run_id=run_id)
+                return await self._collect_signal(
+                    "get_concept_blocks",
+                    snapshot.code,
+                    kind="concept_blocks",
+                    symbol=snapshot.code,
+                    default={"industry": [], "concept": [], "region": [], "concept_tags": []},
+                    run_id=run_id,
+                    providers_override=providers,
+                )
 
-        industry_task = self.collect_industry_comparison(top_n=80, run_id=run_id)
+        industry_task = self._collect_signal(
+            "get_industry_comparison",
+            80,
+            kind="industry_comparison",
+            symbol="cn_a",
+            default={"top": [], "bottom": [], "total": 0},
+            run_id=run_id,
+            providers_override=providers,
+        )
         block_tasks = [_collect_blocks(snapshot) for snapshot in snapshots]
         industry_result, *block_results = await asyncio.gather(
             industry_task,
@@ -650,6 +693,8 @@ class MarketService:
                     payload=payload,
                     run_id=run_id,
                 )
+
+            self._save_technical_observation(code, technical, run_id=run_id)
 
             snapshots.append(StockSnapshot(
                 code=code,
@@ -1024,6 +1069,11 @@ class MarketService:
 
     async def _get_technical(self, code: str, quote: Optional[StockQuote]) -> Optional[TechnicalIndicators]:
         """从 K 线计算技术指标。"""
+        if self._store:
+            cached = self._store.get_cached(code, "technical")
+            if cached:
+                return TechnicalIndicators(**cached)
+
         price_only_fallback: Optional[TechnicalIndicators] = None
         for provider in self._iter_kline_providers(code):
             try:
@@ -1039,6 +1089,22 @@ class MarketService:
                 _logger.info(f"[technical] {code} provider kline failed: {e}")
                 continue
         return price_only_fallback
+
+    def _save_technical_observation(
+        self,
+        code: str,
+        technical: Optional[TechnicalIndicators],
+        run_id: Optional[str] = None,
+    ) -> Optional[str]:
+        if self._store is None or technical is None:
+            return None
+        return self._store.save_observation(
+            source="market_service",
+            kind="technical",
+            symbol=code,
+            payload=_technical_observation_payload(technical),
+            run_id=run_id,
+        )
 
     def _iter_kline_providers(self, code: str):
         """为指定代码挑选合适的 K 线 provider。"""
@@ -1119,11 +1185,12 @@ class MarketService:
         symbol: str,
         default,
         run_id: Optional[str] = None,
+        providers_override: list | None = None,
         **kwargs,
     ):
         providers = [
             provider
-            for provider in self._market
+            for provider in (providers_override if providers_override is not None else self._market)
             if getattr(provider, method_name, None) is not None
         ]
         route = await self._source_router.route(
@@ -1152,6 +1219,36 @@ class MarketService:
                 )
             return data
         return default
+
+    def cached_observation_items(
+        self,
+        kind: str,
+        symbol: str,
+        limit: int = 20,
+        max_age_seconds: int | None = 36 * 3600,
+    ) -> list[dict]:
+        """读取最近一次 MySQL 观测中的列表项；不触发外部数据源。"""
+        if self._store is None:
+            return []
+        payload = self._store.get_latest_observation(
+            symbol,
+            kind,
+            max_age_seconds=max_age_seconds,
+        )
+        if not payload:
+            return []
+        if isinstance(payload, list):
+            rows = payload
+        elif isinstance(payload, dict):
+            rows = []
+            for key in ("items", "news", "announcements", "rows", "stocks"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    rows = value
+                    break
+        else:
+            rows = []
+        return [row for row in rows if isinstance(row, dict)][:max(0, int(limit or 0))]
 
     async def collect_hot_stocks(self, trade_date: str | None = None, run_id: Optional[str] = None) -> list[dict]:
         return await self._collect_signal(

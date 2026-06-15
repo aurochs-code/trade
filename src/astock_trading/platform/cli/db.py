@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import shutil
-import sqlite3
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -39,30 +36,6 @@ def _mysql_table_names(conn) -> list[str]:
 def _mysql_table_status(conn) -> list[dict[str, Any]]:
     rows = conn.execute("SHOW TABLE STATUS").fetchall()
     return [dict(row) for row in rows]
-
-
-def _event_payload_hash(rows) -> str:
-    def _normalize(value: Any) -> Any:
-        if isinstance(value, float):
-            return round(value, 12)
-        if isinstance(value, list):
-            return [_normalize(item) for item in value]
-        if isinstance(value, dict):
-            return {key: _normalize(item) for key, item in value.items()}
-        return value
-
-    def _canonical_json(value: Any) -> str:
-        if isinstance(value, str):
-            value = json.loads(value)
-        value = _normalize(value)
-        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-    hasher = hashlib.sha256()
-    for row in rows:
-        hasher.update(str(row["event_id"]).encode())
-        hasher.update(_canonical_json(row["payload_json"]).encode())
-        hasher.update(_canonical_json(row["metadata_json"]).encode())
-    return hasher.hexdigest()
 
 
 @db_app.command("init")
@@ -262,105 +235,3 @@ def db_optimize(
             typer.echo(f"Optimized {len(results)} table results")
     finally:
         conn.close()
-
-
-@db_app.command("migrate-sqlite-to-mysql")
-def db_migrate_sqlite_to_mysql(
-    sqlite_path: Path = typer.Option(..., "--sqlite-path", help="外部归档的源 SQLite DB"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="只检查源库并输出计划，不写入目标库"),
-    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
-):
-    """将历史 SQLite 数据迁移到当前 runtime DB（生产为 MySQL）。"""
-    tables = [
-        "config_versions",
-        "event_log",
-        "run_log",
-        "market_observations",
-        "market_bars",
-        "projection_positions",
-        "projection_orders",
-        "projection_balances",
-        "projection_candidate_pool",
-        "projection_market_state",
-        "report_artifacts",
-    ]
-    source = sqlite3.connect(str(sqlite_path))
-    source.row_factory = sqlite3.Row
-    try:
-        source_counts = {}
-        source_hash = ""
-        for table in tables:
-            try:
-                source_counts[table] = source.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            except sqlite3.OperationalError:
-                source_counts[table] = 0
-        try:
-            payloads = source.execute(
-                "SELECT event_id, payload_json, metadata_json FROM event_log ORDER BY occurred_at, stream_version"
-            ).fetchall()
-            source_hash = _event_payload_hash(payloads)
-        except sqlite3.OperationalError:
-            source_hash = ""
-
-        if dry_run:
-            json_or_text(
-                {
-                    "dry_run": True,
-                    "sqlite_path": str(sqlite_path),
-                    "source_counts": source_counts,
-                    "event_payload_hash": source_hash,
-                    "target": "not_written",
-                },
-                as_json,
-            )
-            return
-
-        _runtime_url()
-        init_db()
-        target = connect()
-        try:
-            for table in tables:
-                try:
-                    rows = source.execute(f"SELECT * FROM {table}").fetchall()
-                except sqlite3.OperationalError:
-                    rows = []
-                if not rows:
-                    continue
-                columns = rows[0].keys()
-                placeholders = ", ".join("?" for _ in columns)
-                column_sql = ", ".join(f"`{column}`" for column in columns)
-                sql = f"INSERT OR REPLACE INTO `{table}` ({column_sql}) VALUES ({placeholders})"
-                target.executemany(sql, [tuple(row[col] for col in columns) for row in rows])
-
-            target_counts = {}
-            for table in tables:
-                try:
-                    target_counts[table] = target.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                except Exception:
-                    target_counts[table] = 0
-            try:
-                target_payloads = target.execute(
-                    "SELECT event_id, payload_json, metadata_json FROM event_log ORDER BY occurred_at, stream_version"
-                ).fetchall()
-                target_hash = _event_payload_hash(target_payloads)
-            except Exception:
-                target_hash = ""
-            target.commit()
-        finally:
-            target.close()
-
-        result = {
-            "dry_run": False,
-            "sqlite_path": str(sqlite_path),
-            "source_counts": source_counts,
-            "target_counts": target_counts,
-            "counts_match": source_counts == target_counts,
-            "source_event_payload_hash": source_hash,
-            "target_event_payload_hash": target_hash,
-            "event_payload_hash_match": source_hash == target_hash,
-        }
-        json_or_text(result, as_json)
-        if not result["counts_match"] or not result["event_payload_hash_match"]:
-            raise typer.Exit(1)
-    finally:
-        source.close()

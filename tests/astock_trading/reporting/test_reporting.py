@@ -5,7 +5,6 @@ import pytest
 from astock_trading.execution.models import OrderSide
 from astock_trading.execution.orders import OrderManager
 from astock_trading.execution.positions import PositionManager
-from astock_trading.platform.db import init_db, connect
 from astock_trading.platform.domain_events import AUTO_TRADE_EXECUTED
 from astock_trading.platform.events import EventStore
 from astock_trading.reporting.discord import (
@@ -26,12 +25,8 @@ from astock_trading.reporting.screening_result import render_screening_result
 
 
 @pytest.fixture
-def db(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
-    yield conn
-    conn.close()
+def db(mysql_conn):
+    yield mysql_conn
 
 
 @pytest.fixture
@@ -854,6 +849,7 @@ class TestDiscordFormat:
     def test_morning_embed(self):
         embed = format_morning_embed({
             "date": "2026-04-14", "market_signal": "GREEN",
+            "market_signal_scope": "previous_close_reference",
             "market": {"上证指数": {"price": 3200.0, "chg_pct": 0.5}},
             "positions": [{"name": "双环传动", "shares": 100, "price": 15.0}],
             "core_pool": [{"name": "大金重工", "score": 7.5}],
@@ -876,6 +872,7 @@ class TestDiscordFormat:
             "market_announcements": [{"code": "603311", "name": "金海高科", "title": "复牌公告", "category": "复牌公告"}],
         })
         assert "偏强" in embed["description"]
+        assert "前收参考" in embed["description"]
         field_names = {field["name"] for field in embed["fields"]}
         assert {"雪球热搜", "跨平台热度", "财经快讯", "海外风险", "公告提示"} <= field_names
         field_values = "\n".join(field["value"] for field in embed["fields"])

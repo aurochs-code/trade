@@ -88,11 +88,7 @@ atrade db optimize --yes --json
 
 `db backup` 调用本机 `mysqldump`，密码通过 `MYSQL_PWD` 环境变量传给子进程，不放在命令行参数里。生产环境如有 RDS/云数据库快照，优先使用托管备份。
 
-历史 SQLite 已迁入 MySQL，不再保存在 checkout 内。如需重放迁移，只能显式传入外部归档的 SQLite 文件：
-
-```bash
-atrade db migrate-sqlite-to-mysql --sqlite-path PATH_TO_ARCHIVED_SQLITE_DB --json
-```
+历史 SQLite 迁移入口已移除；运行、运维和测试都应使用 `ASTOCK_DATABASE_URL=mysql+pymysql://...` 指向 MySQL。
 
 `runs cleanup-stale` 默认 dry-run。确认历史 running run 可以清理时再加 `--yes`。
 

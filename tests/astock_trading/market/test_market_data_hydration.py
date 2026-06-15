@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from astock_trading.platform.db import connect, init_db
 
 
 class FakeTushareClient:
@@ -19,15 +18,13 @@ class FakeTushareClient:
         return self.responses.get(api_name, [])
 
 
-def test_hydrate_tushare_daily_market_bars_writes_raw_daily_rows(tmp_path):
+def test_hydrate_tushare_daily_market_bars_writes_raw_daily_rows(mysql_conn):
     from astock_trading.market.data_hydration import (
         hydrate_tushare_daily_market_bars,
         summarize_price_bar_coverage,
     )
 
-    db_path = tmp_path / "hydrate.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
     client = FakeTushareClient({
         "trade_cal": [{"cal_date": "20260612"}],
         "daily:20260612": [
@@ -94,12 +91,10 @@ def test_hydrate_tushare_daily_market_bars_writes_raw_daily_rows(tmp_path):
         conn.close()
 
 
-def test_hydrate_tushare_daily_market_bars_dry_run_does_not_write(tmp_path):
+def test_hydrate_tushare_daily_market_bars_dry_run_does_not_write(mysql_conn):
     from astock_trading.market.data_hydration import hydrate_tushare_daily_market_bars
 
-    db_path = tmp_path / "dry-run.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
     client = FakeTushareClient({
         "trade_cal": [{"cal_date": "20260612"}],
         "daily:20260612": [{"ts_code": "000001.SZ", "trade_date": "20260612", "close": 10.5}],
@@ -122,12 +117,10 @@ def test_hydrate_tushare_daily_market_bars_dry_run_does_not_write(tmp_path):
         conn.close()
 
 
-def test_hydrate_tushare_daily_market_bars_rejects_qfq_adjustflag(tmp_path):
+def test_hydrate_tushare_daily_market_bars_rejects_qfq_adjustflag(mysql_conn):
     from astock_trading.market.data_hydration import hydrate_tushare_daily_market_bars
 
-    db_path = tmp_path / "qfq.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
     try:
         with pytest.raises(ValueError, match="Tushare daily"):
             hydrate_tushare_daily_market_bars(
@@ -141,13 +134,11 @@ def test_hydrate_tushare_daily_market_bars_rejects_qfq_adjustflag(tmp_path):
         conn.close()
 
 
-def test_select_backtest_universe_filters_for_liquid_volatile_codes(tmp_path):
+def test_select_backtest_universe_filters_for_liquid_volatile_codes(mysql_conn):
     from astock_trading.market.data_hydration import select_backtest_universe
     from astock_trading.market.store import MarketStore
 
-    db_path = tmp_path / "universe.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
     store = MarketStore(conn)
     try:
         rows = [

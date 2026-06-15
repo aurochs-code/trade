@@ -169,6 +169,80 @@ def test_signal_alpha_summary_reports_code_and_date_cluster_concentration():
     assert concentration["date_cluster_count"] == 2
 
 
+def test_signal_alpha_summary_groups_by_score_bucket_inside_market_route():
+    signals = [
+        {
+            "code": "A",
+            "signal_date": "2025-01-01",
+            "score": 4.7,
+            "primary_strategy_route": "trend_cooling_off",
+            "market_signal": "GREEN",
+            "forward_returns": {"20d": 0.08},
+        },
+        {
+            "code": "B",
+            "signal_date": "2025-01-02",
+            "score": 4.9,
+            "primary_strategy_route": "trend_cooling_off",
+            "market_signal": "GREEN",
+            "forward_returns": {"20d": 0.04},
+        },
+        {
+            "code": "C",
+            "signal_date": "2025-01-03",
+            "score": 5.2,
+            "primary_strategy_route": "trend_cooling_off",
+            "market_signal": "GREEN",
+            "forward_returns": {"20d": -0.03},
+        },
+    ]
+
+    report = signal_alpha_summary(signals, horizons=("20d",), bootstrap_iterations=40)
+
+    assert report["by_score_bucket"]["4.5-5.0"]["sample_size"] == 2
+    assert report["by_score_bucket"]["5.0-5.5"]["sample_size"] == 1
+    route_bucket = report["by_route_score_bucket"]["trend_cooling_off"]["4.5-5.0"]
+    assert route_bucket["horizons"]["20d"]["avg_return_pct"] == 6.0
+    market_route_bucket = report["by_market_route_score_bucket"]["GREEN"]["trend_cooling_off"]["5.0-5.5"]
+    assert market_route_bucket["sample_size"] == 1
+    assert market_route_bucket["horizons"]["20d"]["avg_return_pct"] == -3.0
+
+
+def test_signal_alpha_summary_groups_by_market_phase_route_score_bucket():
+    signals = [
+        {
+            "code": "A",
+            "signal_date": "2025-01-01",
+            "score": 4.2,
+            "primary_strategy_route": "trend_cooling_off",
+            "market_signal": "GREEN",
+            "market_context": {
+                "index_ma20_deviation_pct": 1.2,
+                "index_ma20_slope_5d_pct": 0.8,
+            },
+            "forward_returns": {"20d": 0.08},
+        },
+        {
+            "code": "B",
+            "signal_date": "2025-01-02",
+            "score": 4.4,
+            "primary_strategy_route": "trend_cooling_off",
+            "market_signal": "GREEN",
+            "market_context": {
+                "index_ma20_deviation_pct": 1.8,
+                "index_ma20_slope_5d_pct": 0.6,
+            },
+            "forward_returns": {"20d": 0.04},
+        },
+    ]
+
+    report = signal_alpha_summary(signals, horizons=("20d",), bootstrap_iterations=40)
+
+    bucket = report["by_market_phase_route_score_bucket"]["near_ma20_slope_up"]["trend_cooling_off"]["<4.5"]
+    assert bucket["sample_size"] == 2
+    assert bucket["horizons"]["20d"]["avg_return_pct"] == 6.0
+
+
 def test_compare_backtest_signal_reports_surfaces_win_rate_and_trade_delta():
     baseline = {
         "total_return_pct": 1.2,
@@ -236,17 +310,29 @@ def test_backtest_report_includes_signal_alpha_for_recorded_routes():
     engine._record_signal_validation_rows(
         dates[0],
         [(score, intent)],
-        MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
+        MarketState(
+            signal=MarketSignal.GREEN,
+            multiplier=1.0,
+            detail={
+                "index_ma20_deviation_pct": 1.2,
+                "index_ma20_slope_5d_pct": 0.8,
+                "above_ma20_days": 6,
+                "below_ma20_days": 0,
+            },
+        ),
     )
     report = engine._build_report()
 
     assert report["signal_alpha"]["overall"]["sample_size"] == 1
     assert report["signal_alpha"]["by_route"]["trend_cooling_off"]["sample_size"] == 1
     assert report["signal_alpha"]["overall"]["horizons"]["5d"]["avg_return_pct"] == 30.0
+    context = report["signal_validation"]["signals"][0]["market_context"]
+    assert context["index_ma20_deviation_pct"] == 1.2
+    assert context["market_phase_bucket"] == "near_ma20_slope_up"
     assert report["calmar_ratio"] == 0.0
 
 
-def test_backtest_report_samples_unknown_route_signals_for_classification():
+def test_backtest_report_samples_generic_entry_signals_for_classification():
     engine = BacktestEngine(BacktestConfig())
     dates = ["2026-01-02", "2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09"]
     engine._sorted_dates = dates
@@ -281,11 +367,12 @@ def test_backtest_report_samples_unknown_route_signals_for_classification():
     )
     report = engine._build_report()
 
-    assert report["signal_validation"]["unknown_route_count"] == 1
-    assert report["signal_validation"]["unknown_route_samples"][0]["code"] == "002138"
+    assert report["signal_validation"]["unknown_route_count"] == 0
+    assert report["signal_validation"]["generic_entry_signal_count"] == 1
+    assert report["signal_validation"]["generic_entry_signal_samples"][0]["code"] == "002138"
 
 
-def test_backtest_report_keeps_high_score_watch_without_route_as_unknown_signal():
+def test_backtest_report_keeps_high_score_watch_without_route_as_no_entry_signal():
     engine = BacktestEngine(BacktestConfig(decision_gates={"trial_buy_threshold": 6.0}))
     dates = ["2026-01-02", "2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09"]
     engine._sorted_dates = dates
@@ -320,11 +407,12 @@ def test_backtest_report_keeps_high_score_watch_without_route_as_unknown_signal(
     )
     report = engine._build_report()
 
-    assert report["signal_validation"]["unknown_route_count"] == 1
-    assert report["signal_validation"]["unknown_route_samples"][0]["action"] == "WATCH"
+    assert report["signal_validation"]["unknown_route_count"] == 0
+    assert report["signal_validation"]["no_entry_route_count"] == 1
+    assert report["signal_validation"]["no_entry_route_samples"][0]["action"] == "WATCH"
 
 
-def test_backtest_report_classifies_unknown_route_bucket_from_technical_snapshot():
+def test_backtest_report_classifies_no_entry_route_bucket_from_technical_snapshot():
     engine = BacktestEngine(BacktestConfig(decision_gates={"trial_buy_threshold": 6.0}))
     dates = ["2026-01-02", "2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09"]
     engine._sorted_dates = dates
@@ -367,7 +455,7 @@ def test_backtest_report_classifies_unknown_route_bucket_from_technical_snapshot
         MarketState(signal=MarketSignal.RED, multiplier=0.0),
     )
     report = engine._build_report()
-    sample = report["signal_validation"]["unknown_route_samples"][0]
+    sample = report["signal_validation"]["no_entry_route_samples"][0]
 
     assert sample["unknown_bucket"] == "near_pullback_missing_confirm"
     assert sample["technical_snapshot"]["volume_ratio"] == 1.7

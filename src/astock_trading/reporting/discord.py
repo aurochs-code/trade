@@ -381,6 +381,7 @@ def format_morning_embed(data: dict) -> dict:
     date_str = data.get("date", local_today_str())
     signal = data.get("market_signal", "")
     sig_tag = f"{SIGNAL_EMOJI.get(signal, '')} {SIGNAL_CN.get(signal, signal)}"
+    scope_label = _market_signal_scope_label(data.get("market_signal_scope"))
 
     fields = []
 
@@ -415,11 +416,14 @@ def format_morning_embed(data: dict) -> dict:
             "BUY_ALLOWED": "✅ 可买入",
             "REDUCED_BUY": "🟡 减量买入",
             "NO_TRADE": "🚫 不操作",
+            "PRE_MARKET_REFERENCE": "🧭 盘前参考",
         }
         action_label = action_map.get(action, action)
         mult = decision.get("multiplier", 0)
         alerts = decision.get("risk_alerts", [])
         decision_lines = [f"仓位系数 `{mult:.2f}`"]
+        if decision.get("execution_enabled") is False and decision.get("reason"):
+            decision_lines.append(str(decision.get("reason")))
         if alerts:
             decision_lines.extend([f"⚠️ {a}" for a in alerts])
         fields.append(_field("📋 今日决策", f"**{action_label}**\n" + "\n".join(decision_lines), inline=False))
@@ -465,11 +469,17 @@ def format_morning_embed(data: dict) -> dict:
 
     return _embed(
         title=f"📊 盘前摘要 — {date_str}",
-        description=f"综合信号 **{sig_tag}**",
+        description=f"综合信号 **{sig_tag}**{scope_label}",
         color=COLORS["morning"],
         fields=fields,
         footer="A-Stock Trading · morning_brief",
     )
+
+
+def _market_signal_scope_label(value: object) -> str:
+    return {
+        "previous_close_reference": "（前收参考）",
+    }.get(str(value or ""), "")
 
 
 def _auto_readiness_guidance_text(readiness: dict) -> str:

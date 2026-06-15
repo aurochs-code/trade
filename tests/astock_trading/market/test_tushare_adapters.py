@@ -38,6 +38,7 @@ def test_tushare_client_from_env_prefers_astock_token_and_redacts_value(monkeypa
     assert diagnostic["token_source"] == "ASTOCK_TUSHARE_TOKEN"
     assert "moneyflow" in diagnostic["configured_regular_interfaces"]
     assert "pro_bar" in diagnostic["configured_regular_interfaces"]
+    assert "ths_hot" in diagnostic["configured_regular_interfaces"]
     assert "minute" in diagnostic["not_assumed_interfaces"]
     assert "secret-primary-token" not in str(diagnostic)
     assert "secret-fallback-token" not in str(diagnostic)
@@ -347,3 +348,117 @@ def test_tushare_market_adapter_uses_regular_signal_interfaces():
     assert lhb["records"][0]["code"] == "000001"
     assert lockup["upcoming"][0]["float_date"] == "2026-07-15"
     assert northbound[0]["exchange"] == "深股通"
+
+
+def test_tushare_market_adapter_supplies_paid_l2_sector_context():
+    from astock_trading.market.tushare_adapters import TushareMarketAdapter
+
+    client = FakeTushareClient({
+        "stock_basic": [
+            {
+                "ts_code": "300475.SZ",
+                "symbol": "300475",
+                "name": "香农芯创",
+                "area": "广东",
+                "industry": "半导体",
+                "market": "创业板",
+                "list_date": "20200824",
+            }
+        ],
+        "ths_hot": [
+            {
+                "trade_date": "20260615",
+                "data_type": "热股",
+                "ts_code": "300475.SZ",
+                "ts_name": "香农芯创",
+                "rank": 8,
+                "pct_change": 7.04,
+                "concept": '["存储芯片", "先进封装"]',
+                "rank_reason": "强势放量",
+                "hot": 123456,
+                "rank_time": "15:00:00",
+            }
+        ],
+    })
+    adapter = TushareMarketAdapter(client=client)
+
+    blocks = asyncio.run(adapter.get_concept_blocks("300475"))
+
+    assert blocks["industry"] == [
+        {"name": "半导体", "source": "tushare_stock_basic", "change_pct": 0.0}
+    ]
+    assert blocks["concept_tags"] == ["存储芯片", "先进封装"]
+    assert blocks["region"] == [{"name": "广东", "source": "tushare_stock_basic"}]
+    assert [call[0] for call in client.calls] == ["stock_basic", "ths_hot"]
+
+
+def test_tushare_market_adapter_l2_degrades_to_stock_basic_when_ths_hot_unavailable():
+    from astock_trading.market.tushare_adapters import TushareAPIError, TushareMarketAdapter
+
+    class PartiallyUnavailableClient(FakeTushareClient):
+        def query(self, api_name: str, *, params: dict | None = None, fields: str = "") -> list[dict]:
+            if api_name == "ths_hot":
+                self.calls.append((api_name, params or {}, fields))
+                raise TushareAPIError("permission_denied", "ths_hot unavailable")
+            return super().query(api_name, params=params, fields=fields)
+
+    client = PartiallyUnavailableClient({
+        "stock_basic": [
+            {
+                "ts_code": "300475.SZ",
+                "symbol": "300475",
+                "name": "香农芯创",
+                "area": "广东",
+                "industry": "半导体",
+                "market": "创业板",
+                "list_date": "20200824",
+            }
+        ],
+    })
+    adapter = TushareMarketAdapter(client=client)
+
+    blocks = asyncio.run(adapter.get_concept_blocks("300475"))
+    comparison = asyncio.run(adapter.get_industry_comparison(5))
+
+    assert blocks["industry"][0]["name"] == "半导体"
+    assert blocks["concept_tags"] == []
+    assert comparison == {"top": [], "bottom": [], "total": 0}
+    assert [call[0] for call in client.calls] == ["stock_basic", "ths_hot", "ths_hot"]
+
+
+def test_tushare_market_adapter_maps_ths_hot_to_industry_comparison_and_hot_sectors():
+    from astock_trading.market.tushare_adapters import TushareMarketAdapter
+
+    client = FakeTushareClient({
+        "ths_hot": [
+            {
+                "ts_name": "半导体",
+                "rank": 2,
+                "pct_change": 3.5,
+                "concept": "芯片,先进封装",
+                "rank_reason": "领涨股A",
+                "hot": 900,
+                "rank_time": "15:00:00",
+            },
+            {
+                "ts_name": "银行",
+                "rank": 9,
+                "pct_change": -0.5,
+                "concept": "",
+                "rank_reason": "领涨股B",
+                "hot": 300,
+                "rank_time": "15:00:00",
+            },
+        ],
+    })
+    adapter = TushareMarketAdapter(client=client)
+
+    sectors = asyncio.run(adapter.get_hot_sectors(limit=2, sector_type="industry", sort="change"))
+    comparison = asyncio.run(adapter.get_industry_comparison(1))
+
+    assert sectors[0]["name"] == "半导体"
+    assert sectors[0]["concept_tags"] == ["芯片", "先进封装"]
+    assert comparison["top"][0]["name"] == "半导体"
+    assert comparison["top"][0]["change_pct"] == 3.5
+    assert comparison["bottom"][0]["name"] == "银行"
+    assert comparison["source"] == "tushare_ths_hot"

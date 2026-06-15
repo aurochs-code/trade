@@ -1,6 +1,6 @@
 # 数据模型
 
-Runtime 数据库是 MySQL，schema 由 SQLAlchemy Core 定义并创建。金额存分（_cents 整数），JSON 放 *_json 字段，MySQL 使用 JSON 类型；SQLite 只作为测试替身和历史迁移源。
+Runtime 数据库是 MySQL，schema 由 SQLAlchemy Core 定义并创建。金额存分（_cents 整数），JSON 放 *_json 字段，MySQL 使用 JSON 类型；不再维护 SQLite 运行、测试替身或历史迁移入口。
 
 ## 核心表
 

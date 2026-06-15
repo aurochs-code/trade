@@ -157,11 +157,12 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     week_str = now.strftime("%Y-W%W")
     ctx.reporter.generate_weekly_report(week_str)
 
-    # 9. Obsidian 周复盘
-    ctx.obsidian.write_weekly_review({
+    week_stats = {
         "week_str": week_str,
         "week_start": week_start_display,
         "week_end": week_end_display,
+        "week_start_utc": week_start_utc,
+        "week_after_utc": week_after_utc,
         "buy_count": buy_count,
         "sell_count": sell_count,
         "wins": wins,
@@ -176,7 +177,11 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         "core_pool": core_pool,
         "pool_changes": pool_changes,
         "paper_stats": paper_stats,
-    })
+    }
+    _record_weekly_performance_snapshot(ctx, run_id, week_stats)
+
+    # 9. Obsidian 周复盘
+    ctx.obsidian.write_weekly_review(week_stats)
 
     # 日志追加
     ctx.obsidian.write_daily_log(
@@ -219,6 +224,16 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         "net_pnl_cents": net_pnl_cents,
         "paper_stats": paper_stats,
     }
+
+
+def _record_weekly_performance_snapshot(ctx: PipelineContext, run_id: str, week_stats: dict) -> str:
+    return ctx.event_store.append(
+        stream="performance:weekly",
+        stream_type="performance",
+        event_type="performance.weekly_snapshot",
+        payload=week_stats,
+        metadata={"run_id": run_id},
+    )
 
 
 def _maybe_generate_monthly(ctx: PipelineContext, run_id: str, now: datetime):

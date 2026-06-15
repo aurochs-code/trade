@@ -63,16 +63,7 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     stop_signals = []
 
     for pos, signals in risk_results:
-        # 写风控事件
         for s in signals:
-            ctx.risk_svc._event_store.append(
-                stream=f"risk:{pos.code}", stream_type="risk",
-                event_type=f"risk.{s.signal_type}_triggered",
-                payload={"code": pos.code, "signal_type": s.signal_type,
-                         "trigger_price": s.trigger_price, "current_price": s.current_price,
-                         "description": s.description, "urgency": s.urgency},
-                metadata={"run_id": run_id},
-            )
             risk_alerts.append(f"⚠️ {pos.name}({pos.code}): {s.description}")
             stop_signals.append({
                 "code": pos.code, "signal_type": s.signal_type,
@@ -113,9 +104,10 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
 
     hot_stocks = asyncio.run(ctx.market_svc.collect_hot_stocks(run_id=run_id))
     cross_platform_hot_stocks = asyncio.run(ctx.market_svc.collect_cross_platform_hot_stocks(run_id=run_id))
-    finance_flash = asyncio.run(ctx.market_svc.collect_finance_flash(limit=5, run_id=run_id))
-    global_risk_news = asyncio.run(ctx.market_svc.collect_global_risk_news(limit=5, run_id=run_id))
-    market_announcements = asyncio.run(ctx.market_svc.collect_market_announcements(limit=5, run_id=run_id))
+    cached_items = getattr(ctx.market_svc, "cached_observation_items", None)
+    finance_flash = cached_items("finance_flash", "cn_a", limit=5) if callable(cached_items) else []
+    global_risk_news = cached_items("global_risk_news", "global", limit=5) if callable(cached_items) else []
+    market_announcements = cached_items("market_announcements", "cn_a", limit=5) if callable(cached_items) else []
     northbound = asyncio.run(ctx.market_svc.collect_northbound_realtime(run_id=run_id))
     dragon_tiger = asyncio.run(ctx.market_svc.collect_daily_dragon_tiger(run_id=run_id))
     lockup = {"upcoming": []}

@@ -18,7 +18,6 @@
 import pytest
 from datetime import date
 
-from astock_trading.platform.db import init_db, connect
 from astock_trading.platform.events import EventStore
 from astock_trading.platform.runs import RunJournal
 from astock_trading.market.models import (
@@ -44,11 +43,9 @@ from astock_trading.strategy.models import Style
 
 
 @pytest.fixture
-def env(tmp_path):
+def env(tmp_path, mysql_conn):
     """搭建完整的 V2 环境。"""
-    db_path = tmp_path / "astock_trading.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
 
     event_store = EventStore(conn)
     run_journal = RunJournal(conn)

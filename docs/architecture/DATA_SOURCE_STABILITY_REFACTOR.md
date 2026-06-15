@@ -153,11 +153,12 @@ CLI 先行，MCP 只做薄适配：
 
 ### P4：来源补强
 
-- 已把付费稳定源调整为主源策略：MX 负责实时/日线级行情和选股搜索主入口；
-  Tushare SDK 负责日线/复权 K 线、指数日线、每日指标、财务指标、个股资金流、
-  股票基础信息、龙虎榜、限售解禁和沪深股通持股等常规积分接口。
+- 已把付费稳定源调整为主源策略：Tushare SDK 负责日线/复权 K 线、指数日线、
+  每日指标、财务指标、个股资金流、股票基础信息、龙虎榜、限售解禁、
+  沪深股通持股，以及可用时的同花顺热榜 L2 行业/概念上下文；MX 负责实时补充、
+  选股搜索和 Tushare 不可用时的 market fallback。
 - `ASTOCK_TUSHARE_TOKEN` 存在时，provider 顺序为：
-  - 行情/K 线：`MXMarketAdapter -> TushareMarketAdapter -> AStockSignal/OpenCli/Mootdx/AkShare/BaoStock`
+  - 行情/K 线：`TushareMarketAdapter -> MXMarketAdapter -> AStockSignal/OpenCli/Mootdx/AkShare/BaoStock`
   - 财务：`TushareFinancialAdapter -> TencentFinancialAdapter -> AkShare`
   - 资金流：`TushareFlowAdapter -> BaiduFundFlowAdapter -> AkShareFlowAdapter`
 - Tushare token 不是启动硬依赖；缺失时自动禁用 Tushare provider，并在

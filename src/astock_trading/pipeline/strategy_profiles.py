@@ -28,7 +28,7 @@ from astock_trading.platform.paths import resolve_config_dir
 from astock_trading.platform.runtime_env import candidate_env_files, parse_env_file
 from astock_trading.platform.time import utc_now_iso
 
-DEFAULT_PROFILES = ("trend_swing", "short_continuation", "defensive_watch")
+DEFAULT_PROFILES = ("trend_swing", "short_continuation", "weak_sideways", "defensive_watch")
 ACTIVE_STRATEGY_BUDGET_PCT = 0.60
 
 
@@ -1117,6 +1117,7 @@ def _profile_purpose(profile: str) -> str:
     return {
         "trend_swing": "趋势波段候选，适合 5-20 个交易日的确认型机会。",
         "short_continuation": "短线续涨研究，适合 T+1 到 T+3 的强势延续样本验证。",
+        "weak_sideways": "弱市/震荡小仓策略，按市场制度和路线窄口径验证。",
         "defensive_watch": "弱市观察模式，提高买入门槛，优先减少新开仓。",
     }.get(profile, "自定义策略 profile。")
 
@@ -1154,7 +1155,7 @@ def _write_report_artifact(
     artifact_prefix: str = "strategy_profiles",
 ) -> None:
     conn.execute(
-        """INSERT OR REPLACE INTO report_artifacts
+        """REPLACE INTO report_artifacts
            (artifact_id, run_id, report_type, format, content, delivered_to, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (

@@ -13,7 +13,6 @@ def run_continuation_study(
     top_ns: tuple[int, ...] = (1, 2, 3),
     hold_days_list: tuple[int, ...] = (1, 2, 3),
     data_dir: str | Path | None = None,
-    db_path: str | Path | None = None,
 ) -> dict:
     normalized_top_ns = _normalize_positive_ints(top_ns)
     normalized_hold_days = _normalize_positive_ints(hold_days_list)
@@ -24,7 +23,6 @@ def run_continuation_study(
         end=end,
         top_n=max(normalized_top_ns),
         data_dir=data_dir,
-        db_path=db_path,
     )
     ranked_rows = validation.get("ranked_returns", [])
 

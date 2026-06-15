@@ -8,7 +8,6 @@ import pandas as pd
 from pathlib import Path
 
 from astock_trading.market.models import StockQuote, StockSnapshot
-from astock_trading.platform.db import init_db, connect
 from astock_trading.platform.domain_events import AUTO_TRADE_EXECUTED
 from astock_trading.platform.events import EventStore
 from astock_trading.platform.runs import RunJournal
@@ -71,10 +70,8 @@ class CountingSentimentProvider:
 
 
 @pytest.fixture
-def ctx(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def ctx(tmp_path, mysql_conn):
+    conn = mysql_conn
     es = EventStore(conn)
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -219,6 +216,23 @@ class TestMorningPipeline:
         assert "signal" in result
         assert isinstance(result["risk_alerts"], list)
         assert result["xueqiu_hot_stocks"] == 0
+
+    def test_morning_market_signal_is_reference_not_execution_gate(self, ctx, monkeypatch):
+        monkeypatch.setattr("astock_trading.reporting.discord_sender.send_embed", lambda *args, **kwargs: (True, None))
+
+        from astock_trading.pipeline.morning import run
+
+        result = run(ctx, "run_morning_reference")
+
+        assert result["market_timing"] == {
+            "phase": "morning",
+            "signal_scope": "previous_close_reference",
+            "execution_gate_enabled": False,
+            "reason": "盘前当日行情尚未刷新，大盘综合信号仅作前收参考，不作为当天新增买入判断。",
+        }
+        assert result["decision"]["action"] == "PRE_MARKET_REFERENCE"
+        assert result["decision"]["execution_enabled"] is False
+        assert "前收参考" in result["discord_embed"]["description"]
 
     def test_includes_xueqiu_hot_stocks_in_summary(self, ctx, monkeypatch):
         async def fake_collect_xueqiu_hot_stocks(limit=10, list_type="10", run_id=None):

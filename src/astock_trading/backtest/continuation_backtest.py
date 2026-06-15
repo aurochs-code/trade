@@ -13,7 +13,6 @@ def run_continuation_backtest(
     hold_days: int = 2,
     top_n: int = 3,
     data_dir: str | Path | None = None,
-    db_path: str | Path | None = None,
 ) -> dict:
     trades = _simulate_ranked_trades(
         codes=codes,
@@ -22,7 +21,6 @@ def run_continuation_backtest(
         hold_days=hold_days,
         top_n=top_n,
         data_dir=data_dir,
-        db_path=db_path,
     )
     total_return = sum(t["return_pct"] for t in trades)
     win_rate = 0.0 if not trades else sum(1 for t in trades if t["return_pct"] > 0) / len(trades) * 100
@@ -45,7 +43,6 @@ def _simulate_ranked_trades(
     hold_days: int,
     top_n: int,
     data_dir=None,
-    db_path: str | Path | None = None,
 ) -> list[dict]:
     if data_dir is not None:
         trades_path = Path(data_dir) / "continuation_trades.json"
@@ -58,7 +55,6 @@ def _simulate_ranked_trades(
         end=end,
         top_n=top_n,
         data_dir=data_dir,
-        db_path=db_path,
     )
     ranked_rows = payload.get("ranked_returns") if isinstance(payload, dict) else None
     if not ranked_rows:

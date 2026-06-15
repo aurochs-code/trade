@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-from astock_trading.platform.db import connect, init_db
 
 
-def test_build_market_service_uses_common_provider_order(tmp_path):
+def test_build_market_service_uses_common_provider_order(mysql_conn):
     from astock_trading.market.akshare_adapters import MXMarketAdapter
     from astock_trading.market.baostock_adapters import BaoStockMarketAdapter
     from astock_trading.market.hk_adapters import AkShareHKFinancialAdapter, AkShareHKMarketAdapter
     from astock_trading.market.service import MarketService
     from astock_trading.platform.service_factory import build_market_service
 
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
     try:
         service = build_market_service(conn)
     finally:
@@ -27,7 +24,7 @@ def test_build_market_service_uses_common_provider_order(tmp_path):
     assert any(isinstance(provider, AkShareHKFinancialAdapter) for provider in service._financial)
 
 
-def test_build_market_service_prioritizes_tushare_when_token_present(tmp_path, monkeypatch):
+def test_build_market_service_prioritizes_tushare_when_token_present(mysql_conn, monkeypatch):
     from astock_trading.market.akshare_adapters import MXMarketAdapter
     from astock_trading.market.tushare_adapters import (
         TushareFinancialAdapter,
@@ -37,25 +34,24 @@ def test_build_market_service_prioritizes_tushare_when_token_present(tmp_path, m
     from astock_trading.platform.service_factory import build_market_service
 
     monkeypatch.setenv("ASTOCK_TUSHARE_TOKEN", "secret-token")
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
     try:
         service = build_market_service(conn)
     finally:
         conn.close()
 
-    assert isinstance(service._market[0], MXMarketAdapter)
-    assert isinstance(service._market[1], TushareMarketAdapter)
+    assert isinstance(service._market[0], TushareMarketAdapter)
+    assert isinstance(service._market[1], MXMarketAdapter)
     assert isinstance(service._financial[0], TushareFinancialAdapter)
     assert isinstance(service._flow[0], TushareFlowAdapter)
 
 
-def test_pipeline_context_uses_shared_market_service_builder(tmp_path, monkeypatch):
+def test_pipeline_context_uses_shared_market_service_builder(mysql_runtime, monkeypatch):
     from astock_trading.market.service import MarketService
     from astock_trading.platform import service_factory
     from astock_trading.pipeline.context import build_context
 
+    assert mysql_runtime.url
     calls = []
 
     def fake_build_market_service(conn):
@@ -64,7 +60,7 @@ def test_pipeline_context_uses_shared_market_service_builder(tmp_path, monkeypat
 
     monkeypatch.setattr(service_factory, "build_market_service", fake_build_market_service)
 
-    ctx = build_context(tmp_path / "test.db")
+    ctx = build_context()
     try:
         assert calls == [ctx.conn]
         assert isinstance(ctx.market_svc, MarketService)
@@ -72,7 +68,7 @@ def test_pipeline_context_uses_shared_market_service_builder(tmp_path, monkeypat
         ctx.conn.close()
 
 
-def test_load_config_snapshot_uses_file_config_when_freeze_fails(tmp_path, monkeypatch):
+def test_load_config_snapshot_uses_file_config_when_freeze_fails(mysql_conn, monkeypatch):
     from astock_trading.platform import service_factory
 
     class FakeRegistry:
@@ -82,9 +78,7 @@ def test_load_config_snapshot_uses_file_config_when_freeze_fails(tmp_path, monke
         def load_and_validate(self):
             return {"strategy": {"entry_signal": {"volume_ratio_min": 1.2}}}, []
 
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
     monkeypatch.setattr(service_factory, "ConfigRegistry", FakeRegistry)
 
     try:
@@ -97,7 +91,7 @@ def test_load_config_snapshot_uses_file_config_when_freeze_fails(tmp_path, monke
     assert cfg["entry_signal"]["volume_ratio_min"] == 1.2
 
 
-def test_build_strategy_service_wires_manual_confirmation_notifier(tmp_path, monkeypatch):
+def test_build_strategy_service_wires_manual_confirmation_notifier(mysql_conn, monkeypatch):
     from astock_trading.market.models import (
         FinancialReport,
         FundFlow,
@@ -110,9 +104,7 @@ def test_build_strategy_service_wires_manual_confirmation_notifier(tmp_path, mon
     from astock_trading.platform.events import EventStore
     from astock_trading.strategy.models import MarketSignal, MarketState
 
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
     calls = []
     monkeypatch.setattr(
         service_factory,

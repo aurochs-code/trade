@@ -125,23 +125,88 @@ def test_batched_backtest_passes_watch_trial_config_to_runner():
         "2024-12-31",
         BacktestBatchConfig(
             batch_size=1,
+            disable_market_reduce_sell=True,
+            watch_loss_cooldown_days=5,
+            watch_loss_cooldown_phases=("below_ma20_slope_up",),
             execute_watch_trial_markets=("GREEN", "YELLOW"),
             execute_watch_trial_routes=("relative_strength_overheat",),
             execute_watch_trial_pairs=("GREEN:relative_strength_overheat",),
+            execute_buy_phases=("extended_above_ma20_slope_up",),
             execute_watch_trial_score_min=6.2,
+            execute_watch_trial_score_max=6.8,
+            execute_watch_trial_position_pct=0.08,
+            execute_watch_trial_phases=("below_ma20_slope_up",),
+            execute_watch_trial_min_above_ma20_days=6,
+            execute_watch_trial_min_above_ma20_days_phases=("extended_above_ma20_slope_up",),
+            execute_watch_trial_require_above_ma60_phases=("extended_above_ma20_slope_up",),
+            execute_watch_trial_require_above_ma120_phases=("extended_above_ma20_slope_up",),
         ),
         batch_runner=runner,
     )
 
     config = captured["config"]
+    assert config.disable_market_reduce_sell is True
+    assert config.watch_loss_cooldown_days == 5
+    assert config.watch_loss_cooldown_phases == ("below_ma20_slope_up",)
     assert config.execute_watch_trial_markets == ("GREEN", "YELLOW")
     assert config.execute_watch_trial_routes == ("relative_strength_overheat",)
     assert config.execute_watch_trial_pairs == ("GREEN:relative_strength_overheat",)
+    assert config.execute_buy_phases == ("extended_above_ma20_slope_up",)
     assert config.execute_watch_trial_score_min == 6.2
+    assert config.execute_watch_trial_score_max == 6.8
+    assert config.execute_watch_trial_position_pct == 0.08
+    assert config.execute_watch_trial_phases == ("below_ma20_slope_up",)
+    assert config.execute_watch_trial_min_above_ma20_days == 6
+    assert config.execute_watch_trial_min_above_ma20_days_phases == ("extended_above_ma20_slope_up",)
+    assert config.execute_watch_trial_require_above_ma60_phases == ("extended_above_ma20_slope_up",)
+    assert config.execute_watch_trial_require_above_ma120_phases == ("extended_above_ma20_slope_up",)
     assert report["config"]["execute_watch_trial_markets"] == ["GREEN", "YELLOW"]
     assert report["config"]["execute_watch_trial_routes"] == ["relative_strength_overheat"]
     assert report["config"]["execute_watch_trial_pairs"] == ["GREEN:relative_strength_overheat"]
+    assert report["config"]["execute_buy_phases"] == ["extended_above_ma20_slope_up"]
+    assert report["config"]["disable_market_reduce_sell"] is True
+    assert report["config"]["watch_loss_cooldown_days"] == 5
+    assert report["config"]["watch_loss_cooldown_phases"] == ["below_ma20_slope_up"]
     assert report["config"]["execute_watch_trial_score_min"] == 6.2
+    assert report["config"]["execute_watch_trial_score_max"] == 6.8
+    assert report["config"]["execute_watch_trial_position_pct"] == 0.08
+    assert report["config"]["execute_watch_trial_phases"] == ["below_ma20_slope_up"]
+    assert report["config"]["execute_watch_trial_min_above_ma20_days"] == 6
+    assert report["config"]["execute_watch_trial_min_above_ma20_days_phases"] == [
+        "extended_above_ma20_slope_up"
+    ]
+    assert report["config"]["execute_watch_trial_require_above_ma60_phases"] == [
+        "extended_above_ma20_slope_up"
+    ]
+    assert report["config"]["execute_watch_trial_require_above_ma120_phases"] == [
+        "extended_above_ma20_slope_up"
+    ]
+    assert report["execution_semantics"]["mode"] == "research_what_if"
+    assert report["execution_semantics"]["watch_trial_enabled"] is True
+    assert report["execution_semantics"]["watch_loss_cooldown_days"] == 5
+    assert report["execution_semantics"]["watch_loss_cooldown_phases"] == ["below_ma20_slope_up"]
+
+
+def test_batched_backtest_defaults_to_production_buy_only_semantics():
+    def runner(codes: list[str], **kwargs):
+        return {
+            "total_return_pct": 0.0,
+            "max_drawdown_pct": 0.0,
+            "win_rate_pct": 0.0,
+            "signal_validation": {"sample_size": 0, "signals": []},
+        }
+
+    report = run_batched_backtest(
+        ["002138"],
+        "2024-01-01",
+        "2024-12-31",
+        BacktestBatchConfig(batch_size=1),
+        batch_runner=runner,
+    )
+
+    assert report["execution_semantics"]["mode"] == "production_buy_only"
+    assert report["execution_semantics"]["buy_only"] is True
+    assert report["execution_semantics"]["route_policy_default_actions"] == ["BUY"]
 
 
 def test_batched_backtest_compact_report_includes_buy_route_counts():

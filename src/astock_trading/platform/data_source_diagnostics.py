@@ -54,13 +54,14 @@ MISSING_FIELD_DIMENSIONS = {
 def _provider_policy() -> dict[str, dict[str, list[str]]]:
     tushare = tushare_provider_diagnostic()
     tushare_enabled = bool(tushare.get("enabled"))
-    market_primary = ["MXMarketAdapter"]
+    market_primary: list[str] = []
     financial_primary: list[str] = []
     flow_primary: list[str] = []
     if tushare_enabled:
         market_primary.append("TushareMarketAdapter")
         financial_primary.append("TushareFinancialAdapter")
         flow_primary.append("TushareFlowAdapter")
+    market_primary.append("MXMarketAdapter")
     return {
         "market": {
             "primary_providers": market_primary,

@@ -247,6 +247,14 @@ scoring:
       score_min: 6.0
       position_pct: 0.11
       priority: 30
+    YELLOW:pullback_to_ma20:
+      score_min: 6.0
+      position_pct: 0.11
+      priority: 65
+    YELLOW:volume_breakout:
+      score_min: 6.0
+      position_pct: 0.11
+      priority: 80
     RED:volume_breakout:
       score_min: 6.0
       position_pct: 0.066
@@ -386,6 +394,133 @@ backtest_presets:
     entry_deviation_max: 10.0
     entry_require_bullish_candle: true
     route_execution_policy: *route_execution_policy_v3
+
+  攻_C_phase_filtered_watch08:
+    description: "研究候选：正式买入和观察试运行都按市场相位过滤，观察层单票8%"
+    entry_mode: hybrid
+    require_entry_signal: true
+    buy_threshold: 6.5
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.18
+    momentum_time_stop_days: 30
+    single_max_pct: 0.22
+    total_max_pct: 0.67
+    weekly_max: 5
+    daily_max_buys: 3
+    holding_max: 5
+    market_multipliers:
+      RED: 0.3
+    entry_trend_rsi_max: 70
+    entry_pullback_rsi_max: 70
+    entry_pullback_volume_ratio_min: 1.5
+    entry_deviation_max: 10.0
+    entry_require_bullish_candle: true
+    route_execution_policy: *route_execution_policy_v3
+    execute_buy_phases:
+      - extended_above_ma20_slope_up
+      - extended_above_ma20_slope_flat
+      - below_ma20_slope_flat
+      - below_ma20_slope_up
+    execute_watch_trial_pairs:
+      - GREEN:trend_cooling_off
+      - RED:relative_strength_overheat
+      - YELLOW:trend_cooling_off
+    execute_watch_trial_score_min: 0.0
+    execute_watch_trial_score_max: 4.5
+    execute_watch_trial_position_pct: 0.08
+    execute_watch_trial_phases:
+      - extended_above_ma20_slope_up
+      - extended_above_ma20_slope_flat
+      - below_ma20_slope_flat
+      - below_ma20_slope_up
+
+  攻_C_phase_filtered_watch08_cooldown20:
+    description: "最终研究候选：phase过滤 + 观察层7.5% + 盈利持仓趋势确认加仓至22% + 弱修复/平台阶段亏损冷却20天"
+    entry_mode: hybrid
+    require_entry_signal: true
+    buy_threshold: 6.5
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.18
+    momentum_time_stop_days: 30
+    single_max_pct: 0.22
+    total_max_pct: 0.67
+    weekly_max: 5
+    daily_max_buys: 3
+    holding_max: 5
+    market_multipliers:
+      RED: 0.3
+    entry_trend_rsi_max: 70
+    entry_pullback_rsi_max: 70
+    entry_pullback_volume_ratio_min: 1.5
+    entry_deviation_max: 10.0
+    entry_require_bullish_candle: true
+    route_execution_policy: *route_execution_policy_v3
+    execute_buy_phases:
+      - extended_above_ma20_slope_up
+      - extended_above_ma20_slope_flat
+      - below_ma20_slope_flat
+      - below_ma20_slope_up
+    execute_watch_trial_pairs:
+      - GREEN:trend_cooling_off
+      - RED:relative_strength_overheat
+      - YELLOW:trend_cooling_off
+    execute_watch_trial_score_min: 0.0
+    execute_watch_trial_score_max: 4.5
+    execute_watch_trial_position_pct: 0.075
+    execute_watch_trial_phases:
+      - extended_above_ma20_slope_up
+      - extended_above_ma20_slope_flat
+      - below_ma20_slope_flat
+      - below_ma20_slope_up
+      - below_ma20_slope_down
+    execute_watch_trial_require_above_ma120_phases:
+      - extended_above_ma20_slope_up
+      - extended_above_ma20_slope_flat
+    watch_loss_cooldown_days: 20
+    watch_loss_cooldown_phases:
+      - extended_above_ma20_slope_flat
+      - below_ma20_slope_flat
+      - below_ma20_slope_up
+    scale_in_enabled: true
+    scale_in_profit_threshold: 0.10
+    scale_in_step_position_pct: 0.075
+    scale_in_max_position_pct: 0.22
+    scale_in_max_adds: 2
+    scale_in_min_days_between: 5
+    scale_in_routes:
+      - short_continuation
+      - volume_breakout
+      - dragon_head
+      - trend_structure_watch
+      - pullback_to_ma20
+      - trend_cooling_off
+      - relative_strength_overheat
+    scale_in_markets:
+      - GREEN
+      - YELLOW
+      - RED
+    scale_in_actions:
+      - BUY
+      - WATCH
+      - TRIAL_BUY
+    scale_in_require_entry_signal: false
+    scale_in_score_min: 4.0
+    scale_in_reset_time_stop: true
+    scale_in_aggressive_max_position_pct: 0.30
+    scale_in_aggressive_step_position_pct: 0.08
+    scale_in_aggressive_markets:
+      - GREEN
+      - YELLOW
+    scale_in_aggressive_routes:
+      - short_continuation
+      - volume_breakout
+      - dragon_head
+      - trend_structure_watch
+    scale_in_aggressive_phases:
+      - extended_above_ma20_slope_up
+      - extended_above_ma20_slope_flat
+      - near_ma20_slope_up
+      - below_ma20_slope_up
 
   攻_C_route_policy_v3_weekly5_trail20:
     description: "进攻对照：全区间表现接近trail18，用于稳定性复核"

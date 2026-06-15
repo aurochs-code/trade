@@ -1,14 +1,11 @@
 """推荐诊断入口。"""
 
-from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.events import EventStore
 from astock_trading.platform.recommendation_diagnostics import diagnose_recommendations
 
 
-def test_diagnose_recommendations_separates_formal_buy_from_watch_layers(tmp_path):
-    db_path = tmp_path / "recommendations.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_diagnose_recommendations_separates_formal_buy_from_watch_layers(mysql_conn):
+    conn = mysql_conn
     store = EventStore(conn)
     try:
         conn.execute(
@@ -65,10 +62,8 @@ def test_diagnose_recommendations_separates_formal_buy_from_watch_layers(tmp_pat
     assert payload["next_actions"][0]["risk_level"] == "read_only"
 
 
-def test_positive_review_uses_current_candidate_pool_state_not_stale_payload(tmp_path):
-    db_path = tmp_path / "recommendations.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_positive_review_uses_current_candidate_pool_state_not_stale_payload(mysql_conn):
+    conn = mysql_conn
     store = EventStore(conn)
     try:
         conn.execute(
@@ -115,10 +110,8 @@ def test_positive_review_uses_current_candidate_pool_state_not_stale_payload(tmp
     assert item["stale_payload"]["current_pool_tier"] == "core"
 
 
-def test_diagnose_recommendations_reports_yield_target_evidence_state(tmp_path):
-    db_path = tmp_path / "recommendations.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_diagnose_recommendations_reports_yield_target_evidence_state(mysql_conn):
+    conn = mysql_conn
     store = EventStore(conn)
     try:
         for code, status, return_pct in [

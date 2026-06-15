@@ -1,23 +1,15 @@
 """Tests for platform/config.py — ConfigRegistry"""
 
-import sqlite3
 from types import SimpleNamespace
 
 import pytest
 
-from astock_trading.platform.db import init_db
 from astock_trading.platform.config import ConfigRegistry, ConfigRepository
 
 
 @pytest.fixture
-def conn(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    c = sqlite3.connect(str(db_path))
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
-    yield c
-    c.close()
+def conn(mysql_conn):
+    yield mysql_conn
 
 
 def test_freeze_creates_version(conn):
@@ -47,7 +39,7 @@ def test_freeze_recovers_when_same_hash_is_inserted_concurrently(conn, monkeypat
 
     def racing_insert(self, version, config_hash, config_json):
         original_insert(self, "v_race_existing", config_hash, config_json)
-        raise sqlite3.IntegrityError("UNIQUE constraint failed: config_versions.config_hash")
+        raise RuntimeError("Duplicate entry for key config_hash")
 
     monkeypatch.setattr(ConfigRepository, "insert_version", racing_insert)
 
@@ -64,7 +56,7 @@ def test_freeze_retries_when_generated_version_collides(conn, monkeypatch):
     def racing_insert(self, version, config_hash, config_json):
         calls.append(version)
         if len(calls) == 1:
-            raise sqlite3.IntegrityError("UNIQUE constraint failed: config_versions.config_version")
+            raise RuntimeError("Duplicate entry for key config_version")
         original_insert(self, version, config_hash, config_json)
 
     monkeypatch.setattr(ConfigRepository, "insert_version", racing_insert)
@@ -84,7 +76,7 @@ def test_freeze_rolls_back_failed_insert_before_rechecking_existing_hash(monkeyp
         return "v_after_rollback" if calls["find"] >= 3 else None
 
     def duplicate_insert(self, version, config_hash, config_json):  # noqa: ARG001
-        raise sqlite3.IntegrityError("Duplicate entry for key config_hash")
+        raise RuntimeError("Duplicate entry for key config_hash")
 
     def rollback():
         calls["rollback"] += 1

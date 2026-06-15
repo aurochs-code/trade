@@ -1,19 +1,16 @@
 """Focused rebuild coverage for reporting projectors."""
 
-from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.events import EventStore
 from astock_trading.reporting.projectors import ProjectionUpdater
 
 
-def _db(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def _db(mysql_conn):
+    conn = mysql_conn
     return conn
 
 
-def test_rebuild_candidate_pool_from_event_log_after_projection_delete(tmp_path):
-    conn = _db(tmp_path)
+def test_rebuild_candidate_pool_from_event_log_after_projection_delete(mysql_conn):
+    conn = _db(mysql_conn)
     try:
         store = EventStore(conn)
         updater = ProjectionUpdater(store, conn)
@@ -95,8 +92,8 @@ def test_rebuild_candidate_pool_from_event_log_after_projection_delete(tmp_path)
         conn.close()
 
 
-def test_rebuild_balances_from_balance_events(tmp_path):
-    conn = _db(tmp_path)
+def test_rebuild_balances_from_balance_events(mysql_conn):
+    conn = _db(mysql_conn)
     try:
         store = EventStore(conn)
         store.append(
@@ -130,8 +127,8 @@ def test_rebuild_balances_from_balance_events(tmp_path):
         conn.close()
 
 
-def test_rebuild_all_clears_all_projection_tables_before_replay(tmp_path):
-    conn = _db(tmp_path)
+def test_rebuild_all_clears_all_projection_tables_before_replay(mysql_conn):
+    conn = _db(mysql_conn)
     try:
         store = EventStore(conn)
         conn.execute(

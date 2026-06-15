@@ -217,7 +217,7 @@ def _save_pushed(conn, symbol: str, item_hash: str, summary: str, run_id: str):
     now = datetime.now(timezone.utc).isoformat()
     try:
         conn.execute(
-            """INSERT OR IGNORE INTO market_observations
+            """INSERT IGNORE INTO market_observations
                (observation_id, source, kind, symbol, observed_at, run_id, payload_json)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (uuid.uuid4().hex[:16], "sentiment_monitor", "news_alert",
@@ -226,6 +226,52 @@ def _save_pushed(conn, symbol: str, item_hash: str, summary: str, run_id: str):
         )
     except Exception as e:
         _logger.warning(f"[sentiment] save_pushed failed: {e}")
+
+
+def _save_classification_evidence(
+    conn,
+    symbol: str,
+    item_hash: str,
+    item: dict,
+    classified: dict | None,
+    run_id: str,
+    *,
+    source_kind: str,
+    matched_target: dict,
+) -> None:
+    """记录舆情分类输入和判定结果，便于回溯告警为什么出现或被跳过。"""
+    import uuid
+
+    now = datetime.now(timezone.utc).isoformat()
+    payload = {
+        "code": symbol,
+        "hash": item_hash,
+        "source_kind": source_kind,
+        "matched_target": matched_target,
+        "classified": classified is not None,
+        "classification": classified or {
+            "level": "ignored",
+            "reason": "未命中重要舆情规则或正面研报不匹配监控标的",
+        },
+        "raw_item": item,
+    }
+    try:
+        conn.execute(
+            """INSERT INTO market_observations
+               (observation_id, source, kind, symbol, observed_at, run_id, payload_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                uuid.uuid4().hex[:16],
+                "sentiment_monitor",
+                "sentiment_classification",
+                symbol,
+                now,
+                run_id,
+                json.dumps(payload, ensure_ascii=False, default=str),
+            ),
+        )
+    except Exception as e:
+        _logger.warning(f"[sentiment] save_classification_evidence failed: {e}")
 
 
 def _get_cached_items(conn, symbol: str, ttl_minutes: int = 30) -> list[dict] | None:
@@ -290,11 +336,11 @@ def _collect_opencli_watch_alerts(
 ) -> list[dict]:
     alerts: list[dict] = []
 
-    try:
-        finance_items = asyncio.run(ctx.market_svc.collect_finance_flash(limit=30, run_id=run_id))
-    except Exception as e:
-        _logger.warning(f"[sentiment] opencli finance flash failed: {e}")
-        finance_items = []
+    cached_items = getattr(ctx.market_svc, "cached_observation_items", None)
+    finance_items = (
+        cached_items("finance_flash", "cn_a", limit=30)
+        if callable(cached_items) else []
+    )
 
     for code, name in watch_stocks.items():
         for item in finance_items:
@@ -302,6 +348,16 @@ def _collect_opencli_watch_alerts(
             if h in pushed_hashes:
                 continue
             classified = _classify_opencli_watch_item(item, code, name, "finance_flash")
+            _save_classification_evidence(
+                ctx.conn,
+                code,
+                h,
+                item,
+                classified,
+                run_id,
+                source_kind="finance_flash",
+                matched_target={"code": code, "name": name},
+            )
             if classified is None:
                 continue
             alerts.append({"code": code, "name": name, "hash": h, **classified})
@@ -319,6 +375,16 @@ def _collect_opencli_watch_alerts(
             if h in pushed_hashes:
                 continue
             classified = _classify_opencli_watch_item(item, code, name, "xueqiu_comments")
+            _save_classification_evidence(
+                ctx.conn,
+                code,
+                h,
+                item,
+                classified,
+                run_id,
+                source_kind="xueqiu_comments",
+                matched_target={"code": code, "name": name},
+            )
             if classified is None:
                 continue
             alerts.append({"code": code, "name": name, "hash": h, **classified})
@@ -418,6 +484,16 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
                 continue
 
             classified = _classify_watch_item(item, code, name)
+            _save_classification_evidence(
+                ctx.conn,
+                code,
+                h,
+                item,
+                classified,
+                run_id,
+                source_kind="mx_search",
+                matched_target={"code": code, "name": name},
+            )
             if classified is None:
                 continue
 

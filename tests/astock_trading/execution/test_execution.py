@@ -6,17 +6,12 @@ from astock_trading.execution.models import OrderSide, OrderStatus
 from astock_trading.execution.orders import OrderManager
 from astock_trading.execution.positions import PositionManager, PositionProjector
 from astock_trading.execution.service import ExecutionService, SimulatedBroker
-from astock_trading.platform.db import init_db, connect
 from astock_trading.platform.events import EventStore
 
 
 @pytest.fixture
-def db(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
-    yield conn
-    conn.close()
+def db(mysql_conn):
+    yield mysql_conn
 
 
 @pytest.fixture

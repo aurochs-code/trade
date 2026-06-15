@@ -98,6 +98,13 @@ class StrategyService:
             )
             decision = self._decision_with_false_breakout_cooldown(decision, score_result)
             decisions.append(decision)
+            buy_funnel = self._decider.build_buy_funnel(
+                score_result,
+                market_state,
+                decision=decision,
+                current_exposure_pct=current_exposure_pct,
+                weekly_buy_count=weekly_buy_count,
+            )
 
             # 追加决策事件
             decision_event_id = self._publisher.publish(DomainEvent(
@@ -121,6 +128,7 @@ class StrategyService:
                         "current_exposure_pct": current_exposure_pct,
                         "weekly_buy_count": weekly_buy_count,
                     },
+                    "buy_funnel": buy_funnel,
                     "market_state": _market_state_payload(market_state),
                     "decision_rules": _decision_rules_payload(self._decider),
                 },
@@ -142,6 +150,7 @@ class StrategyService:
                     "market_multiplier": decision.market_multiplier,
                     "source_event_id": decision_event_id,
                     "source_score_event_id": score_event_id,
+                    "buy_funnel": buy_funnel,
                     **score_evidence,
                 }
                 manual_metadata = {**metadata, "account": "main", "execution": "manual"}

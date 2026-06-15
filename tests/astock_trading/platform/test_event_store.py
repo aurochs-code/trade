@@ -1,22 +1,13 @@
 """Tests for platform/events.py — EventStore"""
 
 import pytest
-import sqlite3
 
-from astock_trading.platform.db import init_db
-from astock_trading.platform.database import Database, DatabaseSettings
 from astock_trading.platform.events import EventStore
 
 
 @pytest.fixture
-def store(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    yield EventStore(conn)
-    conn.close()
+def store(mysql_conn):
+    yield EventStore(mysql_conn)
 
 
 def test_append_and_query(store: EventStore):
@@ -64,58 +55,53 @@ def test_append_updates_event_stream_metadata(store: EventStore):
     }
 
 
-def test_append_recovers_event_stream_metadata_for_legacy_events(tmp_path):
-    db_path = tmp_path / "legacy-events.db"
-    init_db(db_path)
-    conn = sqlite3.connect(str(db_path), isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute(
-            """INSERT INTO event_log
-               (event_id, stream, stream_type, stream_version, event_type,
-                payload_json, metadata_json, occurred_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            ("legacy_evt", "legacy:1", "legacy", 1, "legacy.created", "{}", "{}", "2026-01-01T00:00:00+00:00"),
-        )
-        store = EventStore(conn)
+def test_append_recovers_event_stream_metadata_for_legacy_events(mysql_conn):
+    mysql_conn.execute(
+        """INSERT INTO event_log
+           (event_id, stream, stream_type, stream_version, event_type,
+            payload_json, metadata_json, occurred_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            "legacy_evt",
+            "legacy:1",
+            "legacy",
+            1,
+            "legacy.created",
+            "{}",
+            "{}",
+            "2026-01-01T00:00:00+00:00",
+        ),
+    )
+    store = EventStore(mysql_conn)
 
-        store.append("legacy:1", "legacy", "legacy.updated", {"ok": True})
+    store.append("legacy:1", "legacy", "legacy.updated", {"ok": True})
 
-        events = store.get_stream("legacy:1")
-        assert [event["stream_version"] for event in events] == [1, 2]
-        row = conn.execute(
-            "SELECT next_version FROM event_streams WHERE stream = ?",
-            ("legacy:1",),
-        ).fetchone()
-        assert row["next_version"] == 3
-    finally:
-        conn.close()
+    events = store.get_stream("legacy:1")
+    assert [event["stream_version"] for event in events] == [1, 2]
+    row = mysql_conn.execute(
+        "SELECT next_version FROM event_streams WHERE stream = ?",
+        ("legacy:1",),
+    ).fetchone()
+    assert row["next_version"] == 3
 
 
-def test_append_repairs_stale_event_stream_metadata(tmp_path):
-    db_path = tmp_path / "stale-streams.db"
-    init_db(db_path)
-    conn = sqlite3.connect(str(db_path), isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    try:
-        store = EventStore(conn)
-        store.append("stale:1", "stale", "stale.created", {"ok": True})
-        conn.execute(
-            "UPDATE event_streams SET next_version = 1 WHERE stream = ?",
-            ("stale:1",),
-        )
+def test_append_repairs_stale_event_stream_metadata(mysql_conn):
+    store = EventStore(mysql_conn)
+    store.append("stale:1", "stale", "stale.created", {"ok": True})
+    mysql_conn.execute(
+        "UPDATE event_streams SET next_version = 1 WHERE stream = ?",
+        ("stale:1",),
+    )
 
-        store.append("stale:1", "stale", "stale.updated", {"ok": True})
+    store.append("stale:1", "stale", "stale.updated", {"ok": True})
 
-        events = store.get_stream("stale:1")
-        assert [event["stream_version"] for event in events] == [1, 2]
-        row = conn.execute(
-            "SELECT next_version FROM event_streams WHERE stream = ?",
-            ("stale:1",),
-        ).fetchone()
-        assert row["next_version"] == 3
-    finally:
-        conn.close()
+    events = store.get_stream("stale:1")
+    assert [event["stream_version"] for event in events] == [1, 2]
+    row = mysql_conn.execute(
+        "SELECT next_version FROM event_streams WHERE stream = ?",
+        ("stale:1",),
+    ).fetchone()
+    assert row["next_version"] == 3
 
 
 def test_duplicate_stream_version_raises(store: EventStore):
@@ -204,19 +190,13 @@ def test_transaction_protection(store: EventStore):
     assert versions == list(range(1, 11))
 
 
-def test_sqlalchemy_runtime_connection_append_and_metadata_filter(tmp_path):
-    db = Database(DatabaseSettings(url=f"sqlite:///{tmp_path / 'runtime.db'}"))
-    db.create_schema()
-    conn = db.connect()
-    try:
-        init = conn.execute("SELECT COUNT(*) FROM event_log").fetchone()[0]
-        assert init == 0
-        store = EventStore(conn)
-        store.append("s:runtime", "t", "e", {"v": 1}, metadata={"run_id": "run_sqlalchemy"})
+def test_mysql_runtime_connection_append_and_metadata_filter(mysql_conn):
+    init = mysql_conn.execute("SELECT COUNT(*) FROM event_log").fetchone()[0]
+    assert init == 0
+    store = EventStore(mysql_conn)
+    store.append("s:runtime", "t", "e", {"v": 1}, metadata={"run_id": "run_mysql"})
 
-        events = store.query(metadata_filter={"run_id": "run_sqlalchemy"})
+    events = store.query(metadata_filter={"run_id": "run_mysql"})
 
-        assert len(events) == 1
-        assert events[0]["payload"]["v"] == 1
-    finally:
-        conn.close()
+    assert len(events) == 1
+    assert events[0]["payload"]["v"] == 1

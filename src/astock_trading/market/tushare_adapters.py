@@ -3,13 +3,15 @@
 Tushare is used as a paid, stable source for regular point-based A-share data.
 Minute, news, announcement and feature-data endpoints still require separate
 permissions, so this module only wires regular daily, index, financial and
-money-flow APIs.
+money-flow APIs. 6000-point THS hot-list data is used as paid L2 context when
+available, but it must degrade cleanly when the token lacks that permission.
 """
 
 from __future__ import annotations
 
 import asyncio
 from datetime import date, timedelta
+import json
 import os
 from typing import Any, Callable, Optional
 
@@ -90,6 +92,9 @@ class TushareClient:
                 "fina_indicator",
                 "moneyflow",
                 "stock_basic",
+                "index_classify",
+                "index_member_all",
+                "ths_hot",
                 "top_list",
                 "share_float",
                 "hk_hold",
@@ -298,6 +303,40 @@ def _moneyflow_to_yuan(value: object) -> float:
     return _to_float(value) * 10000
 
 
+def _split_tushare_tags(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, list):
+        return [str(item).strip() for item in parsed if str(item).strip()]
+    cleaned = text.strip("[]")
+    for sep in ("，", ",", "、", ";", "；", "|"):
+        cleaned = cleaned.replace(sep, ",")
+    return [part.strip().strip("'\"") for part in cleaned.split(",") if part.strip().strip("'\"")]
+
+
+def _tushare_hot_sector(row: dict, sector_type: str) -> dict:
+    return {
+        "name": row.get("ts_name", ""),
+        "type": sector_type,
+        "source": "tushare_ths_hot",
+        "rank": int(_to_float(row.get("rank"))) if _to_float(row.get("rank")) > 0 else None,
+        "change_pct": round(_to_float(row.get("pct_change")), 2),
+        "hot": _to_float(row.get("hot")),
+        "leader": row.get("rank_reason", ""),
+        "rank_time": row.get("rank_time", ""),
+        "concept_tags": _split_tushare_tags(row.get("concept")),
+    }
+
+
 def _dragon_tiger_stock(row: dict) -> dict:
     return {
         "code": _from_ts_code(str(row.get("ts_code") or "")),
@@ -348,6 +387,26 @@ class TushareMarketAdapter:
         if not self._client.enabled:
             return {}
         return await asyncio.to_thread(self._get_basic_info_sync, code)
+
+    async def get_concept_blocks(self, code: str) -> dict:
+        if not self._client.enabled:
+            return {"industry": [], "concept": [], "region": [], "concept_tags": []}
+        return await asyncio.to_thread(self._get_concept_blocks_sync, code)
+
+    async def get_hot_sectors(
+        self,
+        limit: int = 10,
+        sector_type: str = "industry",
+        sort: str = "change",
+    ) -> list[dict]:
+        if not self._client.enabled:
+            return []
+        return await asyncio.to_thread(self._get_hot_sectors_sync, limit, sector_type, sort)
+
+    async def get_industry_comparison(self, top_n: int = 20) -> dict:
+        if not self._client.enabled:
+            return {"top": [], "bottom": [], "total": 0}
+        return await asyncio.to_thread(self._get_industry_comparison_sync, top_n)
 
     async def get_daily_dragon_tiger(
         self,
@@ -539,6 +598,80 @@ class TushareMarketAdapter:
             "exchange": row.get("exchange", ""),
             "list_status": row.get("list_status", ""),
             "source": "tushare",
+        }
+
+    def _get_concept_blocks_sync(self, code: str) -> dict:
+        basic = self._get_basic_info_sync(code)
+        tags: list[str] = []
+        try:
+            hot_rows = self._client.query(
+                "ths_hot",
+                params={"ts_code": _to_ts_code(code), "is_new": "Y", "market": "热股"},
+                fields="ts_code,ts_name,concept,rank,rank_reason,hot,rank_time,pct_change",
+            )
+        except Exception:
+            hot_rows = []
+        for row in hot_rows:
+            tags.extend(_split_tushare_tags(row.get("concept")))
+        tags = list(dict.fromkeys(tags))
+
+        industry_name = str(basic.get("industry", "") or "").strip()
+        industry = []
+        if industry_name:
+            industry.append({
+                "name": industry_name,
+                "source": "tushare_stock_basic",
+                "change_pct": 0.0,
+            })
+        return {
+            "industry": industry,
+            "concept": [{"name": tag, "source": "tushare_ths_hot"} for tag in tags],
+            "region": [{"name": basic.get("area", ""), "source": "tushare_stock_basic"}]
+            if basic.get("area") else [],
+            "concept_tags": tags,
+            "source": "tushare",
+        }
+
+    def _get_hot_sectors_sync(self, limit: int = 10, sector_type: str = "industry", sort: str = "change") -> list[dict]:
+        if sort not in {"change", "hot"}:
+            return []
+        market = "概念板块" if sector_type == "concept" else "行业板块"
+        try:
+            rows = self._client.query(
+                "ths_hot",
+                params={"market": market, "is_new": "Y"},
+                fields="trade_date,data_type,ts_code,ts_name,rank,pct_change,current_price,concept,rank_reason,hot,rank_time",
+            )
+        except Exception:
+            return []
+        sectors = [_tushare_hot_sector(row, sector_type) for row in rows if row.get("ts_name")]
+        key = "hot" if sort == "hot" else "change_pct"
+        sectors.sort(key=lambda item: _to_float(item.get(key)), reverse=True)
+        return sectors[:max(limit, 0)]
+
+    def _get_industry_comparison_sync(self, top_n: int = 20) -> dict:
+        sectors = self._get_hot_sectors_sync(max(top_n * 2, top_n), "industry", "change")
+        if not sectors:
+            return {"top": [], "bottom": [], "total": 0}
+        ranked = []
+        for idx, row in enumerate(sectors, start=1):
+            ranked.append({
+                "rank": row.get("rank") or idx,
+                "name": row.get("name", ""),
+                "change_pct": row.get("change_pct", 0.0),
+                "turnover_yi": None,
+                "net_inflow_yi": None,
+                "up_count": 0,
+                "down_count": 0,
+                "leader": row.get("leader", ""),
+                "source": "tushare_ths_hot",
+            })
+        ranked.sort(key=lambda item: _to_float(item.get("change_pct")), reverse=True)
+        return {
+            "top": ranked[:top_n],
+            "bottom": ranked[-top_n:],
+            "total": len(ranked),
+            "source": "tushare_ths_hot",
         }
 
     def _get_daily_dragon_tiger_sync(

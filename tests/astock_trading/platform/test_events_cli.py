@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 from astock_trading.platform.cli import events as events_cli
-from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.events import EventStore
 from astock_trading.platform.evidence import backfill_legacy_evidence
 
 
-def test_query_evidence_events_returns_stock_evidence_chain(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_query_evidence_events_returns_stock_evidence_chain(mysql_conn):
+    conn = mysql_conn
     store = EventStore(conn)
 
     try:
@@ -38,10 +35,8 @@ def test_query_evidence_events_returns_stock_evidence_chain(tmp_path):
     ]
 
 
-def test_query_events_defaults_to_newest_first_and_supports_ascending(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_query_events_defaults_to_newest_first_and_supports_ascending(mysql_conn):
+    conn = mysql_conn
     store = EventStore(conn)
 
     try:
@@ -70,10 +65,8 @@ def test_query_events_defaults_to_newest_first_and_supports_ascending(tmp_path):
     assert [event["payload"]["date"] for event in oldest_first] == ["2026-05-21", "2026-05-22"]
 
 
-def test_backfill_legacy_evidence_appends_partial_evidence_once(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_backfill_legacy_evidence_appends_partial_evidence_once(mysql_conn):
+    conn = mysql_conn
     store = EventStore(conn)
 
     try:
@@ -143,10 +136,8 @@ def test_backfill_legacy_evidence_appends_partial_evidence_once(tmp_path):
     assert outcome["payload"]["fill_price_cents"] == 1510
 
 
-def test_backfill_legacy_evidence_recovers_buy_entry_route_from_source_score(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_backfill_legacy_evidence_recovers_buy_entry_route_from_source_score(mysql_conn):
+    conn = mysql_conn
     store = EventStore(conn)
 
     try:

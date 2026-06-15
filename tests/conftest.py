@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 _SESSION_LOOP: asyncio.AbstractEventLoop | None = None
+pytest_plugins = ["tests.astock_trading.helpers.mysql"]
 
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))

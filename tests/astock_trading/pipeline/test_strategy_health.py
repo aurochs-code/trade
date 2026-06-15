@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from astock_trading.pipeline.strategy_health import run_strategy_health_review
-from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.events import EventStore
 
 
@@ -63,10 +62,8 @@ def _seed_review_sample(
     )
 
 
-def test_strategy_health_review_groups_returns_and_records_event(tmp_path):
-    db_path = tmp_path / "health.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_strategy_health_review_groups_returns_and_records_event(mysql_conn):
+    conn = mysql_conn
     try:
         store = EventStore(conn)
         _seed_review_sample(
@@ -123,10 +120,8 @@ def test_strategy_health_review_groups_returns_and_records_event(tmp_path):
     assert events[0]["payload"]["analysis"] == "strategy_health_review"
 
 
-def test_strategy_health_review_reports_insufficient_samples(tmp_path):
-    db_path = tmp_path / "empty.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_strategy_health_review_reports_insufficient_samples(mysql_conn):
+    conn = mysql_conn
     try:
         payload = run_strategy_health_review(conn, min_samples=3, record=False)
     finally:

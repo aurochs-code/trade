@@ -74,7 +74,7 @@ class OrderManager:
 
         # 更新投影
         self._conn.execute(
-            """INSERT OR REPLACE INTO projection_orders
+            """REPLACE INTO projection_orders
                (order_id, code, side, shares, price_cents, status, broker, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (order_id, code, side.value, shares, price_cents, "pending", broker, now, now),
@@ -130,7 +130,6 @@ class OrderManager:
         else:
             cash_change = fill_price_cents * row["shares"] - fee_cents     # 正数
 
-        # Keep this portable across MySQL and SQLite test connections.
         balance = self._conn.execute(
             "SELECT scope FROM projection_balances WHERE scope = 'main'"
         ).fetchone()

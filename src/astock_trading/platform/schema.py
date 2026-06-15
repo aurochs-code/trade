@@ -265,6 +265,53 @@ report_artifacts = Table(
     Column("created_at", String(64), nullable=False),
 )
 
+backtest_runs = Table(
+    "backtest_runs",
+    metadata,
+    Column("run_id", String(64), primary_key=True),
+    Column("preset", String(128), nullable=False),
+    Column("codes_json", JSON, nullable=False),
+    Column("start_date", String(32), nullable=False),
+    Column("end_date", String(32), nullable=False),
+    Column("initial_cash", Float, nullable=False),
+    Column("final_value", Float),
+    Column("metrics_json", JSON, nullable=False),
+    Column("request_json", JSON, nullable=False),
+    Column("created_at", String(64), nullable=False),
+    Index("idx_backtest_runs_created", "created_at"),
+    Index("idx_backtest_runs_period", "start_date", "end_date"),
+)
+
+backtest_trades = Table(
+    "backtest_trades",
+    metadata,
+    Column("run_id", String(64), primary_key=True),
+    Column("trade_index", Integer, primary_key=True),
+    Column("trade_date", String(32), nullable=False),
+    Column("code", String(64), nullable=False),
+    Column("name", String(255)),
+    Column("side", String(16), nullable=False),
+    Column("price", Float),
+    Column("shares", Integer),
+    Column("pnl", Float),
+    Column("return_pct", Float),
+    Column("payload_json", JSON, nullable=False),
+    Index("idx_backtest_trades_code_date", "code", "trade_date"),
+)
+
+backtest_equity_curve = Table(
+    "backtest_equity_curve",
+    metadata,
+    Column("run_id", String(64), primary_key=True),
+    Column("curve_index", Integer, primary_key=True),
+    Column("trade_date", String(32), nullable=False),
+    Column("equity", Float, nullable=False),
+    Column("cash", Float),
+    Column("positions", Integer),
+    Column("payload_json", JSON, nullable=False),
+    Index("idx_backtest_equity_run_date", "run_id", "trade_date"),
+)
+
 signal_history_snapshots = Table(
     "signal_history_snapshots",
     metadata,

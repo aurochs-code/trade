@@ -49,7 +49,7 @@ class EventRepository:
         """
         追加一条事件。自动递增 stream_version。
         通过 event_streams 分配每个 stream 的 next_version，并在同一事务中写入事件。
-        SQLite 使用 BEGIN IMMEDIATE 串行化写入；MySQL 通过 event_streams 行锁保持一致性。
+        MySQL 通过 event_streams 行锁保持一致性。
 
         Returns:
             event_id
@@ -58,7 +58,7 @@ class EventRepository:
 
         for attempt in range(5):
             event_id = _new_id()
-            self._conn.execute("BEGIN IMMEDIATE")
+            self._conn.execute("BEGIN")
             try:
                 next_version = self._next_stream_version(stream, stream_type)
 
@@ -97,7 +97,7 @@ class EventRepository:
         if not row:
             next_version = self._legacy_next_stream_version(stream)
             self._conn.execute(
-                """INSERT OR IGNORE INTO event_streams
+                """INSERT IGNORE INTO event_streams
                    (stream, stream_type, next_version, updated_at)
                    VALUES (?, ?, ?, ?)""",
                 (stream, stream_type, next_version, _now_iso()),
@@ -122,7 +122,7 @@ class EventRepository:
 
     def _repair_stream_version(self, stream: str) -> None:
         next_version = self._legacy_next_stream_version(stream)
-        self._conn.execute("BEGIN IMMEDIATE")
+        self._conn.execute("BEGIN")
         try:
             self._conn.execute(
                 "UPDATE event_streams SET next_version = ?, updated_at = ? WHERE stream = ?",

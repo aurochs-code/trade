@@ -3,7 +3,12 @@
 from datetime import date
 
 from astock_trading.risk.models import RiskParams
-from astock_trading.risk.rules import check_exit_signals, check_portfolio_risk, get_risk_params
+from astock_trading.risk.rules import (
+    build_threshold_snapshot,
+    check_exit_signals,
+    check_portfolio_risk,
+    get_risk_params,
+)
 from astock_trading.risk.sizing import calc_position_size, volatility_adjusted_stop_loss
 from astock_trading.strategy.models import Style
 
@@ -29,6 +34,51 @@ def test_stop_loss_not_triggered():
     )
     stop_signals = [s for s in signals if s.signal_type == "stop_loss"]
     assert len(stop_signals) == 0
+
+
+def test_threshold_snapshot_keeps_non_triggered_risk_lines():
+    snapshot = build_threshold_snapshot(
+        code="002138",
+        avg_cost=10.0,
+        current_price=11.0,
+        entry_date=date(2026, 4, 1),
+        today=date(2026, 4, 6),
+        highest_since_entry=12.0,
+        entry_day_low=9.8,
+        params=RiskParams(
+            style=Style.MOMENTUM,
+            stop_loss=0.08,
+            trailing_stop=0.10,
+            time_stop_days=15,
+            exit_ma=20,
+        ),
+        ma20=10.5,
+        ma60=9.5,
+        signals=[],
+    )
+
+    assert snapshot["code"] == "002138"
+    assert snapshot["holding_days"] == 5
+    assert snapshot["triggered_signal_types"] == []
+    assert snapshot["thresholds"]["stop_loss"] == {
+        "enabled": True,
+        "trigger_price": 9.2,
+        "distance_pct": 0.1957,
+        "triggered": False,
+    }
+    assert snapshot["thresholds"]["trailing_stop"] == {
+        "enabled": True,
+        "trigger_price": 10.8,
+        "distance_pct": 0.0185,
+        "triggered": False,
+    }
+    assert snapshot["thresholds"]["ma_exit"] == {
+        "enabled": True,
+        "ma": 20,
+        "trigger_price": 10.5,
+        "distance_pct": 0.0476,
+        "triggered": False,
+    }
 
 
 def test_trailing_stop_triggered():

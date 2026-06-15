@@ -77,6 +77,109 @@ def _sector_heatmap_rows(rows: list[dict], limit: int) -> list[dict]:
     return normalized
 
 
+def _dedupe_news_symbols(items: list[dict], limit: int) -> list[str]:
+    seen: set[str] = set()
+    symbols: list[str] = []
+    for item in items:
+        code = str(item.get("code") or "").strip()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        symbols.append(code)
+        if len(symbols) >= limit:
+            break
+    return symbols
+
+
+def _news_hydrate_symbols(conn, codes: str, max_symbols: int) -> list[str]:
+    safe_limit = max(1, min(int(max_symbols or 80), 300))
+    explicit = [
+        {"code": part.strip()}
+        for part in codes.replace("，", ",").split(",")
+        if part.strip()
+    ]
+    if explicit:
+        return _dedupe_news_symbols(explicit, safe_limit)
+
+    candidates = load_candidate_pool_items(conn)
+    positions = load_local_position_items(conn)
+    return _dedupe_news_symbols([*positions, *candidates], safe_limit)
+
+
+async def _safe_news_list(coro) -> tuple[list[dict], str]:
+    try:
+        rows = await coro
+    except Exception as exc:
+        return [], f"{exc.__class__.__name__}: {exc}"
+    return rows if isinstance(rows, list) else [], ""
+
+
+async def _collect_news_hydration(
+    market_svc,
+    *,
+    symbols: list[str],
+    limit: int,
+    include_global: bool,
+    run_id: str,
+) -> dict:
+    market_tasks = {
+        "finance_flash": _safe_news_list(market_svc.collect_finance_flash(limit=limit, run_id=run_id)),
+        "market_announcements": _safe_news_list(market_svc.collect_market_announcements(limit=limit, run_id=run_id)),
+    }
+    if include_global:
+        market_tasks["global_risk_news"] = _safe_news_list(
+            market_svc.collect_global_risk_news(limit=limit, run_id=run_id)
+        )
+
+    market_results = dict(zip(
+        market_tasks.keys(),
+        await asyncio.gather(*market_tasks.values()),
+    ))
+
+    stock_news_count = 0
+    announcement_count = 0
+    failures: list[dict] = []
+    for code in symbols:
+        stock_news, announcements = await asyncio.gather(
+            _safe_news_list(market_svc.collect_stock_news(code, limit=limit, run_id=run_id)),
+            _safe_news_list(market_svc.collect_announcements(code, limit=limit, run_id=run_id)),
+        )
+        news_rows, news_error = stock_news
+        announcement_rows, announcement_error = announcements
+        stock_news_count += len(news_rows)
+        announcement_count += len(announcement_rows)
+        if news_error:
+            failures.append({"kind": "stock_news", "symbol": code, "error": news_error})
+        if announcement_error:
+            failures.append({"kind": "announcements", "symbol": code, "error": announcement_error})
+
+    counts = {
+        "finance_flash": len(market_results.get("finance_flash", ([], ""))[0]),
+        "market_announcements": len(market_results.get("market_announcements", ([], ""))[0]),
+        "global_risk_news": len(market_results.get("global_risk_news", ([], ""))[0]),
+        "stock_news": stock_news_count,
+        "announcements": announcement_count,
+    }
+    for kind, (_rows, error) in market_results.items():
+        if error:
+            failures.append({"kind": kind, "symbol": "cn_a", "error": error})
+
+    return {
+        "status": "ok" if not failures else "partial",
+        "run_id": run_id,
+        "writes_state": True,
+        "execution_allowed": False,
+        "symbols": symbols,
+        "symbol_count": len(symbols),
+        "counts": counts,
+        "failures": failures,
+        "storage": {
+            "primary": "mysql.market_observations",
+            "redis": "not_enabled",
+        },
+    }
+
+
 async def _collect_brief(
     market_svc,
     *,
@@ -85,29 +188,24 @@ async def _collect_brief(
     include_global: bool,
     run_id: str,
 ) -> dict:
-    news_method = getattr(market_svc, "collect_news_search", None)
-    if query and news_method is not None:
-        news_task = news_method(query, limit=limit, run_id=run_id)
-    else:
-        news_task = market_svc.collect_finance_flash(limit=limit, run_id=run_id)
-
     tasks = [
-        news_task,
         market_svc.collect_cross_platform_hot_stocks(limit=limit, run_id=run_id),
         market_svc.collect_hot_sectors(limit=limit, sector_type="industry", sort="change", run_id=run_id),
         market_svc.collect_hot_sectors(limit=limit, sector_type="concept", sort="change", run_id=run_id),
         market_svc.collect_hot_sectors(limit=limit, sector_type="industry", sort="money-flow", run_id=run_id),
     ]
-    if include_global:
-        tasks.append(market_svc.collect_global_risk_news(limit=limit, run_id=run_id))
 
     results = await asyncio.gather(*tasks)
-    finance_flash = results[0]
-    hot_stocks = results[1]
-    industry_sectors = results[2]
-    concept_sectors = results[3]
-    money_flow_sectors = results[4]
-    global_risk_news = results[5] if include_global else []
+    hot_stocks = results[0]
+    industry_sectors = results[1]
+    concept_sectors = results[2]
+    money_flow_sectors = results[3]
+    cached_items = getattr(market_svc, "cached_observation_items", None)
+    finance_flash = cached_items("finance_flash", "cn_a", limit=limit) if callable(cached_items) else []
+    global_risk_news = (
+        cached_items("global_risk_news", "global", limit=limit)
+        if include_global and callable(cached_items) else []
+    )
     strong_sectors = _sort_sectors([*industry_sectors, *concept_sectors], limit)
 
     if not strong_sectors and hasattr(market_svc, "collect_sector_heatmap"):
@@ -118,7 +216,7 @@ async def _collect_brief(
         "query": query,
         "run_id": run_id,
         "execution_allowed": False,
-        "source": "opencli",
+        "source": "mysql_cache",
         "finance_flash": finance_flash[:limit],
         "global_risk_news": global_risk_news[:limit],
         "hot_stocks": hot_stocks[:limit],
@@ -211,12 +309,12 @@ def market_intel_search(
     run_id = f"market_news_search_{local_now_str('%H%M%S')}"
     ctx = build_context()
     try:
-        rows = asyncio.run(ctx.market_svc.collect_news_search(query, limit=safe_limit, run_id=run_id))
+        rows = ctx.market_svc.cached_observation_items("market_news_search", query, limit=safe_limit)
         payload = {
             "query": query,
             "run_id": run_id,
             "execution_allowed": False,
-            "source": "opencli",
+            "source": "mysql_cache",
             "count": len(rows),
             "news": rows,
         }
@@ -390,12 +488,12 @@ def announcements(
     """查询巨潮公告列表。"""
     run_id = f"announcements_{local_now_str('%H%M%S')}"
     safe_limit = _bounded_limit(limit)
-
-    async def collect(market_svc):
-        rows = await market_svc.collect_announcements(code, safe_limit, run_id=run_id)
-        return {"run_id": run_id, "code": code, "count": len(rows), "announcements": rows}
-
-    json_or_text(_run_market_call(collect), as_json)
+    ctx = build_context()
+    try:
+        rows = ctx.market_svc.cached_observation_items("announcements", code, limit=safe_limit)
+        json_or_text({"run_id": run_id, "code": code, "count": len(rows), "announcements": rows}, as_json)
+    finally:
+        ctx.conn.close()
 
 
 @market_intel_app.command("research-reports")
@@ -423,12 +521,53 @@ def stock_news(
     """查询个股新闻。"""
     run_id = f"stock_news_{local_now_str('%H%M%S')}"
     safe_limit = _bounded_limit(limit)
+    ctx = build_context()
+    try:
+        rows = ctx.market_svc.cached_observation_items("stock_news", code, limit=safe_limit)
+        json_or_text({"run_id": run_id, "code": code, "count": len(rows), "news": rows}, as_json)
+    finally:
+        ctx.conn.close()
 
-    async def collect(market_svc):
-        rows = await market_svc.collect_stock_news(code, safe_limit, run_id=run_id)
-        return {"run_id": run_id, "code": code, "count": len(rows), "news": rows}
 
-    json_or_text(_run_market_call(collect), as_json)
+@market_intel_app.command("hydrate-news")
+def hydrate_news(
+    codes: str = typer.Option("", "--codes", help="逗号分隔股票代码；为空时抓持仓 + 候选池"),
+    limit: int = typer.Option(20, "--limit", help="每类/每票最大返回数量"),
+    max_symbols: int = typer.Option(80, "--max-symbols", help="本轮最多抓取多少只股票"),
+    include_global: bool = typer.Option(True, "--include-global/--no-global", help="是否抓取海外风险新闻"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """定时增量抓取新闻和公告，写入 MySQL 观测表。"""
+    safe_limit = _bounded_limit(limit, default=20, maximum=50)
+    run_id = f"news_hydrate_{local_now_str('%H%M%S')}"
+    ctx = build_context()
+    try:
+        symbols = _news_hydrate_symbols(ctx.conn, codes, max_symbols)
+        payload = asyncio.run(
+            _collect_news_hydration(
+                ctx.market_svc,
+                symbols=symbols,
+                limit=safe_limit,
+                include_global=include_global,
+                run_id=run_id,
+            )
+        )
+        if as_json:
+            json_or_text(payload, True)
+            return
+        lines = [
+            "新闻公告增量采集",
+            f"run_id: {payload['run_id']}",
+            f"状态: {payload['status']}",
+            f"股票数: {payload['symbol_count']}",
+            f"市场快讯: {payload['counts']['finance_flash']}",
+            f"市场公告: {payload['counts']['market_announcements']}",
+            f"个股新闻: {payload['counts']['stock_news']}",
+            f"个股公告: {payload['counts']['announcements']}",
+        ]
+        json_or_text("\n".join(lines), False)
+    finally:
+        ctx.conn.close()
 
 
 @market_intel_app.command("cls-flash")
@@ -439,12 +578,12 @@ def cls_flash(
     """查询财联社快讯。"""
     run_id = f"cls_flash_{local_now_str('%H%M%S')}"
     safe_limit = _bounded_limit(limit)
-
-    async def collect(market_svc):
-        rows = await market_svc.collect_cls_flash(safe_limit, run_id=run_id)
-        return {"run_id": run_id, "count": len(rows), "news": rows}
-
-    json_or_text(_run_market_call(collect), as_json)
+    ctx = build_context()
+    try:
+        rows = ctx.market_svc.cached_observation_items("cls_flash", "cn_a", limit=safe_limit)
+        json_or_text({"run_id": run_id, "count": len(rows), "news": rows}, as_json)
+    finally:
+        ctx.conn.close()
 
 
 @market_intel_app.command("global-news")
@@ -455,12 +594,14 @@ def global_news(
     """查询东财全球财经资讯。"""
     run_id = f"global_news_{local_now_str('%H%M%S')}"
     safe_limit = _bounded_limit(limit)
-
-    async def collect(market_svc):
-        rows = await market_svc.collect_global_news(safe_limit, run_id=run_id)
-        return {"run_id": run_id, "count": len(rows), "news": rows}
-
-    json_or_text(_run_market_call(collect), as_json)
+    ctx = build_context()
+    try:
+        rows = ctx.market_svc.cached_observation_items("global_news", "global", limit=safe_limit)
+        if not rows:
+            rows = ctx.market_svc.cached_observation_items("global_risk_news", "global", limit=safe_limit)
+        json_or_text({"run_id": run_id, "count": len(rows), "news": rows}, as_json)
+    finally:
+        ctx.conn.close()
 
 
 @market_intel_app.command("basic-info")

@@ -2,17 +2,14 @@
 
 import pytest
 
-from astock_trading.platform.db import init_db, connect
 from astock_trading.platform.events import EventStore
 from astock_trading.execution.service import ExecutionService, SimulatedBroker
 from astock_trading.execution.trade_logger import TradeLogger
 
 
 @pytest.fixture
-def env(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def env(tmp_path, mysql_conn):
+    conn = mysql_conn
     event_store = EventStore(conn)
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -21,7 +18,6 @@ def env(tmp_path):
     svc = ExecutionService(event_store, conn, broker=SimulatedBroker(), on_trade=[logger])
 
     yield {"svc": svc, "conn": conn, "vault": vault}
-    conn.close()
 
 
 class TestTradeLogger:

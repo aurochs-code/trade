@@ -5,13 +5,10 @@ from datetime import datetime, timedelta, timezone
 from astock_trading.market.health import evaluate_data_source_health
 from astock_trading.market import health as health_module
 from astock_trading.market.store import MarketStore
-from astock_trading.platform.db import connect, init_db
 
 
-def test_evaluate_data_source_health_marks_missing_required_as_failed(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_evaluate_data_source_health_marks_missing_required_as_failed(mysql_conn):
+    conn = mysql_conn
     try:
         now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
         MarketStore(conn).save_observation(
@@ -73,23 +70,21 @@ def test_latest_for_kinds_queries_each_kind_separately_to_avoid_large_sort():
     assert [params for _, params in conn.queries] == [("flow",), ("fund_flow",)]
 
 
-def test_market_observations_has_kind_observed_index(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_market_observations_has_kind_observed_index(mysql_conn):
+    conn = mysql_conn
     try:
-        rows = conn.execute("PRAGMA index_list(market_observations)").fetchall()
-        index_names = {row["name"] for row in rows}
+        rows = conn.execute(
+            "SHOW INDEX FROM market_observations WHERE Key_name = 'idx_market_obs_kind_observed'"
+        ).fetchall()
+        index_names = {row["Key_name"] for row in rows}
 
         assert "idx_market_obs_kind_observed" in index_names
     finally:
         conn.close()
 
 
-def test_evaluate_data_source_health_marks_stale_optional_as_warning(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_evaluate_data_source_health_marks_stale_optional_as_warning(mysql_conn):
+    conn = mysql_conn
     try:
         now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
         store = MarketStore(conn)
@@ -113,10 +108,8 @@ def test_evaluate_data_source_health_marks_stale_optional_as_warning(tmp_path):
         conn.close()
 
 
-def test_evaluate_data_source_health_defers_stale_required_sources_on_weekend(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_evaluate_data_source_health_defers_stale_required_sources_on_weekend(mysql_conn):
+    conn = mysql_conn
     try:
         now = datetime(2026, 5, 24, 0, 34, tzinfo=timezone.utc)
         store = MarketStore(conn)
@@ -145,10 +138,8 @@ def test_evaluate_data_source_health_defers_stale_required_sources_on_weekend(tm
         conn.close()
 
 
-def test_evaluate_data_source_health_accepts_market_announcements_alias(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_evaluate_data_source_health_accepts_market_announcements_alias(mysql_conn):
+    conn = mysql_conn
     try:
         now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
         store = MarketStore(conn)
@@ -171,10 +162,8 @@ def test_evaluate_data_source_health_accepts_market_announcements_alias(tmp_path
         conn.close()
 
 
-def test_evaluate_data_source_health_marks_empty_payload_as_degraded(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_evaluate_data_source_health_marks_empty_payload_as_degraded(mysql_conn):
+    conn = mysql_conn
     try:
         now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
         store = MarketStore(conn)
@@ -192,10 +181,8 @@ def test_evaluate_data_source_health_marks_empty_payload_as_degraded(tmp_path):
         conn.close()
 
 
-def test_evaluate_data_source_health_tracks_financial_observations(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_evaluate_data_source_health_tracks_financial_observations(mysql_conn):
+    conn = mysql_conn
     try:
         now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
         store = MarketStore(conn)
@@ -213,10 +200,8 @@ def test_evaluate_data_source_health_tracks_financial_observations(tmp_path):
         conn.close()
 
 
-def test_evaluate_data_source_health_includes_recent_provider_failures(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_evaluate_data_source_health_includes_recent_provider_failures(mysql_conn):
+    conn = mysql_conn
     try:
         now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
         store = MarketStore(conn)
@@ -262,10 +247,8 @@ def test_evaluate_data_source_health_includes_recent_provider_failures(tmp_path)
         conn.close()
 
 
-def test_evaluate_data_source_health_tracks_circuit_open_as_skipped_not_unresolved(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_evaluate_data_source_health_tracks_circuit_open_as_skipped_not_unresolved(mysql_conn):
+    conn = mysql_conn
     try:
         now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
         store = MarketStore(conn)
@@ -297,10 +280,8 @@ def test_evaluate_data_source_health_tracks_circuit_open_as_skipped_not_unresolv
         conn.close()
 
 
-def test_evaluate_data_source_health_resolves_cross_platform_hot_stocks_with_hot_stocks_fallback(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_evaluate_data_source_health_resolves_cross_platform_hot_stocks_with_hot_stocks_fallback(mysql_conn):
+    conn = mysql_conn
     try:
         now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
         store = MarketStore(conn)
@@ -340,10 +321,8 @@ def test_evaluate_data_source_health_resolves_cross_platform_hot_stocks_with_hot
         conn.close()
 
 
-def test_evaluate_data_source_health_resolves_cross_platform_hot_stocks_with_nearby_prior_hot_stocks(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_evaluate_data_source_health_resolves_cross_platform_hot_stocks_with_nearby_prior_hot_stocks(mysql_conn):
+    conn = mysql_conn
     try:
         now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
         store = MarketStore(conn)
@@ -389,10 +368,8 @@ def test_evaluate_data_source_health_resolves_cross_platform_hot_stocks_with_nea
         conn.close()
 
 
-def test_evaluate_data_source_health_marks_provider_failure_resolved_by_fallback(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_evaluate_data_source_health_marks_provider_failure_resolved_by_fallback(mysql_conn):
+    conn = mysql_conn
     try:
         now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
         store = MarketStore(conn)
@@ -443,10 +420,8 @@ def test_evaluate_data_source_health_marks_provider_failure_resolved_by_fallback
         conn.close()
 
 
-def test_evaluate_data_source_health_resolves_legacy_success_without_run_id(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_evaluate_data_source_health_resolves_legacy_success_without_run_id(mysql_conn):
+    conn = mysql_conn
     try:
         now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
         store = MarketStore(conn)
@@ -492,10 +467,8 @@ def test_evaluate_data_source_health_resolves_legacy_success_without_run_id(tmp_
         conn.close()
 
 
-def test_evaluate_data_source_health_resolves_later_success_from_same_provider(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_evaluate_data_source_health_resolves_later_success_from_same_provider(mysql_conn):
+    conn = mysql_conn
     try:
         now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
         store = MarketStore(conn)
@@ -541,10 +514,8 @@ def test_evaluate_data_source_health_resolves_later_success_from_same_provider(t
         conn.close()
 
 
-def test_evaluate_data_source_health_resolves_later_success_from_new_run(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_evaluate_data_source_health_resolves_later_success_from_new_run(mysql_conn):
+    conn = mysql_conn
     try:
         now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
         store = MarketStore(conn)
@@ -591,10 +562,8 @@ def test_evaluate_data_source_health_resolves_later_success_from_new_run(tmp_pat
         conn.close()
 
 
-def test_evaluate_data_source_health_warns_on_stale_candidate_pool(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_evaluate_data_source_health_warns_on_stale_candidate_pool(mysql_conn):
+    conn = mysql_conn
     try:
         now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
         store = MarketStore(conn)
@@ -619,10 +588,8 @@ def test_evaluate_data_source_health_warns_on_stale_candidate_pool(tmp_path):
         conn.close()
 
 
-def test_evaluate_data_source_health_warns_when_core_pool_is_empty(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_evaluate_data_source_health_warns_when_core_pool_is_empty(mysql_conn):
+    conn = mysql_conn
     try:
         now = datetime(2026, 5, 15, 3, 0, tzinfo=timezone.utc)
         store = MarketStore(conn)

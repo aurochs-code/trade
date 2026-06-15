@@ -386,7 +386,7 @@ def _evidence_gaps(market: dict, equity: dict, loss_streak: dict, *, min_market_
 
 def _write_report_artifact(conn: Any, event_id: str, markdown: str) -> None:
     conn.execute(
-        """INSERT OR REPLACE INTO report_artifacts
+        """REPLACE INTO report_artifacts
            (artifact_id, run_id, report_type, format, content, delivered_to, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (

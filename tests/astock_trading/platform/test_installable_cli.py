@@ -27,7 +27,7 @@ def test_runtime_env_loads_config_dir_env_without_overriding_process_env(tmp_pat
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / ".env").write_text(
-        "ASTOCK_DATABASE_URL=sqlite:///from-config.db\n"
+        "ASTOCK_DATABASE_URL=mysql+pymysql://user:pass@127.0.0.1:3306/from_config\n"
         "MX_APIKEY=from-config\n",
         encoding="utf-8",
     )
@@ -38,7 +38,9 @@ def test_runtime_env_loads_config_dir_env_without_overriding_process_env(tmp_pat
     loaded = load_runtime_env()
 
     assert loaded == config_dir / ".env"
-    assert os.environ["ASTOCK_DATABASE_URL"] == "sqlite:///from-config.db"
+    assert os.environ["ASTOCK_DATABASE_URL"] == (
+        "mysql+pymysql://user:pass@127.0.0.1:3306/from_config"
+    )
     assert os.environ["MX_APIKEY"] == "already-set"
 
 

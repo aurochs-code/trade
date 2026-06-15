@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -22,6 +23,7 @@ VALID_PIPELINES = (
 PIPELINE_HELP = ",".join(VALID_PIPELINES)
 
 PipelineCallback = Callable[[str, str, dict | None], None]
+_logger = logging.getLogger(__name__)
 
 
 def execute_pipeline(
@@ -65,15 +67,30 @@ def execute_pipeline(
         data_source_refresh = None
         data_source_warning = None
         if not ignore_data_source_health:
-            from astock_trading.market.health import evaluate_data_source_health
+            from astock_trading.market.health import (
+                evaluate_data_source_health,
+                record_data_source_health_snapshot,
+            )
 
             data_health = evaluate_data_source_health(ctx.conn)
+            _record_data_source_health_snapshot(
+                record_data_source_health_snapshot,
+                ctx.conn,
+                data_health,
+                run_id=run_id,
+            )
             gate = data_source_gate_decision(pipeline_type, data_health)
             if gate == "failed":
                 from astock_trading.platform.data_source_refresh import refresh_required_data_sources
 
                 data_source_refresh = refresh_required_data_sources(ctx, run_id=run_id)
                 data_health = evaluate_data_source_health(ctx.conn)
+                _record_data_source_health_snapshot(
+                    record_data_source_health_snapshot,
+                    ctx.conn,
+                    data_health,
+                    run_id=run_id,
+                )
                 gate = data_source_gate_decision(pipeline_type, data_health)
 
             if gate == "failed":
@@ -143,6 +160,13 @@ def _config_version(ctx: Any) -> str:
         return config_version
     config_snapshot = getattr(ctx, "config_snapshot", None)
     return config_snapshot.version if config_snapshot else "unknown"
+
+
+def _record_data_source_health_snapshot(record_func, conn: Any, data_health: dict, *, run_id: str) -> None:
+    try:
+        record_func(conn, data_health, run_id=run_id)
+    except Exception as exc:
+        _logger.debug("[pipeline_runner] 数据源健康历史记录失败: %s", exc)
 
 
 def _run_pipeline(ctx: Any, pipeline_type: str, run_id: str) -> dict:

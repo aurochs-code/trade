@@ -27,16 +27,11 @@ from astock_trading.market.models import (
 from astock_trading.market.store import MarketStore
 from astock_trading.market.service import MarketService
 from astock_trading.market.source_router import SourceRouteOptions
-from astock_trading.platform.db import init_db, connect
 
 
 @pytest.fixture
-def db(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
-    yield conn
-    conn.close()
+def db(mysql_conn):
+    yield mysql_conn
 
 
 @pytest.fixture
@@ -896,6 +891,57 @@ class TestMarketService:
         assert snaps[0].sector.industry_rank == 2
         assert snaps[0].sector.industry_change_pct == 3.0
         assert snaps[0].sector.relative_strength_pct == 4.5
+        assert snaps[0].sector.confirmed is True
+
+    def test_collect_batch_paid_sector_context_skips_free_provider(self, store):
+        quote = StockQuote(
+            code="300001", name="强势龙头", price=20.0,
+            open=18.8, high=20.1, low=18.7, close=20.0,
+            volume=12000000, amount=1.8e9, change_pct=7.5,
+        )
+
+        class TusharePaidSectorProvider(MockMarketProvider):
+            async def get_concept_blocks(self, code):
+                return {
+                    "industry": [{"name": "机器人", "change_pct": "3.0"}],
+                    "concept": [],
+                    "region": [],
+                    "concept_tags": [],
+                }
+
+            async def get_industry_comparison(self, top_n=20):
+                return {
+                    "top": [{"rank": 2, "name": "机器人", "change_pct": 3.0, "leader": "强势龙头"}],
+                    "bottom": [],
+                    "total": 1,
+                }
+
+        class FreeCrashingSectorProvider(MockMarketProvider):
+            async def get_concept_blocks(self, code):
+                raise RuntimeError("free provider should be isolated")
+
+            async def get_industry_comparison(self, top_n=20):
+                raise RuntimeError("free provider should be isolated")
+
+        svc = MarketService(
+            market_providers=[
+                TusharePaidSectorProvider({"300001": quote}),
+                FreeCrashingSectorProvider({"300001": quote}),
+            ],
+            store=store,
+        )
+
+        snaps = asyncio.get_event_loop().run_until_complete(
+            svc.collect_batch(
+                [{"code": "300001", "name": "强势龙头"}],
+                run_id="run_paid_sector",
+                include_sector_context=True,
+                paid_sector_context_only=True,
+            )
+        )
+
+        assert snaps[0].sector is not None
+        assert snaps[0].sector.industry_name == "机器人"
         assert snaps[0].sector.confirmed is True
 
     def test_fallback_on_failure(self, store):

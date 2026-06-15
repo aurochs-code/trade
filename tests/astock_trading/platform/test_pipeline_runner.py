@@ -72,6 +72,43 @@ def test_execute_pipeline_refreshes_required_data_sources_before_failing(monkeyp
     assert run_journal.failed is None
 
 
+def test_execute_pipeline_records_data_source_health_history(monkeypatch):
+    import astock_trading.market.health as market_health
+    import astock_trading.pipeline.morning as morning_pipeline
+
+    health = {"status": "ok", "required_missing": [], "optional_missing": []}
+    records = []
+
+    def fake_evaluate_data_source_health(conn):
+        return dict(health)
+
+    def fake_record_data_source_health_snapshot(conn, payload, *, run_id=None):
+        records.append({"conn": conn, "payload": payload, "run_id": run_id})
+        return "obs_health_1"
+
+    monkeypatch.setattr(market_health, "evaluate_data_source_health", fake_evaluate_data_source_health)
+    monkeypatch.setattr(
+        market_health,
+        "record_data_source_health_snapshot",
+        fake_record_data_source_health_snapshot,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        morning_pipeline,
+        "run",
+        lambda ctx, run_id: {"signal": "GREEN", "positions": 0, "risk_alerts": []},
+    )
+
+    run_journal = FakeRunJournal()
+    conn = object()
+    ctx = SimpleNamespace(conn=conn, run_journal=run_journal, config_version="test")
+
+    result = execute_pipeline(ctx, "morning", is_trading_day=True)
+
+    assert result["status"] == "completed"
+    assert records == [{"conn": conn, "payload": health, "run_id": "run_morning_test"}]
+
+
 def test_execute_pipeline_persists_data_source_artifacts_when_refresh_still_fails(monkeypatch):
     import astock_trading.market.health as market_health
     import astock_trading.pipeline.morning as morning_pipeline

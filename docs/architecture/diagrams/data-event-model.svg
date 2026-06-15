@@ -66,7 +66,7 @@
   <rect class="warn" x="68" y="430" rx="12" width="320" height="104"/>
   <text class="t" x="100" y="466">存储约束</text>
   <text class="s" x="102" y="498">金额统一 *_cents 整数；JSON 存 *_json</text>
-  <text class="s" x="102" y="522">运行态 MySQL；SQLite 只用于测试/历史迁移</text>
+  <text class="s" x="102" y="522">运行态 MySQL；不再维护 SQLite 路径</text>
 
   <path class="line" d="M390 255 H470"/>
   <path class="line" d="M870 206 H950"/>

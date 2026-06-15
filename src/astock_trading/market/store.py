@@ -104,7 +104,7 @@ class MarketRepository:
         now = datetime.now(timezone.utc).isoformat()
 
         self._conn.execute(
-            """INSERT OR REPLACE INTO market_observations
+            """REPLACE INTO market_observations
                (observation_id, source, kind, symbol, observed_at, run_id, payload_json)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
@@ -200,7 +200,7 @@ class MarketRepository:
         for _, row in bars_df.iterrows():
             try:
                 self._conn.execute(
-                    """INSERT OR REPLACE INTO market_bars
+                    """REPLACE INTO market_bars
                        (symbol, bar_date, period, open_cents, high_cents, low_cents,
                         close_cents, volume, amount_cents, source, fetched_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -278,7 +278,7 @@ class MarketRepository:
                 continue
             try:
                 self._conn.execute(
-                    """INSERT OR REPLACE INTO market_price_bars
+                    """REPLACE INTO market_price_bars
                        (symbol, bar_date, period, adjustflag, source,
                         open_cents, high_cents, low_cents, close_cents,
                         volume, amount_cents, change_pct, fetched_at, raw_json)
@@ -397,7 +397,7 @@ class MarketRepository:
         if not params:
             return 0
         self._conn.executemany(
-            """INSERT OR REPLACE INTO market_price_bars
+            """REPLACE INTO market_price_bars
                (symbol, bar_date, period, adjustflag, source,
                 open_cents, high_cents, low_cents, close_cents,
                 volume, amount_cents, change_pct, fetched_at, raw_json)
@@ -420,7 +420,7 @@ class MarketRepository:
         """写入财务快照。available_date 用于回测避免提前使用未披露数据。"""
         now = datetime.now(timezone.utc).isoformat()
         self._conn.execute(
-            """INSERT OR REPLACE INTO market_financials
+            """REPLACE INTO market_financials
                (symbol, report_year, report_quarter, source, report_date, available_date,
                 roe, roe_3y_ago, revenue_growth, net_profit_growth,
                 operating_cash_flow, pe_ttm, pb, debt_ratio, fetched_at, raw_json)
@@ -544,7 +544,7 @@ class MarketRepository:
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         self._conn.execute(
-            """INSERT OR REPLACE INTO market_fund_flows
+            """REPLACE INTO market_fund_flows
                (symbol, trade_date, source, net_inflow_1d, net_inflow_5d,
                 main_force_ratio, northbound_net, consecutive_outflow_days,
                 fetched_at, raw_json)
@@ -589,7 +589,7 @@ class MarketRepository:
         ])
         coverage_key = hashlib.sha1(key_src.encode()).hexdigest()
         self._conn.execute(
-            """INSERT OR REPLACE INTO market_data_coverage
+            """REPLACE INTO market_data_coverage
                (coverage_key, domain, symbol, start_date, end_date, period,
                 adjustflag, source, row_count, status, fetched_at, error_json)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",

@@ -30,12 +30,23 @@ class BacktestBatchConfig:
     adjustflag: str = "2"
     use_history_mirror: bool = True
     red_multiplier: float | None = None
+    disable_market_reduce_sell: bool = False
+    watch_loss_cooldown_days: int | None = None
+    watch_loss_cooldown_phases: tuple[str, ...] | None = None
     execute_red_trial_buy: bool = False
-    execute_trial_buy_routes: tuple[str, ...] = ()
-    execute_watch_trial_markets: tuple[str, ...] = ()
-    execute_watch_trial_routes: tuple[str, ...] = ()
-    execute_watch_trial_pairs: tuple[str, ...] = ()
-    execute_watch_trial_score_min: float = 6.0
+    execute_trial_buy_routes: tuple[str, ...] | None = None
+    execute_buy_phases: tuple[str, ...] | None = None
+    execute_watch_trial_markets: tuple[str, ...] | None = None
+    execute_watch_trial_routes: tuple[str, ...] | None = None
+    execute_watch_trial_pairs: tuple[str, ...] | None = None
+    execute_watch_trial_score_min: float | None = None
+    execute_watch_trial_score_max: float | None = None
+    execute_watch_trial_position_pct: float | None = None
+    execute_watch_trial_phases: tuple[str, ...] | None = None
+    execute_watch_trial_min_above_ma20_days: int | None = None
+    execute_watch_trial_min_above_ma20_days_phases: tuple[str, ...] | None = None
+    execute_watch_trial_require_above_ma60_phases: tuple[str, ...] | None = None
+    execute_watch_trial_require_above_ma120_phases: tuple[str, ...] | None = None
     score_dimension_mode: str = "full"
     load_financials: bool = True
     use_stored_data: bool = False
@@ -104,12 +115,29 @@ def run_batched_backtest(
             "batch_size": cfg.batch_size,
             "batch_timeout_seconds": cfg.batch_timeout_seconds,
             "red_multiplier": cfg.red_multiplier,
+            "disable_market_reduce_sell": cfg.disable_market_reduce_sell,
+            "watch_loss_cooldown_days": cfg.watch_loss_cooldown_days,
+            "watch_loss_cooldown_phases": list(cfg.watch_loss_cooldown_phases or ()),
             "execute_red_trial_buy": cfg.execute_red_trial_buy,
-            "execute_trial_buy_routes": list(cfg.execute_trial_buy_routes),
-            "execute_watch_trial_markets": list(cfg.execute_watch_trial_markets),
-            "execute_watch_trial_routes": list(cfg.execute_watch_trial_routes),
-            "execute_watch_trial_pairs": list(cfg.execute_watch_trial_pairs),
+            "execute_trial_buy_routes": list(cfg.execute_trial_buy_routes or ()),
+            "execute_buy_phases": list(cfg.execute_buy_phases or ()),
+            "execute_watch_trial_markets": list(cfg.execute_watch_trial_markets or ()),
+            "execute_watch_trial_routes": list(cfg.execute_watch_trial_routes or ()),
+            "execute_watch_trial_pairs": list(cfg.execute_watch_trial_pairs or ()),
             "execute_watch_trial_score_min": cfg.execute_watch_trial_score_min,
+            "execute_watch_trial_score_max": cfg.execute_watch_trial_score_max,
+            "execute_watch_trial_position_pct": cfg.execute_watch_trial_position_pct,
+            "execute_watch_trial_phases": list(cfg.execute_watch_trial_phases or ()),
+            "execute_watch_trial_min_above_ma20_days": cfg.execute_watch_trial_min_above_ma20_days,
+            "execute_watch_trial_min_above_ma20_days_phases": list(
+                cfg.execute_watch_trial_min_above_ma20_days_phases or ()
+            ),
+            "execute_watch_trial_require_above_ma60_phases": list(
+                cfg.execute_watch_trial_require_above_ma60_phases or ()
+            ),
+            "execute_watch_trial_require_above_ma120_phases": list(
+                cfg.execute_watch_trial_require_above_ma120_phases or ()
+            ),
             "score_dimension_mode": cfg.score_dimension_mode,
             "load_financials": cfg.load_financials,
             "use_stored_data": cfg.use_stored_data,
@@ -125,6 +153,7 @@ def run_batched_backtest(
             "failed_batches": len(failed_batches),
             "signal_sample_size": len(all_signals),
         },
+        "execution_semantics": _execution_semantics(cfg),
         "portfolio_summary": _portfolio_summary([item["result"] for item in successful_batches]),
         "batch_reports": [
             _compact_batch_report(item["codes"], item["result"])
@@ -138,6 +167,47 @@ def run_batched_backtest(
             "unknown_route_count": len(unknown_signals),
             "unknown_route_samples": unknown_signals[-20:],
         },
+    }
+
+
+def _execution_semantics(cfg: BacktestBatchConfig) -> dict[str, Any]:
+    watch_trial_enabled = bool(
+        cfg.execute_watch_trial_pairs
+        or cfg.execute_watch_trial_markets
+        or cfg.execute_watch_trial_routes
+    )
+    trial_buy_enabled = bool(
+        cfg.execute_red_trial_buy
+        or cfg.execute_trial_buy_routes
+    )
+    loss_cooldown_enabled = bool(cfg.watch_loss_cooldown_days and cfg.watch_loss_cooldown_days > 0)
+    research_enabled = bool(watch_trial_enabled or trial_buy_enabled or loss_cooldown_enabled)
+    notes = [
+        "默认只执行正式 BUY；route_execution_policy 默认仅用于 BUY 排序和仓位覆盖。",
+    ]
+    if research_enabled:
+        notes.append("本次批量回测包含显式研究 what-if：允许部分 WATCH/TRIAL_BUY 按规则模拟成交。")
+    if loss_cooldown_enabled:
+        notes.append("本次批量回测包含观察层亏损冷却：亏损卖出后暂停观察/试买模拟成交。")
+    return {
+        "mode": "research_what_if" if research_enabled else "production_buy_only",
+        "buy_only": not research_enabled,
+        "watch_trial_enabled": watch_trial_enabled,
+        "trial_buy_enabled": trial_buy_enabled,
+        "watch_loss_cooldown_days": int(cfg.watch_loss_cooldown_days or 0),
+        "watch_loss_cooldown_phases": list(cfg.watch_loss_cooldown_phases or ()),
+        "watch_trial_min_above_ma20_days": int(cfg.execute_watch_trial_min_above_ma20_days or 0),
+        "watch_trial_min_above_ma20_days_phases": list(
+            cfg.execute_watch_trial_min_above_ma20_days_phases or ()
+        ),
+        "watch_trial_require_above_ma60_phases": list(
+            cfg.execute_watch_trial_require_above_ma60_phases or ()
+        ),
+        "watch_trial_require_above_ma120_phases": list(
+            cfg.execute_watch_trial_require_above_ma120_phases or ()
+        ),
+        "route_policy_default_actions": ["BUY"],
+        "notes": notes,
     }
 
 
@@ -237,12 +307,35 @@ def _run_batch_in_process(
             "adjustflag": config.adjustflag,
             "use_history_mirror": config.use_history_mirror,
             "red_multiplier": config.red_multiplier,
+            "disable_market_reduce_sell": config.disable_market_reduce_sell,
+            "watch_loss_cooldown_days": config.watch_loss_cooldown_days,
+            "watch_loss_cooldown_phases": None if config.watch_loss_cooldown_phases is None else list(config.watch_loss_cooldown_phases),
             "execute_red_trial_buy": config.execute_red_trial_buy,
-            "execute_trial_buy_routes": list(config.execute_trial_buy_routes),
-            "execute_watch_trial_markets": list(config.execute_watch_trial_markets),
-            "execute_watch_trial_routes": list(config.execute_watch_trial_routes),
-            "execute_watch_trial_pairs": list(config.execute_watch_trial_pairs),
+            "execute_trial_buy_routes": None if config.execute_trial_buy_routes is None else list(config.execute_trial_buy_routes),
+            "execute_buy_phases": None if config.execute_buy_phases is None else list(config.execute_buy_phases),
+            "execute_watch_trial_markets": None if config.execute_watch_trial_markets is None else list(config.execute_watch_trial_markets),
+            "execute_watch_trial_routes": None if config.execute_watch_trial_routes is None else list(config.execute_watch_trial_routes),
+            "execute_watch_trial_pairs": None if config.execute_watch_trial_pairs is None else list(config.execute_watch_trial_pairs),
             "execute_watch_trial_score_min": config.execute_watch_trial_score_min,
+            "execute_watch_trial_score_max": config.execute_watch_trial_score_max,
+            "execute_watch_trial_position_pct": config.execute_watch_trial_position_pct,
+            "execute_watch_trial_phases": None if config.execute_watch_trial_phases is None else list(config.execute_watch_trial_phases),
+            "execute_watch_trial_min_above_ma20_days": config.execute_watch_trial_min_above_ma20_days,
+            "execute_watch_trial_min_above_ma20_days_phases": (
+                None
+                if config.execute_watch_trial_min_above_ma20_days_phases is None
+                else list(config.execute_watch_trial_min_above_ma20_days_phases)
+            ),
+            "execute_watch_trial_require_above_ma60_phases": (
+                None
+                if config.execute_watch_trial_require_above_ma60_phases is None
+                else list(config.execute_watch_trial_require_above_ma60_phases)
+            ),
+            "execute_watch_trial_require_above_ma120_phases": (
+                None
+                if config.execute_watch_trial_require_above_ma120_phases is None
+                else list(config.execute_watch_trial_require_above_ma120_phases)
+            ),
             "score_dimension_mode": config.score_dimension_mode,
             "load_financials": config.load_financials,
             "progress_log": config.progress_log,
@@ -297,12 +390,35 @@ def _run_backtest_child(queue: Any, payload: dict[str, Any]) -> None:
                 adjustflag=payload["adjustflag"],
                 use_history_mirror=payload["use_history_mirror"],
                 red_multiplier=payload["red_multiplier"],
+                disable_market_reduce_sell=bool(payload.get("disable_market_reduce_sell", False)),
+                watch_loss_cooldown_days=payload.get("watch_loss_cooldown_days"),
+                watch_loss_cooldown_phases=None if payload.get("watch_loss_cooldown_phases") is None else tuple(payload.get("watch_loss_cooldown_phases") or ()),
                 execute_red_trial_buy=payload["execute_red_trial_buy"],
-                execute_trial_buy_routes=tuple(payload["execute_trial_buy_routes"]),
-                execute_watch_trial_markets=tuple(payload["execute_watch_trial_markets"]),
-                execute_watch_trial_routes=tuple(payload["execute_watch_trial_routes"]),
-                execute_watch_trial_pairs=tuple(payload["execute_watch_trial_pairs"]),
+                execute_trial_buy_routes=None if payload.get("execute_trial_buy_routes") is None else tuple(payload["execute_trial_buy_routes"]),
+                execute_buy_phases=None if payload.get("execute_buy_phases") is None else tuple(payload.get("execute_buy_phases") or ()),
+                execute_watch_trial_markets=None if payload.get("execute_watch_trial_markets") is None else tuple(payload["execute_watch_trial_markets"]),
+                execute_watch_trial_routes=None if payload.get("execute_watch_trial_routes") is None else tuple(payload["execute_watch_trial_routes"]),
+                execute_watch_trial_pairs=None if payload.get("execute_watch_trial_pairs") is None else tuple(payload["execute_watch_trial_pairs"]),
                 execute_watch_trial_score_min=payload["execute_watch_trial_score_min"],
+                execute_watch_trial_score_max=payload.get("execute_watch_trial_score_max"),
+                execute_watch_trial_position_pct=payload.get("execute_watch_trial_position_pct"),
+                execute_watch_trial_phases=None if payload.get("execute_watch_trial_phases") is None else tuple(payload.get("execute_watch_trial_phases") or ()),
+                execute_watch_trial_min_above_ma20_days=payload.get("execute_watch_trial_min_above_ma20_days"),
+                execute_watch_trial_min_above_ma20_days_phases=(
+                    None
+                    if payload.get("execute_watch_trial_min_above_ma20_days_phases") is None
+                    else tuple(payload.get("execute_watch_trial_min_above_ma20_days_phases") or ())
+                ),
+                execute_watch_trial_require_above_ma60_phases=(
+                    None
+                    if payload.get("execute_watch_trial_require_above_ma60_phases") is None
+                    else tuple(payload.get("execute_watch_trial_require_above_ma60_phases") or ())
+                ),
+                execute_watch_trial_require_above_ma120_phases=(
+                    None
+                    if payload.get("execute_watch_trial_require_above_ma120_phases") is None
+                    else tuple(payload.get("execute_watch_trial_require_above_ma120_phases") or ())
+                ),
                 score_dimension_mode=payload["score_dimension_mode"],
                 signal_record_limit=None,
                 load_financials=payload["load_financials"],

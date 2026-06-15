@@ -13,7 +13,6 @@ from astock_trading.pipeline.strategy_profiles import (
     propose_strategy_allocation,
 )
 from astock_trading.platform.config import ConfigRegistry
-from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.events import EventStore
 
 
@@ -89,13 +88,11 @@ strategy:
     )
 
 
-def test_compare_strategy_profiles_reports_profile_evidence_and_records_event(tmp_path):
+def test_compare_strategy_profiles_reports_profile_evidence_and_records_event(tmp_path, mysql_conn):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     _write_profile_config(config_dir)
-    db_path = tmp_path / "profiles.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
     try:
         store = EventStore(conn)
         trend_config, _ = ConfigRegistry(config_dir=config_dir, profile="trend_swing").load_and_validate()
@@ -156,13 +153,11 @@ def test_compare_strategy_profiles_reports_profile_evidence_and_records_event(tm
     assert events[0]["payload"]["guardrails"]["auto_switch_profile"] is False
 
 
-def test_compare_strategy_profiles_without_runs_marks_shadow_validation_needed(tmp_path):
+def test_compare_strategy_profiles_without_runs_marks_shadow_validation_needed(tmp_path, mysql_conn):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     _write_profile_config(config_dir)
-    db_path = tmp_path / "empty.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
     try:
         payload = compare_strategy_profiles(conn, config_dir=config_dir, profiles=("trend_swing",), record=False)
     finally:
@@ -173,13 +168,11 @@ def test_compare_strategy_profiles_without_runs_marks_shadow_validation_needed(t
     assert "先做影子运行" in payload["recommendations"][0]
 
 
-def test_build_strategy_profile_activation_plan_requires_manual_confirmation(tmp_path, monkeypatch):
+def test_build_strategy_profile_activation_plan_requires_manual_confirmation(tmp_path, monkeypatch, mysql_conn):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     _write_profile_config(config_dir)
-    db_path = tmp_path / "activation.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
     monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
     try:
         payload = build_strategy_profile_activation_plan(
@@ -305,15 +298,17 @@ def test_build_strategy_profile_activation_plan_requires_manual_confirmation(tmp
 def test_apply_strategy_profile_activation_requires_explicit_confirmation(
     tmp_path,
     monkeypatch,
+    mysql_conn,
 ):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     _write_profile_config(config_dir)
     env_file = tmp_path / ".env"
-    env_file.write_text("ASTOCK_DATABASE_URL=sqlite:///runtime.db\n", encoding="utf-8")
-    db_path = tmp_path / "activation.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    env_file.write_text(
+        "ASTOCK_DATABASE_URL=mysql+pymysql://user:pass@127.0.0.1:3306/runtime\n",
+        encoding="utf-8",
+    )
+    conn = mysql_conn
     monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
     try:
         payload = apply_strategy_profile_activation(
@@ -337,19 +332,18 @@ def test_apply_strategy_profile_activation_requires_explicit_confirmation(
 def test_apply_strategy_profile_activation_updates_env_and_records_event(
     tmp_path,
     monkeypatch,
+    mysql_conn,
 ):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     _write_profile_config(config_dir)
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "ASTOCK_DATABASE_URL=sqlite:///runtime.db\n"
+        "ASTOCK_DATABASE_URL=mysql+pymysql://user:pass@127.0.0.1:3306/runtime\n"
         "ASTOCK_CONFIG_PROFILE=default\n",
         encoding="utf-8",
     )
-    db_path = tmp_path / "activation.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
     monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
     try:
         payload = apply_strategy_profile_activation(
@@ -412,13 +406,11 @@ def _append_reviews(store: EventStore, *, profile_version: str, profile: str, re
         )
 
 
-def test_propose_strategy_allocation_isolates_capital_and_flags_weak_profiles(tmp_path):
+def test_propose_strategy_allocation_isolates_capital_and_flags_weak_profiles(tmp_path, mysql_conn):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     _write_profile_config(config_dir)
-    db_path = tmp_path / "allocation.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
     try:
         store = EventStore(conn)
         trend_version = _insert_profile_version(conn, config_dir, "trend_swing", "v_trend")
@@ -454,13 +446,11 @@ def test_propose_strategy_allocation_isolates_capital_and_flags_weak_profiles(tm
     assert events[0]["payload"]["guardrails"]["auto_apply"] is False
 
 
-def test_propose_strategy_allocation_requires_shadow_data_before_allocating(tmp_path):
+def test_propose_strategy_allocation_requires_shadow_data_before_allocating(tmp_path, mysql_conn):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     _write_profile_config(config_dir)
-    db_path = tmp_path / "empty_allocation.db"
-    init_db(db_path)
-    conn = connect(db_path)
+    conn = mysql_conn
     try:
         payload = propose_strategy_allocation(
             conn,

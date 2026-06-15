@@ -4,7 +4,6 @@ import pytest
 from dataclasses import replace
 from datetime import date
 
-from astock_trading.platform.db import init_db, connect
 from astock_trading.platform.events import EventStore
 from astock_trading.market.models import (
     FinancialReport,
@@ -33,12 +32,8 @@ from astock_trading.strategy.models import Style
 
 
 @pytest.fixture
-def db(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = connect(db_path)
-    yield conn
-    conn.close()
+def db(mysql_conn):
+    yield mysql_conn
 
 
 @pytest.fixture
@@ -207,6 +202,76 @@ class TestStrategyService:
         assert manual_payload["entry_signal"] is True
         assert manual_payload["primary_strategy_route"] == "flow_confirmed_trend"
         assert manual_payload["primary_strategy_route_label"] == "资金趋势确认"
+
+    def test_decision_persists_structured_buy_funnel(self, event_store):
+        score = ScoreResult(
+            code="002384",
+            name="东山精密",
+            total=6.8,
+            dimensions=[
+                DimensionScore("technical", 2.4, 3.0, "趋势偏强"),
+                DimensionScore("fundamental", 1.2, 3.0, "基本面可用"),
+                DimensionScore("flow", 1.6, 2.0, "资金较强"),
+                DimensionScore("sentiment", 1.6, 2.0, "情绪偏强"),
+            ],
+            entry_signal=False,
+            style=Style.MOMENTUM,
+            style_confidence=0.8,
+            data_quality=DataQuality.OK,
+            strategy_routes=[
+                StrategyRouteEvidence(
+                    route="trend_cooling_off",
+                    display_name="趋势冷却观察",
+                    family="trend_swing",
+                    confidence=0.7,
+                    entry_signal=False,
+                    status="watch",
+                    route_score=0.7,
+                )
+            ],
+            primary_strategy_route="trend_cooling_off",
+        )
+
+        class StaticScorer:
+            def score_batch(self, snapshots):
+                return [score]
+
+        decider = Decider(
+            buy_threshold=6.5,
+            watch_threshold=5.0,
+            require_entry_signal_for_buy=True,
+            min_data_quality_for_buy="ok",
+            route_execution_policy={
+                "GREEN:short_continuation": {
+                    "score_min": 6.0,
+                    "position_pct": 0.22,
+                    "priority": 70,
+                }
+            },
+        )
+        svc = StrategyService(StaticScorer(), decider, event_store)
+
+        svc.evaluate(
+            [_make_snapshot("002384", "东山精密")],
+            MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
+            run_id="run_buy_funnel",
+            config_version="v_test",
+        )
+
+        decision_payload = event_store.query(event_type="decision.suggested")[0]["payload"]
+        funnel = decision_payload["buy_funnel"]
+        assert funnel["status"] == "trial_only"
+        assert funnel["decision_reason_keys"] == ["entry_signal_missing", "route_policy_not_matched"]
+        assert funnel["gates"]["entry_signal"] == {
+            "status": "blocked",
+            "required": True,
+            "triggered": False,
+            "reason_key": "entry_signal_missing",
+        }
+        assert funnel["gates"]["route_policy"]["status"] == "not_matched"
+        assert funnel["gates"]["route_policy"]["primary_route"] == "trend_cooling_off"
+        assert funnel["gates"]["market_regime"]["status"] == "pass"
+        assert event_store.query(event_type="manual_trade.requested") == []
 
     def test_trial_buy_decision_does_not_request_manual_trade(self, event_store):
         score = ScoreResult(

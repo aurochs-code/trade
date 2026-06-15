@@ -125,7 +125,6 @@ def run_continuation_validation(
     end: str,
     top_n: int | None = None,
     data_dir: str | Path | None = None,
-    db_path: str | Path | None = None,
 ) -> dict:
     filter_cfg, score_cfg, validation_cfg = _load_continuation_settings()
     effective_top_n = top_n or score_cfg.top_n
@@ -134,7 +133,6 @@ def run_continuation_validation(
         start=start,
         end=end,
         data_dir=data_dir,
-        db_path=db_path,
         filter_cfg=filter_cfg,
         score_cfg=score_cfg,
     )
@@ -168,7 +166,6 @@ def _load_ranked_forward_returns(
     start: str,
     end: str,
     data_dir: str | Path | None = None,
-    db_path: str | Path | None = None,
     filter_cfg: ContinuationFilterConfig | None = None,
     score_cfg: ContinuationScoreConfig | None = None,
 ) -> dict:
@@ -192,7 +189,6 @@ def _load_ranked_forward_returns(
         codes=codes,
         start=start,
         end=end,
-        db_path=db_path,
         filter_cfg=filter_cfg or ContinuationFilterConfig(),
         score_cfg=score_cfg or ContinuationScoreConfig(),
     )
@@ -245,11 +241,10 @@ def _load_from_market_bars(
     codes: list[str],
     start: str,
     end: str,
-    db_path: str | Path | None = None,
     filter_cfg: ContinuationFilterConfig | None = None,
     score_cfg: ContinuationScoreConfig | None = None,
 ) -> dict:
-    conn = connect(Path(db_path) if db_path else None)
+    conn = connect()
     try:
         store = MarketStore(conn)
         qualifier = ContinuationQualifier(filter_cfg or ContinuationFilterConfig())

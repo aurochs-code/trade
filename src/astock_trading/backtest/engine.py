@@ -36,7 +36,7 @@ from typing import Any, TYPE_CHECKING, Optional
 import pandas as pd
 import yaml
 
-from astock_trading.backtest.signal_analysis import signal_alpha_summary
+from astock_trading.backtest.signal_analysis import market_phase_bucket, signal_alpha_summary
 
 if TYPE_CHECKING:
     from astock_trading.strategy.models import MarketState
@@ -416,18 +416,44 @@ def _market_state_from_index(
     price = float(closes.iloc[-1])
     ma20_idx = float(closes.iloc[-20:].mean())
     ma60_idx = float(closes.iloc[-60:].mean()) if len(closes) >= 60 else 0.0
+    ma120_idx = float(closes.iloc[-120:].mean()) if len(closes) >= 120 else 0.0
     ma_idx = ma60_idx if ma60_idx > 0 else ma20_idx  # 降级用 MA20
 
     above_ma20 = price > ma20_idx > 0
     above_ma = price > ma_idx > 0
+    above_ma120 = price > ma120_idx > 0 if ma120_idx > 0 else None
+    index_ma20_deviation_pct = ((price - ma20_idx) / ma20_idx * 100) if ma20_idx > 0 else 0.0
+    index_ma20_slope_5d_pct = 0.0
+    if len(closes) >= 25 and ma20_idx > 0:
+        ma20_5d_ago = float(closes.iloc[-25:-5].mean())
+        if ma20_5d_ago > 0:
+            index_ma20_slope_5d_pct = (ma20_idx - ma20_5d_ago) / ma20_5d_ago * 100
+    index_ma120_slope_20d_pct = 0.0
+    if len(closes) >= 140 and ma120_idx > 0:
+        ma120_20d_ago = float(closes.iloc[-140:-20].mean())
+        if ma120_20d_ago > 0:
+            index_ma120_slope_20d_pct = (ma120_idx - ma120_20d_ago) / ma120_20d_ago * 100
 
     # below_ma60_days（不足 60 天时，统计低于 MA20 的天数代替）
     below_days = 0
+    below_ma20_days = 0
+    above_ma20_days = 0
     lookback = min(20, len(closes) - 1)
     if ma_idx > 0:
         for p in reversed(closes.iloc[-lookback:].tolist()):
             if p < ma_idx:
                 below_days += 1
+            else:
+                break
+    if ma20_idx > 0:
+        for p in reversed(closes.iloc[-lookback:].tolist()):
+            if p < ma20_idx:
+                below_ma20_days += 1
+            else:
+                break
+        for p in reversed(closes.iloc[-lookback:].tolist()):
+            if p > ma20_idx:
+                above_ma20_days += 1
             else:
                 break
 
@@ -462,8 +488,16 @@ def _market_state_from_index(
             "price": round(price, 2),
             "ma20": round(ma20_idx, 2),
             "ma60": round(ma60_idx, 2) if ma60_idx > 0 else None,
+            "ma120": round(ma120_idx, 2) if ma120_idx > 0 else None,
             "above_ma20": above_ma20,
+            "above_ma60": bool(price > ma60_idx > 0) if ma60_idx > 0 else None,
+            "above_ma120": above_ma120,
             "below_ma_days": below_days,
+            "below_ma20_days": below_ma20_days,
+            "above_ma20_days": above_ma20_days,
+            "index_ma20_deviation_pct": round(index_ma20_deviation_pct, 2),
+            "index_ma20_slope_5d_pct": round(index_ma20_slope_5d_pct, 2),
+            "index_ma120_slope_20d_pct": round(index_ma120_slope_20d_pct, 2),
         },
     )
 
@@ -505,6 +539,88 @@ def _market_signal_value(market: object) -> str:
     return str(getattr(getattr(market, "signal", None), "value", "") or "unknown")
 
 
+def _market_context_payload(market: object) -> dict[str, Any]:
+    detail = getattr(market, "detail", {}) or {}
+    if not isinstance(detail, dict):
+        detail = {}
+    payload = {
+        "price": detail.get("price"),
+        "ma20": detail.get("ma20"),
+        "ma60": detail.get("ma60"),
+        "ma120": detail.get("ma120"),
+        "above_ma60": detail.get("above_ma60"),
+        "above_ma120": detail.get("above_ma120"),
+        "index_ma20_deviation_pct": detail.get("index_ma20_deviation_pct"),
+        "index_ma20_slope_5d_pct": detail.get("index_ma20_slope_5d_pct"),
+        "index_ma120_slope_20d_pct": detail.get("index_ma120_slope_20d_pct"),
+        "above_ma20_days": detail.get("above_ma20_days"),
+        "below_ma20_days": detail.get("below_ma20_days"),
+        "below_ma_days": detail.get("below_ma_days"),
+    }
+    payload["market_phase_bucket"] = market_phase_bucket(payload)
+    return payload
+
+
+def _is_market_reduce_signal(market: object) -> bool:
+    return _market_signal_value(market) in {"RED", "CLEAR"}
+
+
+def _score_route_label(score: object) -> str:
+    route = str(getattr(score, "primary_strategy_route", "") or "")
+    if route:
+        return route
+    if bool(getattr(score, "entry_signal", False)):
+        return "generic_entry_signal_watch"
+    return "no_entry_route"
+
+
+def _decision_reason_keys(intent: object) -> list[str]:
+    notes = [str(item) for item in (getattr(intent, "notes", []) or []) if str(item)]
+    action = str(getattr(getattr(intent, "action", None), "value", "") or "")
+    reasons: list[str] = []
+    for note in notes:
+        if "一票否决" in note:
+            reasons.append("veto")
+        if "禁止新开仓" in note:
+            reasons.append("market_blocks_new_positions")
+        if "入场信号未触发" in note:
+            reasons.append("entry_signal_missing")
+        if "入场信号已触发" in note and "正式买入线" in note:
+            reasons.append("entry_signal_below_buy_line")
+        if "观察路线" in note and "试买意向" in note:
+            reasons.append("watch_route_near_trial_line")
+        if "数据质量" in note and "低于要求" in note:
+            reasons.append("data_quality_below_min")
+        if "关键数据缺失过多" in note:
+            reasons.append("too_many_missing_fields")
+        if "关键字段缺失" in note:
+            reasons.append("critical_missing_fields")
+        if "仓位空间不足" in note:
+            reasons.append("position_space_insufficient")
+        if "本周已买" in note:
+            reasons.append("weekly_limit_decision")
+        if "市场制度阻断观察" in note:
+            reasons.append("regime_trial_disabled")
+        if "只允许试买路线" in note:
+            reasons.append("trial_route_not_enabled_by_regime")
+        if "禁用试买路线" in note:
+            reasons.append("trial_route_disabled_by_regime")
+        if "评分过低" in note:
+            reasons.append("score_too_low")
+        if note.startswith("路线 ") and "买入线" in note:
+            reasons.append("route_policy_buy_line")
+    if not reasons:
+        if action == "WATCH":
+            reasons.append("score_between_watch_and_buy")
+        elif action == "CLEAR":
+            reasons.append("clear_without_detail")
+        elif action == "TRIAL_BUY":
+            reasons.append("trial_buy_soft_signal")
+        elif action == "BUY":
+            reasons.append("buy_signal")
+    return list(dict.fromkeys(reasons))
+
+
 # ---------------------------------------------------------------------------
 # BacktestEngine
 # ---------------------------------------------------------------------------
@@ -526,6 +642,7 @@ class BacktestConfig:
     daily_max_buys: int = 2
     holding_max: int = 5
     route_execution_policy: dict = field(default_factory=dict)
+    execute_buy_phase_buckets: tuple[str, ...] = ()
     # 评分权重
     weights: dict = field(default_factory=lambda: {
         "technical": 3.0, "fundamental": 2.0, "flow": 2.0, "sentiment": 3.0
@@ -538,12 +655,40 @@ class BacktestConfig:
     score_adjustments: dict = field(default_factory=dict)
     score_dimension_mode: str = "full"
     market_multipliers: dict = field(default_factory=dict)
+    disable_market_reduce_sell: bool = False
+    watch_loss_cooldown_days: int = 0
+    watch_loss_cooldown_phase_buckets: tuple[str, ...] = ()
     execute_trial_buy_market_signals: tuple[str, ...] = ()
     execute_trial_buy_routes: tuple[str, ...] = ()
     execute_watch_trial_market_signals: tuple[str, ...] = ()
     execute_watch_trial_routes: tuple[str, ...] = ()
     execute_watch_trial_pairs: tuple[str, ...] = ()
     execute_watch_trial_score_min: float = 6.0
+    execute_watch_trial_score_max: float | None = None
+    execute_watch_trial_position_pct: float | None = None
+    execute_watch_trial_phase_buckets: tuple[str, ...] = ()
+    execute_watch_trial_min_above_ma20_days: int = 0
+    execute_watch_trial_min_above_ma20_days_phase_buckets: tuple[str, ...] = ()
+    execute_watch_trial_require_above_ma60_phase_buckets: tuple[str, ...] = ()
+    execute_watch_trial_require_above_ma120_phase_buckets: tuple[str, ...] = ()
+    scale_in_enabled: bool = False
+    scale_in_profit_threshold: float = 0.10
+    scale_in_step_position_pct: float = 0.075
+    scale_in_max_position_pct: float | None = None
+    scale_in_max_adds: int = 2
+    scale_in_min_days_between: int = 5
+    scale_in_routes: tuple[str, ...] = ()
+    scale_in_market_signals: tuple[str, ...] = ()
+    scale_in_actions: tuple[str, ...] = ("BUY", "WATCH")
+    scale_in_require_entry_signal: bool = True
+    scale_in_score_min: float = 5.0
+    scale_in_reset_time_stop: bool = True
+    scale_in_aggressive_max_position_pct: float | None = None
+    scale_in_aggressive_step_position_pct: float | None = None
+    scale_in_aggressive_market_signals: tuple[str, ...] = ()
+    scale_in_aggressive_routes: tuple[str, ...] = ()
+    scale_in_aggressive_phase_buckets: tuple[str, ...] = ()
+    trade_record_limit: int | None = 50
     signal_record_limit: int | None = 50
     include_signal_alpha: bool = True
     load_financials: bool = True
@@ -563,6 +708,9 @@ class Position:
     entry_date: str
     high_water: float
     market_reduced: bool = False  # 是否已因大盘CLEAR减过仓
+    position_pct: float = 0.0
+    add_count: int = 0
+    last_add_date: str = ""
 
 
 class BacktestEngine:
@@ -608,10 +756,14 @@ class BacktestEngine:
             "routes": {},
             "market_routes": {},
             "skip_reasons": {},
+            "decision_reasons": {},
+            "veto_reasons": {},
             "by_market_route": {},
         }
         self._requested_codes: list[str] = []
         self._loaded_codes: list[str] = []
+        self._current_date_index: int = 0
+        self._watch_loss_cooldown_until_index: int = -1
 
     def _log_progress(self, event: str, **fields: Any) -> None:
         if not self.cfg.progress_log:
@@ -749,15 +901,18 @@ class BacktestEngine:
         else:
             self._log_progress("financials_skipped")
 
-        # 共同交易日（仅在回测区间内）
-        all_dates = None
-        for df in self._bars.values():
-            dates = set(df["日期"].tolist())
-            all_dates = dates if all_dates is None else all_dates & dates
-        self._sorted_dates = sorted(d for d in (all_dates or []) if start_date <= d <= end_date)
+        # 回测交易日应由市场日历驱动，不能取所有标的日期交集。
+        # 否则池子里只要有一只较晚上市或短历史股票，就会裁掉整个组合的早期样本。
+        if self._index_df is not None and not self._index_df.empty:
+            calendar_dates = set(self._index_df["日期"].tolist())
+        else:
+            calendar_dates: set[str] = set()
+            for df in self._bars.values():
+                calendar_dates.update(str(item) for item in df["日期"].tolist())
+        self._sorted_dates = sorted(d for d in calendar_dates if start_date <= d <= end_date)
 
         if not self._sorted_dates:
-            return {"error": f"无共同交易日（区间 {start_date}~{end_date}）"}
+            return {"error": f"无交易日（区间 {start_date}~{end_date}）"}
 
         self._log_progress(
             "load_data_done",
@@ -837,6 +992,7 @@ class BacktestEngine:
             trial_buy_threshold=gates.get("trial_buy_threshold"),
             trial_buy_entry_signal_threshold=gates.get("trial_buy_entry_signal_threshold"),
             market_regime_overlays=self.cfg.market_regime_overlays,
+            route_execution_policy=self.cfg.route_execution_policy,
         )
 
         index_config = {
@@ -845,6 +1001,7 @@ class BacktestEngine:
         }
 
         for i, d in enumerate(self._sorted_dates):
+            self._current_date_index = i
             if i == 0 or (i + 1) % 50 == 0 or i == len(self._sorted_dates) - 1:
                 self._log_progress(
                     "simulation_day",
@@ -874,9 +1031,9 @@ class BacktestEngine:
 
             # ── 2. 持仓权益 ──────────────────────────────────────────
             portfolio_value = self._cash + sum(
-                float(self._bars[code].set_index("日期").loc[d, "收盘"]) * pos.shares
+                close * pos.shares
                 for code, pos in self._positions.items()
-                if code in self._bars and d in self._bars[code]["日期"].values
+                if (close := self._close_on_or_before(self._bars.get(code), d)) is not None
             )
 
             # ── 3. 风控检查（止损/止盈/到期）─────────────────────────
@@ -906,7 +1063,7 @@ class BacktestEngine:
                 if score.code not in self._positions:
                     continue
 
-                is_market_clear = market.multiplier == 0.0
+                is_market_clear = self._should_market_reduce_position(market)
                 is_individual_clear = intent.action.value == "CLEAR"
 
                 if not (is_market_clear or is_individual_clear):
@@ -937,7 +1094,7 @@ class BacktestEngine:
 
                 pnl = (price - pos.entry_price) * sell_shares
                 self._cash += price * sell_shares
-                self._trades.append({
+                trade = {
                     "date": d, "code": score.code, "name": score.name,
                     "side": "sell", "price": price, "shares": sell_shares,
                     "entry_price": pos.entry_price,
@@ -945,21 +1102,32 @@ class BacktestEngine:
                     "return_pct": round((price - pos.entry_price) / pos.entry_price * 100, 2),
                     "reason": reason,
                     "score": round(score.total, 1),
-                })
+                }
+                self._trades.append(trade)
+                self._register_loss_cooldown(trade, i)
+
+            # ── 6. 趋势加仓（研究 what-if）────────────────────────────
+            self._scale_in_positions(
+                trade_date=d,
+                day_index=i,
+                intents=intents,
+                market=market,
+            )
 
             # ── 6. 执行 BUY 信号 ────────────────────────────────────
             if len(self._positions) < int(self.cfg.holding_max or 5) and self._cash > self.cfg.initial_cash * 0.05:
                 buy_candidates = []
                 for score, intent in intents:
                     route = getattr(score, "primary_strategy_route", None)
-                    executable = self._intent_executable_for_backtest(
+                    execution_status = self._intent_execution_status(
                         intent,
                         score.code,
                         route,
                         score_total=score.total,
+                        market=market,
                     )
-                    if not executable:
-                        self._record_execution_funnel_skip("not_executable", score, intent, market)
+                    if not execution_status["executable"]:
+                        self._record_execution_funnel_skip(execution_status["reason"], score, intent, market)
                         continue
                     if score.code in self._positions:
                         self._record_execution_funnel_skip("already_held", score, intent, market)
@@ -1014,17 +1182,20 @@ class BacktestEngine:
                         entry_price=price,
                         entry_date=d,
                         high_water=price,
+                        position_pct=position_pct,
                     )
                     self._weekly_buy_count += 1
-                    self._trades.append({
-                        "date": d, "code": score.code, "name": score.name,
-                        "side": "buy", "price": price, "shares": shares,
-                        "score": round(score.total, 1),
-                        "source_action": intent.action.value,
-                        "source_route": getattr(score, "primary_strategy_route", None) or "unknown",
-                        "position_pct": round(position_pct, 4),
-                        "pnl": 0, "return_pct": 0,
-                    })
+                    self._trades.append(
+                        self._buy_trade_record(
+                            trade_date=d,
+                            score=score,
+                            intent=intent,
+                            market=market,
+                            price=price,
+                            shares=shares,
+                            position_pct=position_pct,
+                        )
+                    )
                     self._record_execution_funnel_buy(score, intent, market)
             else:
                 block_reason = "holding_max" if len(self._positions) >= int(self.cfg.holding_max or 5) else "cash_floor"
@@ -1060,7 +1231,7 @@ class BacktestEngine:
         signal = _market_signal_value(market)
         for score, intent in intents:
             action = str(getattr(getattr(intent, "action", None), "value", "") or "UNKNOWN")
-            route = str(getattr(score, "primary_strategy_route", "") or "unknown")
+            route = _score_route_label(score)
             key = f"{signal}:{route}"
             self._execution_funnel["signals_total"] += 1
             if bool(getattr(score, "entry_signal", False)):
@@ -1072,7 +1243,18 @@ class BacktestEngine:
 
             bucket = self._execution_funnel_bucket(signal, route)
             bucket["signals"] += 1
+            if bool(getattr(score, "entry_signal", False)):
+                bucket["entry_signal_total"] += 1
             _counter_inc(bucket["actions"], action)
+            for reason in _decision_reason_keys(intent):
+                _counter_inc(self._execution_funnel["decision_reasons"], reason)
+                _counter_inc(bucket["decision_reasons"], reason)
+            for veto_reason in getattr(score, "hard_veto", []) or []:
+                veto_key = str(veto_reason or "")
+                if not veto_key:
+                    continue
+                _counter_inc(self._execution_funnel["veto_reasons"], veto_key)
+                _counter_inc(bucket["veto_reasons"], veto_key)
 
     def _record_execution_funnel_executable(
         self,
@@ -1083,7 +1265,7 @@ class BacktestEngine:
         self._execution_funnel["executable_candidates"] += 1
         bucket = self._execution_funnel_bucket(
             _market_signal_value(market),
-            str(getattr(score, "primary_strategy_route", "") or "unknown"),
+            _score_route_label(score),
         )
         bucket["executable_candidates"] += 1
         action = str(getattr(getattr(intent, "action", None), "value", "") or "UNKNOWN")
@@ -1099,7 +1281,7 @@ class BacktestEngine:
         _counter_inc(self._execution_funnel["skip_reasons"], reason)
         bucket = self._execution_funnel_bucket(
             _market_signal_value(market),
-            str(getattr(score, "primary_strategy_route", "") or "unknown"),
+            _score_route_label(score),
         )
         _counter_inc(bucket["skip_reasons"], reason)
         action = str(getattr(getattr(intent, "action", None), "value", "") or "UNKNOWN")
@@ -1114,11 +1296,72 @@ class BacktestEngine:
         self._execution_funnel["executed_buys"] += 1
         bucket = self._execution_funnel_bucket(
             _market_signal_value(market),
-            str(getattr(score, "primary_strategy_route", "") or "unknown"),
+            _score_route_label(score),
         )
         bucket["executed_buys"] += 1
         action = str(getattr(getattr(intent, "action", None), "value", "") or "UNKNOWN")
         _counter_inc(bucket["executed_actions"], action)
+
+    def _should_market_reduce_position(self, market: "MarketState") -> bool:
+        return (not self.cfg.disable_market_reduce_sell) and _is_market_reduce_signal(market)
+
+    def _register_loss_cooldown(self, trade: dict[str, Any], date_index: int) -> None:
+        days = int(self.cfg.watch_loss_cooldown_days or 0)
+        if days <= 0:
+            return
+        if str(trade.get("side") or "") != "sell":
+            return
+        if float(trade.get("pnl") or 0.0) >= 0:
+            return
+        self._watch_loss_cooldown_until_index = max(
+            self._watch_loss_cooldown_until_index,
+            int(date_index) + days,
+        )
+
+    def _watch_loss_cooldown_status(self, market: "MarketState" | None = None) -> str:
+        if int(self.cfg.watch_loss_cooldown_days or 0) <= 0:
+            return ""
+        if self._current_date_index <= self._watch_loss_cooldown_until_index:
+            allowed_phases = {str(item) for item in self.cfg.watch_loss_cooldown_phase_buckets if str(item)}
+            if allowed_phases:
+                if market is None:
+                    return ""
+                phase = _market_context_payload(market).get("market_phase_bucket")
+                if phase not in allowed_phases:
+                    return ""
+            return "watch_loss_cooldown"
+        return ""
+
+    def _buy_trade_record(
+        self,
+        *,
+        trade_date: str,
+        score: Any,
+        intent: Any,
+        market: "MarketState",
+        price: float,
+        shares: int,
+        position_pct: float,
+    ) -> dict[str, Any]:
+        market_context = _market_context_payload(market)
+        action = str(getattr(getattr(intent, "action", None), "value", "") or "UNKNOWN")
+        return {
+            "date": trade_date,
+            "code": getattr(score, "code", ""),
+            "name": getattr(score, "name", ""),
+            "side": "buy",
+            "price": price,
+            "shares": shares,
+            "score": round(float(getattr(score, "total", 0.0) or 0.0), 1),
+            "source_action": action,
+            "source_route": _score_route_label(score),
+            "position_pct": round(position_pct, 4),
+            "market_signal": _market_signal_value(market),
+            "market_phase_bucket": market_context["market_phase_bucket"],
+            "market_context": market_context,
+            "pnl": 0,
+            "return_pct": 0,
+        }
 
     def _execution_funnel_bucket(self, signal: str, route: str) -> dict[str, Any]:
         key = f"{signal}:{route}"
@@ -1126,6 +1369,7 @@ class BacktestEngine:
             key,
             {
                 "signals": 0,
+                "entry_signal_total": 0,
                 "executable_candidates": 0,
                 "executed_buys": 0,
                 "actions": {},
@@ -1133,6 +1377,8 @@ class BacktestEngine:
                 "executed_actions": {},
                 "skipped_actions": {},
                 "skip_reasons": {},
+                "decision_reasons": {},
+                "veto_reasons": {},
             },
         )
         return bucket
@@ -1144,69 +1390,207 @@ class BacktestEngine:
         route: str | None = None,
         *,
         score_total: float | None = None,
+        market: "MarketState" | None = None,
     ) -> bool:
+        return bool(
+            self._intent_execution_status(
+                intent,
+                code,
+                route,
+                score_total=score_total,
+                market=market,
+            )["executable"]
+        )
+
+    def _intent_execution_status(
+        self,
+        intent: Any,
+        code: str,
+        route: str | None = None,
+        *,
+        score_total: float | None = None,
+        market: "MarketState" | None = None,
+    ) -> dict[str, Any]:
         action = str(getattr(getattr(intent, "action", None), "value", "") or "")
         if action == "BUY":
-            return True
+            phase_status = self._buy_phase_status(market)
+            if phase_status:
+                return {"executable": False, "reason": phase_status}
+            return {"executable": True, "reason": "buy"}
         signal = str(getattr(getattr(intent, "market_signal", None), "value", "") or "")
         route_name = str(route or "unknown")
+        total = float(score_total if score_total is not None else getattr(intent, "score", 0.0) or 0.0)
 
         if action == "TRIAL_BUY":
-            policy = self._route_execution_policy(signal, route_name)
-            if policy:
-                if not self._route_policy_allows_action(policy, action):
-                    return False
-                total = float(score_total if score_total is not None else getattr(intent, "score", 0.0) or 0.0)
-                return (
-                    total >= float(policy.get("score_min", self.cfg.execute_watch_trial_score_min or 0.0) or 0.0)
-                    and code not in self._positions
-                )
+            cooldown_status = self._watch_loss_cooldown_status(market)
+            if cooldown_status:
+                return {"executable": False, "reason": cooldown_status}
             allowed_routes = {str(item) for item in self.cfg.execute_trial_buy_routes if str(item)}
             if allowed_routes and route_name not in allowed_routes:
-                return False
-            return (
-                signal in set(self.cfg.execute_trial_buy_market_signals or ())
-                and code not in self._positions
-            )
+                return {"executable": False, "reason": "trial_route_not_allowed"}
+            if signal in set(self.cfg.execute_trial_buy_market_signals or ()):
+                return (
+                    {"executable": False, "reason": "already_held"}
+                    if code in self._positions
+                    else {"executable": True, "reason": "trial_buy_market"}
+                )
+            policy = self._route_execution_policy(signal, route_name)
+            if policy and self._route_policy_allows_action(policy, action):
+                score_min = float(policy.get("score_min", self.cfg.execute_watch_trial_score_min or 0.0) or 0.0)
+                if total < score_min:
+                    return {"executable": False, "reason": "route_policy_score_min"}
+                return (
+                    {"executable": False, "reason": "already_held"}
+                    if code in self._positions
+                    else {"executable": True, "reason": "route_policy_trial_buy"}
+                )
+            if policy:
+                return {"executable": False, "reason": "route_policy_action_not_allowed"}
+            return {"executable": False, "reason": "trial_buy_not_enabled"}
 
         if action != "WATCH":
-            return False
+            return {"executable": False, "reason": "action_not_executable"}
 
-        policy = self._route_execution_policy(signal, route_name)
-        if policy:
-            if not self._route_policy_allows_action(policy, action):
-                return False
-            total = float(score_total if score_total is not None else getattr(intent, "score", 0.0) or 0.0)
-            return (
-                total >= float(policy.get("score_min", self.cfg.execute_watch_trial_score_min or 0.0) or 0.0)
-                and code not in self._positions
-            )
+        cooldown_status = self._watch_loss_cooldown_status(market)
+        if cooldown_status:
+            return {"executable": False, "reason": cooldown_status}
 
         allowed_pairs = {str(item).strip() for item in self.cfg.execute_watch_trial_pairs if str(item).strip()}
         if allowed_pairs:
             if f"{signal}:{route_name}" not in allowed_pairs:
-                return False
-        else:
-            allowed_watch_signals = set(self.cfg.execute_watch_trial_market_signals or ())
-            if signal not in allowed_watch_signals:
-                return False
+                return {"executable": False, "reason": "watch_pair_not_allowed"}
+            score_status = self._watch_trial_score_status(total)
+            if score_status:
+                return {"executable": False, "reason": score_status}
+            phase_status = self._watch_trial_phase_status(market)
+            if phase_status:
+                return {"executable": False, "reason": phase_status}
+            return (
+                {"executable": False, "reason": "already_held"}
+                if code in self._positions
+                else {"executable": True, "reason": "watch_trial_pair"}
+            )
 
-            allowed_watch_routes = {str(item) for item in self.cfg.execute_watch_trial_routes if str(item)}
-            if allowed_watch_routes and route_name not in allowed_watch_routes:
-                return False
+        policy = self._route_execution_policy(signal, route_name)
+        if policy and self._route_policy_allows_action(policy, action):
+            score_min = float(policy.get("score_min", self.cfg.execute_watch_trial_score_min or 0.0) or 0.0)
+            if total < score_min:
+                return {"executable": False, "reason": "route_policy_score_min"}
+            score_max = policy.get("score_max", self.cfg.execute_watch_trial_score_max)
+            if score_max is not None and total >= float(score_max):
+                return {"executable": False, "reason": "route_policy_score_max"}
+            phase_status = self._watch_trial_phase_status(market)
+            if phase_status:
+                return {"executable": False, "reason": phase_status}
+            return (
+                {"executable": False, "reason": "already_held"}
+                if code in self._positions
+                else {"executable": True, "reason": "route_policy_watch"}
+            )
 
-        total = float(score_total if score_total is not None else getattr(intent, "score", 0.0) or 0.0)
+        if policy:
+            return {"executable": False, "reason": "watch_not_enabled"}
+
+        if not (
+            self.cfg.execute_watch_trial_market_signals
+            or self.cfg.execute_watch_trial_routes
+        ):
+            return {"executable": False, "reason": "watch_not_enabled"}
+
+        allowed_watch_signals = set(self.cfg.execute_watch_trial_market_signals or ())
+        if allowed_watch_signals and signal not in allowed_watch_signals:
+            return {"executable": False, "reason": "watch_market_not_allowed"}
+
+        allowed_watch_routes = {str(item) for item in self.cfg.execute_watch_trial_routes if str(item)}
+        if allowed_watch_routes and route_name not in allowed_watch_routes:
+            return {"executable": False, "reason": "watch_route_not_allowed"}
+
+        score_status = self._watch_trial_score_status(total)
+        if score_status:
+            return {"executable": False, "reason": score_status}
+        phase_status = self._watch_trial_phase_status(market)
+        if phase_status:
+            return {"executable": False, "reason": phase_status}
+
         return (
-            total >= float(self.cfg.execute_watch_trial_score_min or 0.0)
-            and code not in self._positions
+            {"executable": False, "reason": "already_held"}
+            if code in self._positions
+            else {"executable": True, "reason": "watch_trial_market_route"}
         )
+
+    def _watch_trial_phase_status(self, market: "MarketState" | None) -> str:
+        allowed_phases = {str(item) for item in self.cfg.execute_watch_trial_phase_buckets if str(item)}
+        min_above_days = int(self.cfg.execute_watch_trial_min_above_ma20_days or 0)
+        min_above_phases = {
+            str(item) for item in self.cfg.execute_watch_trial_min_above_ma20_days_phase_buckets if str(item)
+        }
+        require_ma60_phases = {
+            str(item) for item in self.cfg.execute_watch_trial_require_above_ma60_phase_buckets if str(item)
+        }
+        require_ma120_phases = {
+            str(item) for item in self.cfg.execute_watch_trial_require_above_ma120_phase_buckets if str(item)
+        }
+        if not allowed_phases and min_above_days <= 0 and not require_ma60_phases and not require_ma120_phases:
+            return ""
+        if market is None:
+            return "watch_phase_missing"
+        market_context = _market_context_payload(market)
+        phase = market_context.get("market_phase_bucket")
+        if allowed_phases and phase not in allowed_phases:
+            return "watch_phase_not_allowed"
+        if min_above_days > 0 and (not min_above_phases or phase in min_above_phases):
+            above_days = int(market_context.get("above_ma20_days") or 0)
+            if above_days < min_above_days:
+                return "watch_above_ma20_days_below_min"
+        if require_ma60_phases and phase in require_ma60_phases:
+            above_ma60 = market_context.get("above_ma60")
+            if above_ma60 is None:
+                price = market_context.get("price")
+                ma60 = market_context.get("ma60")
+                try:
+                    above_ma60 = float(price) > float(ma60) > 0
+                except (TypeError, ValueError):
+                    above_ma60 = False
+            if not above_ma60:
+                return "watch_above_ma60_required"
+        if require_ma120_phases and phase in require_ma120_phases:
+            above_ma120 = market_context.get("above_ma120")
+            if above_ma120 is None:
+                price = market_context.get("price")
+                ma120 = market_context.get("ma120")
+                try:
+                    above_ma120 = float(price) > float(ma120) > 0
+                except (TypeError, ValueError):
+                    above_ma120 = False
+            if not above_ma120:
+                return "watch_above_ma120_required"
+        return ""
+
+    def _buy_phase_status(self, market: "MarketState" | None) -> str:
+        allowed_phases = {str(item) for item in self.cfg.execute_buy_phase_buckets if str(item)}
+        if not allowed_phases:
+            return ""
+        if market is None:
+            return "buy_phase_missing"
+        phase = _market_context_payload(market).get("market_phase_bucket")
+        if phase not in allowed_phases:
+            return "buy_phase_not_allowed"
+        return ""
+
+    def _watch_trial_score_status(self, score_total: float) -> str:
+        if score_total < float(self.cfg.execute_watch_trial_score_min or 0.0):
+            return "watch_score_below_min"
+        score_max = self.cfg.execute_watch_trial_score_max
+        if score_max is not None and score_total >= float(score_max):
+            return "watch_score_above_max"
+        return ""
 
     def _execution_position_pct(self, intent: Any, market: "MarketState", route: str | None = None) -> float:
         action = str(getattr(getattr(intent, "action", None), "value", "") or "")
         signal = str(getattr(getattr(market, "signal", None), "value", "") or "")
         policy = self._route_execution_policy(signal, route)
         if (
-            action in {"WATCH", "TRIAL_BUY"}
+            action in {"BUY", "WATCH", "TRIAL_BUY"}
             and policy
             and self._route_policy_allows_action(policy, action)
             and policy.get("position_pct") is not None
@@ -1223,6 +1607,8 @@ class BacktestEngine:
             self.cfg.execute_watch_trial_pairs
             or signal in set(self.cfg.execute_watch_trial_market_signals or ())
         ):
+            if self.cfg.execute_watch_trial_position_pct is not None:
+                return round(min(float(self.cfg.execute_watch_trial_position_pct or 0.0), self.cfg.single_max_pct), 4)
             return round(self.cfg.single_max_pct * float(getattr(market, "multiplier", 0.0) or 0.0), 4)
         return 0.0
 
@@ -1236,9 +1622,11 @@ class BacktestEngine:
         return {}
 
     def _route_policy_allows_action(self, policy: dict, action: str) -> bool:
+        if not policy:
+            return False
         actions = policy.get("actions")
         if actions is None:
-            return action == "WATCH"
+            return action == "BUY"
         allowed = {str(item) for item in actions or () if str(item)}
         return action in allowed
 
@@ -1270,7 +1658,7 @@ class BacktestEngine:
             df = self._bars.get(code)
             if df is None:
                 continue
-            close = self._close_on(df, trade_date)
+            close = self._close_on_or_before(df, trade_date)
             if close is None:
                 continue
             value += close * pos.shares
@@ -1285,6 +1673,244 @@ class BacktestEngine:
         total_budget = portfolio_value * float(self.cfg.total_max_pct or 0.0)
         remaining_total_budget = max(0.0, total_budget - position_value)
         return round(max(0.0, min(self._cash, single_budget, remaining_total_budget)), 2)
+
+    def _position_market_value(self, trade_date: str, code: str) -> float:
+        pos = self._positions.get(code)
+        if pos is None:
+            return 0.0
+        df = self._bars.get(code)
+        if df is None:
+            return 0.0
+        close = self._close_on_or_before(df, trade_date)
+        if close is None:
+            return 0.0
+        return close * pos.shares
+
+    def _allocation_budget_to_target_position(self, trade_date: str, code: str, target_pct: float) -> float:
+        position_value = self._positions_market_value(trade_date)
+        portfolio_value = self._cash + position_value
+        if portfolio_value <= 0:
+            return 0.0
+        current_value = self._position_market_value(trade_date, code)
+        target_value = portfolio_value * max(0.0, float(target_pct or 0.0))
+        add_budget = max(0.0, target_value - current_value)
+        total_budget = portfolio_value * float(self.cfg.total_max_pct or 0.0)
+        remaining_total_budget = max(0.0, total_budget - position_value)
+        return round(max(0.0, min(self._cash, add_budget, remaining_total_budget)), 2)
+
+    def _scale_in_positions(
+        self,
+        *,
+        trade_date: str,
+        day_index: int,
+        intents: list[tuple[Any, Any]],
+        market: "MarketState",
+    ) -> None:
+        if not self.cfg.scale_in_enabled:
+            return
+        if self._cash <= self.cfg.initial_cash * 0.05:
+            return
+
+        held_candidates: list[tuple[Any, Any]] = []
+        allowed_actions = {str(item) for item in self.cfg.scale_in_actions if str(item)}
+        for score, intent in intents:
+            if getattr(score, "code", "") not in self._positions:
+                continue
+            action = str(getattr(getattr(intent, "action", None), "value", "") or "")
+            if allowed_actions and action not in allowed_actions:
+                continue
+            held_candidates.append((score, intent))
+
+        held_candidates.sort(
+            key=lambda x: self._buy_candidate_sort_key(
+                x[1],
+                getattr(x[0], "primary_strategy_route", None),
+                market,
+                score_total=x[0].total,
+            ),
+            reverse=True,
+        )
+
+        for score, intent in held_candidates:
+            if self._weekly_buy_count >= self._weekly_max_for_market(market):
+                break
+            code = getattr(score, "code", "")
+            df = self._bars.get(code)
+            if df is None:
+                continue
+            row = df[df["日期"] == trade_date]
+            if row.empty:
+                continue
+            price = float(row["收盘"].iloc[0])
+            status = self._scale_in_execution_status(score, market, price=price, day_index=day_index)
+            if not status["executable"]:
+                continue
+            target_pct = self._scale_in_target_position_pct(trade_date, code, score=score, market=market)
+            allocate = self._allocation_budget_to_target_position(trade_date, code, target_pct)
+            shares = int(allocate / price / 100) * 100
+            if shares <= 0:
+                continue
+
+            pos = self._positions[code]
+            old_shares = pos.shares
+            old_cost = pos.entry_price * old_shares
+            new_cost = price * shares
+            pos.shares = old_shares + shares
+            pos.entry_price = (old_cost + new_cost) / pos.shares
+            pos.high_water = max(pos.high_water, price)
+            pos.position_pct = round(target_pct, 4)
+            pos.add_count += 1
+            pos.last_add_date = trade_date
+            if self.cfg.scale_in_reset_time_stop:
+                pos.entry_date = trade_date
+            if not self._should_market_reduce_position(market):
+                pos.market_reduced = False
+
+            self._cash -= price * shares
+            self._weekly_buy_count += 1
+            self._trades.append(
+                self._scale_in_trade_record(
+                    trade_date=trade_date,
+                    score=score,
+                    intent=intent,
+                    market=market,
+                    price=price,
+                    shares=shares,
+                    position_pct=target_pct,
+                )
+            )
+
+    def _scale_in_execution_status(
+        self,
+        score: Any,
+        market: "MarketState",
+        *,
+        price: float,
+        day_index: int,
+    ) -> dict[str, Any]:
+        if not self.cfg.scale_in_enabled:
+            return {"executable": False, "reason": "scale_in_disabled"}
+        code = getattr(score, "code", "")
+        pos = self._positions.get(code)
+        if pos is None:
+            return {"executable": False, "reason": "scale_in_no_position"}
+        signal = _market_signal_value(market)
+        allowed_signals = {str(item) for item in self.cfg.scale_in_market_signals if str(item)}
+        if allowed_signals and signal not in allowed_signals:
+            return {"executable": False, "reason": "scale_in_market_blocked"}
+        route = str(getattr(score, "primary_strategy_route", "") or "unknown")
+        allowed_routes = {str(item) for item in self.cfg.scale_in_routes if str(item)}
+        if allowed_routes and route not in allowed_routes:
+            return {"executable": False, "reason": "scale_in_route_blocked"}
+        if float(getattr(score, "total", 0.0) or 0.0) < float(self.cfg.scale_in_score_min or 0.0):
+            return {"executable": False, "reason": "scale_in_score_below_min"}
+        if self.cfg.scale_in_require_entry_signal and not bool(getattr(score, "entry_signal", False)):
+            return {"executable": False, "reason": "scale_in_entry_signal_missing"}
+        if pos.add_count >= int(self.cfg.scale_in_max_adds or 0):
+            return {"executable": False, "reason": "scale_in_max_adds"}
+        if pos.last_add_date and pos.last_add_date in self._sorted_dates:
+            last_index = self._sorted_dates.index(pos.last_add_date)
+            if day_index - last_index < int(self.cfg.scale_in_min_days_between or 0):
+                return {"executable": False, "reason": "scale_in_too_soon"}
+        if price <= 0 or pos.entry_price <= 0:
+            return {"executable": False, "reason": "scale_in_missing_price"}
+        unrealized_return = (price - pos.entry_price) / pos.entry_price
+        if unrealized_return < float(self.cfg.scale_in_profit_threshold or 0.0):
+            return {"executable": False, "reason": "scale_in_profit_below_threshold"}
+        trade_date = self._sorted_dates[day_index] if 0 <= day_index < len(self._sorted_dates) else ""
+        target_pct = self._scale_in_target_position_pct(trade_date, code, score=score, market=market)
+        current_pct = self._current_position_pct(trade_date, code)
+        if trade_date and target_pct <= current_pct:
+            return {"executable": False, "reason": "scale_in_target_reached"}
+        return {"executable": True, "reason": "scale_in_trend_confirmed"}
+
+    def _scale_in_target_position_pct(
+        self,
+        trade_date: str,
+        code: str,
+        *,
+        score: Any | None = None,
+        market: "MarketState" | None = None,
+    ) -> float:
+        pos = self._positions.get(code)
+        if pos is None:
+            return 0.0
+        max_pct, step_pct = self._scale_in_position_limits(score=score, market=market)
+        if max_pct is None:
+            max_pct = self.cfg.scale_in_max_position_pct
+        if max_pct is None:
+            max_pct = self.cfg.single_max_pct
+        base_pct = max(float(pos.position_pct or 0.0), self._current_position_pct(trade_date, code))
+        if base_pct <= 0:
+            base_pct = float(self.cfg.single_max_pct or 0.0)
+        target_pct = base_pct + float(step_pct or 0.0)
+        return round(min(float(max_pct or 0.0), target_pct), 4)
+
+    def _scale_in_position_limits(
+        self,
+        *,
+        score: Any | None,
+        market: "MarketState" | None,
+    ) -> tuple[float | None, float]:
+        if self._scale_in_aggressive_context(score=score, market=market):
+            max_pct = self.cfg.scale_in_aggressive_max_position_pct
+            step_pct = self.cfg.scale_in_aggressive_step_position_pct
+            if max_pct is not None:
+                return max_pct, float(step_pct if step_pct is not None else self.cfg.scale_in_step_position_pct)
+        return self.cfg.scale_in_max_position_pct, float(self.cfg.scale_in_step_position_pct or 0.0)
+
+    def _scale_in_aggressive_context(self, *, score: Any | None, market: "MarketState" | None) -> bool:
+        if score is None or market is None:
+            return False
+        if self.cfg.scale_in_aggressive_max_position_pct is None:
+            return False
+        signal = _market_signal_value(market)
+        allowed_signals = {str(item) for item in self.cfg.scale_in_aggressive_market_signals if str(item)}
+        if allowed_signals and signal not in allowed_signals:
+            return False
+        route = str(getattr(score, "primary_strategy_route", "") or "unknown")
+        allowed_routes = {str(item) for item in self.cfg.scale_in_aggressive_routes if str(item)}
+        if allowed_routes and route not in allowed_routes:
+            return False
+        allowed_phases = {str(item) for item in self.cfg.scale_in_aggressive_phase_buckets if str(item)}
+        if allowed_phases:
+            phase = _market_context_payload(market).get("market_phase_bucket")
+            if phase not in allowed_phases:
+                return False
+        return True
+
+    def _current_position_pct(self, trade_date: str, code: str) -> float:
+        if not trade_date:
+            return 0.0
+        position_value = self._positions_market_value(trade_date)
+        portfolio_value = self._cash + position_value
+        if portfolio_value <= 0:
+            return 0.0
+        return self._position_market_value(trade_date, code) / portfolio_value
+
+    def _scale_in_trade_record(
+        self,
+        *,
+        trade_date: str,
+        score: Any,
+        intent: Any,
+        market: "MarketState",
+        price: float,
+        shares: int,
+        position_pct: float,
+    ) -> dict[str, Any]:
+        trade = self._buy_trade_record(
+            trade_date=trade_date,
+            score=score,
+            intent=intent,
+            market=market,
+            price=price,
+            shares=shares,
+            position_pct=position_pct,
+        )
+        trade["source_action"] = "SCALE_IN"
+        trade["reason"] = "趋势加仓"
+        return trade
 
     def _mirror_replay_for_date(self, trade_date: str, fallback_market: "MarketState") -> dict | None:
         """优先读取真实历史信号镜像；没有镜像时让调用方回退到 proxy replay。"""
@@ -1379,7 +2005,7 @@ class BacktestEngine:
                 "action": action or "WATCH",
                 "score": round(float(getattr(score, "total", 0.0) or 0.0), 2),
                 "entry_signal": entry_signal,
-                "primary_strategy_route": route or "unknown",
+                "primary_strategy_route": _score_route_label(score),
                 "unknown_bucket": _unknown_signal_bucket(
                     route=route,
                     entry_signal=entry_signal,
@@ -1390,6 +2016,7 @@ class BacktestEngine:
                 "technical_snapshot": technical_snapshot,
                 "route_diagnostics": _route_diagnostics_payload(score),
                 "market_signal": getattr(getattr(market, "signal", None), "value", "unknown"),
+                "market_context": _market_context_payload(market),
                 "forward_returns": self._forward_returns(getattr(score, "code", ""), trade_date),
             })
 
@@ -1407,18 +2034,21 @@ class BacktestEngine:
         horizons: tuple[int, ...] = (5, 10, 20),
     ) -> dict[str, float]:
         df = self._bars.get(code)
-        if df is None or trade_date not in self._sorted_dates:
+        if df is None:
             return {}
         current_close = self._close_on(df, trade_date)
         if current_close is None or current_close <= 0:
             return {}
-        start_idx = self._sorted_dates.index(trade_date)
+        code_dates = [str(item) for item in df["日期"].tolist()]
+        if trade_date not in code_dates:
+            return {}
+        start_idx = code_dates.index(trade_date)
         returns: dict[str, float] = {}
         for horizon in horizons:
             target_idx = start_idx + horizon
-            if target_idx >= len(self._sorted_dates):
+            if target_idx >= len(code_dates):
                 continue
-            target_close = self._close_on(df, self._sorted_dates[target_idx])
+            target_close = self._close_on(df, code_dates[target_idx])
             if target_close is None:
                 continue
             returns[f"{horizon}d"] = round((target_close - current_close) / current_close, 6)
@@ -1430,6 +2060,15 @@ class BacktestEngine:
         if row.empty:
             return None
         return float(row["收盘"].iloc[0])
+
+    @staticmethod
+    def _close_on_or_before(df: pd.DataFrame | None, trade_date: str) -> float | None:
+        if df is None or df.empty:
+            return None
+        rows = df[df["日期"] <= trade_date]
+        if rows.empty:
+            return None
+        return float(rows.iloc[-1]["收盘"])
 
     def _build_snapshot(self, code: str, as_of_date: str):
         """从历史数据构建 StockSnapshot。"""
@@ -1547,7 +2186,7 @@ class BacktestEngine:
             self._positions.pop(code)
             pnl = (price - pos.entry_price) * pos.shares
             self._cash += price * pos.shares
-            self._trades.append({
+            trade = {
                 "date": d, "code": code,
                 "side": "sell", "price": price, "shares": pos.shares,
                 "entry_price": pos.entry_price,
@@ -1555,7 +2194,9 @@ class BacktestEngine:
                 "return_pct": round(ret * 100, 2),
                 "reason": reason,
                 "score": 0,
-            })
+            }
+            self._trades.append(trade)
+            self._register_loss_cooldown(trade, day_idx)
 
     def _load_financials(self, codes: list[str], start_date: str, end_date: str):
         """从 baostock 拉取区间内可用的季度财务快照并缓存。
@@ -1858,8 +2499,8 @@ class BacktestEngine:
         final_value = self._cash
         for code, pos in self._positions.items():
             df = self._bars.get(code)
-            if df is not None and last_date in df["日期"].values:
-                price = float(df[df["日期"] == last_date]["收盘"].iloc[0])
+            price = self._close_on_or_before(df, last_date)
+            if price is not None:
                 final_value += price * pos.shares
 
         total_return = (final_value - self.cfg.initial_cash) / self.cfg.initial_cash * 100
@@ -1893,12 +2534,26 @@ class BacktestEngine:
             item for item in self._signal_records
             if item.get("primary_strategy_route") == "unknown"
         ]
+        no_entry_route_signals = [
+            item for item in self._signal_records
+            if item.get("primary_strategy_route") == "no_entry_route"
+        ]
+        generic_entry_signal_signals = [
+            item for item in self._signal_records
+            if item.get("primary_strategy_route") == "generic_entry_signal_watch"
+        ]
         if self.cfg.signal_record_limit is None:
             signal_rows = list(self._signal_records)
         elif self.cfg.signal_record_limit <= 0:
             signal_rows = []
         else:
             signal_rows = self._signal_records[-int(self.cfg.signal_record_limit):]
+        if self.cfg.trade_record_limit is None:
+            trade_rows = list(self._trades)
+        elif self.cfg.trade_record_limit <= 0:
+            trade_rows = []
+        else:
+            trade_rows = self._trades[-int(self.cfg.trade_record_limit):]
 
         return {
             "preset": self.cfg.preset_name,
@@ -1926,6 +2581,7 @@ class BacktestEngine:
                 "loaded_codes": len(self._loaded_codes),
                 "loaded_code_list": self._loaded_codes,
             },
+            "execution_semantics": self._execution_semantics(),
             "execution_funnel": self._execution_funnel,
             "signal_alpha": (
                 signal_alpha_summary(self._signal_records)
@@ -1937,9 +2593,88 @@ class BacktestEngine:
                 "signals": signal_rows,
                 "unknown_route_count": len(unknown_route_signals),
                 "unknown_route_samples": unknown_route_signals[-20:],
+                "no_entry_route_count": len(no_entry_route_signals),
+                "no_entry_route_samples": no_entry_route_signals[-20:],
+                "generic_entry_signal_count": len(generic_entry_signal_signals),
+                "generic_entry_signal_samples": generic_entry_signal_signals[-20:],
             },
             "equity_curve": self._portfolio_value_series,
-            "trades": self._trades[-50:],
+            "trade_log": self._trades,
+            "trades": trade_rows,
+        }
+
+    def _execution_semantics(self) -> dict[str, Any]:
+        policy_values = [
+            policy
+            for policy in (self.cfg.route_execution_policy or {}).values()
+            if isinstance(policy, dict)
+        ]
+        policy_watch_enabled = any(
+            "WATCH" in {str(item) for item in (policy.get("actions") or [])}
+            for policy in policy_values
+        )
+        policy_trial_enabled = any(
+            "TRIAL_BUY" in {str(item) for item in (policy.get("actions") or [])}
+            for policy in policy_values
+        )
+        watch_trial_enabled = bool(
+            self.cfg.execute_watch_trial_pairs
+            or self.cfg.execute_watch_trial_market_signals
+            or self.cfg.execute_watch_trial_routes
+            or policy_watch_enabled
+        )
+        trial_buy_enabled = bool(
+            self.cfg.execute_trial_buy_market_signals
+            or self.cfg.execute_trial_buy_routes
+            or policy_trial_enabled
+        )
+        loss_cooldown_enabled = int(self.cfg.watch_loss_cooldown_days or 0) > 0
+        scale_in_enabled = bool(self.cfg.scale_in_enabled)
+        research_enabled = bool(watch_trial_enabled or trial_buy_enabled or loss_cooldown_enabled or scale_in_enabled)
+        notes = [
+            "默认只执行正式 BUY；route_execution_policy 默认仅用于 BUY 排序和仓位覆盖。",
+        ]
+        if research_enabled:
+            notes.append("本次回测包含显式研究 what-if：允许部分 WATCH/TRIAL_BUY 按规则模拟成交。")
+        if loss_cooldown_enabled:
+            notes.append("本次回测包含观察层亏损冷却：亏损卖出后暂停观察/试买模拟成交。")
+        if scale_in_enabled:
+            notes.append("本次回测包含趋势加仓：盈利持仓在指定市场制度和路线重新确认后补仓。")
+        return {
+            "mode": "research_what_if" if research_enabled else "production_buy_only",
+            "buy_only": not research_enabled,
+            "watch_trial_enabled": watch_trial_enabled,
+            "trial_buy_enabled": trial_buy_enabled,
+            "scale_in_enabled": scale_in_enabled,
+            "scale_in_profit_threshold": float(self.cfg.scale_in_profit_threshold or 0.0),
+            "scale_in_step_position_pct": float(self.cfg.scale_in_step_position_pct or 0.0),
+            "scale_in_max_position_pct": self.cfg.scale_in_max_position_pct,
+            "scale_in_max_adds": int(self.cfg.scale_in_max_adds or 0),
+            "scale_in_markets": list(self.cfg.scale_in_market_signals or ()),
+            "scale_in_routes": list(self.cfg.scale_in_routes or ()),
+            "scale_in_actions": list(self.cfg.scale_in_actions or ()),
+            "scale_in_require_entry_signal": bool(self.cfg.scale_in_require_entry_signal),
+            "scale_in_aggressive_max_position_pct": self.cfg.scale_in_aggressive_max_position_pct,
+            "scale_in_aggressive_step_position_pct": self.cfg.scale_in_aggressive_step_position_pct,
+            "scale_in_aggressive_markets": list(self.cfg.scale_in_aggressive_market_signals or ()),
+            "scale_in_aggressive_routes": list(self.cfg.scale_in_aggressive_routes or ()),
+            "scale_in_aggressive_phases": list(self.cfg.scale_in_aggressive_phase_buckets or ()),
+            "watch_loss_cooldown_days": int(self.cfg.watch_loss_cooldown_days or 0),
+            "watch_loss_cooldown_phases": list(self.cfg.watch_loss_cooldown_phase_buckets or ()),
+            "watch_trial_min_above_ma20_days": int(
+                self.cfg.execute_watch_trial_min_above_ma20_days or 0
+            ),
+            "watch_trial_min_above_ma20_days_phases": list(
+                self.cfg.execute_watch_trial_min_above_ma20_days_phase_buckets or ()
+            ),
+            "watch_trial_require_above_ma60_phases": list(
+                self.cfg.execute_watch_trial_require_above_ma60_phase_buckets or ()
+            ),
+            "watch_trial_require_above_ma120_phases": list(
+                self.cfg.execute_watch_trial_require_above_ma120_phase_buckets or ()
+            ),
+            "route_policy_default_actions": ["BUY"],
+            "notes": notes,
         }
 
 
@@ -1972,6 +2707,12 @@ def load_config(preset_name: str) -> BacktestConfig:
 
     p = presets.get(preset_name, presets.get("保守验证C", {}))
 
+    def _preset_tuple(key: str) -> tuple[str, ...]:
+        value = p.get(key, ())
+        if isinstance(value, str):
+            value = [part.strip() for part in value.split(",")]
+        return tuple(str(item) for item in (value or ()) if str(item))
+
     # 融合 preset 和评分配置
     return BacktestConfig(
         preset_name=preset_name,
@@ -1986,11 +2727,72 @@ def load_config(preset_name: str) -> BacktestConfig:
         daily_max_buys=p.get("daily_max_buys", 2),
         holding_max=p.get("holding_max", 5),
         route_execution_policy=p.get("route_execution_policy", {}),
+        watch_loss_cooldown_days=int(p.get("watch_loss_cooldown_days", 0) or 0),
+        watch_loss_cooldown_phase_buckets=_preset_tuple("watch_loss_cooldown_phases"),
+        execute_buy_phase_buckets=_preset_tuple("execute_buy_phases"),
+        execute_trial_buy_routes=_preset_tuple("execute_trial_buy_routes"),
+        execute_watch_trial_market_signals=_preset_tuple("execute_watch_trial_markets"),
+        execute_watch_trial_routes=_preset_tuple("execute_watch_trial_routes"),
+        execute_watch_trial_pairs=_preset_tuple("execute_watch_trial_pairs"),
+        execute_watch_trial_score_min=float(p.get("execute_watch_trial_score_min", 6.0) or 0.0),
+        execute_watch_trial_score_max=(
+            None
+            if p.get("execute_watch_trial_score_max") is None
+            else float(p.get("execute_watch_trial_score_max"))
+        ),
+        execute_watch_trial_position_pct=(
+            None
+            if p.get("execute_watch_trial_position_pct") is None
+            else float(p.get("execute_watch_trial_position_pct"))
+        ),
+        execute_watch_trial_phase_buckets=_preset_tuple("execute_watch_trial_phases"),
+        execute_watch_trial_min_above_ma20_days=int(
+            p.get("execute_watch_trial_min_above_ma20_days", 0) or 0
+        ),
+        execute_watch_trial_min_above_ma20_days_phase_buckets=_preset_tuple(
+            "execute_watch_trial_min_above_ma20_days_phases"
+        ),
+        execute_watch_trial_require_above_ma60_phase_buckets=_preset_tuple(
+            "execute_watch_trial_require_above_ma60_phases"
+        ),
+        execute_watch_trial_require_above_ma120_phase_buckets=_preset_tuple(
+            "execute_watch_trial_require_above_ma120_phases"
+        ),
+        scale_in_enabled=bool(p.get("scale_in_enabled", False)),
+        scale_in_profit_threshold=float(p.get("scale_in_profit_threshold", 0.10) or 0.0),
+        scale_in_step_position_pct=float(p.get("scale_in_step_position_pct", 0.075) or 0.0),
+        scale_in_max_position_pct=(
+            None
+            if p.get("scale_in_max_position_pct") is None
+            else float(p.get("scale_in_max_position_pct"))
+        ),
+        scale_in_max_adds=int(p.get("scale_in_max_adds", 2) or 0),
+        scale_in_min_days_between=int(p.get("scale_in_min_days_between", 5) or 0),
+        scale_in_routes=_preset_tuple("scale_in_routes"),
+        scale_in_market_signals=_preset_tuple("scale_in_markets"),
+        scale_in_actions=_preset_tuple("scale_in_actions") or ("BUY", "WATCH"),
+        scale_in_require_entry_signal=bool(p.get("scale_in_require_entry_signal", True)),
+        scale_in_score_min=float(p.get("scale_in_score_min", 5.0) or 0.0),
+        scale_in_reset_time_stop=bool(p.get("scale_in_reset_time_stop", True)),
+        scale_in_aggressive_max_position_pct=(
+            None
+            if p.get("scale_in_aggressive_max_position_pct") is None
+            else float(p.get("scale_in_aggressive_max_position_pct"))
+        ),
+        scale_in_aggressive_step_position_pct=(
+            None
+            if p.get("scale_in_aggressive_step_position_pct") is None
+            else float(p.get("scale_in_aggressive_step_position_pct"))
+        ),
+        scale_in_aggressive_market_signals=_preset_tuple("scale_in_aggressive_markets"),
+        scale_in_aggressive_routes=_preset_tuple("scale_in_aggressive_routes"),
+        scale_in_aggressive_phase_buckets=_preset_tuple("scale_in_aggressive_phases"),
         weights=weights,
         veto_rules=veto_rules,
         decision_gates=decision_gates,
         market_regime_overlays=market_regime_overlays,
         score_adjustments=score_adjustments,
+        market_multipliers=p.get("market_multipliers", {}),
     )
 
 
@@ -2002,15 +2804,46 @@ def run_backtest(
     initial_cash: float = 100000.0,
     adjustflag: str = "2",
     use_history_mirror: bool = True,
-    history_db_path: Optional[Path] = None,
     red_multiplier: float | None = None,
+    disable_market_reduce_sell: bool = False,
     execute_red_trial_buy: bool = False,
     execute_trial_buy_routes: tuple[str, ...] | list[str] | None = None,
+    execute_buy_phases: tuple[str, ...] | list[str] | None = None,
     execute_watch_trial_markets: tuple[str, ...] | list[str] | None = None,
     execute_watch_trial_routes: tuple[str, ...] | list[str] | None = None,
     execute_watch_trial_pairs: tuple[str, ...] | list[str] | None = None,
-    execute_watch_trial_score_min: float = 6.0,
+    execute_watch_trial_score_min: float | None = None,
+    execute_watch_trial_score_max: float | None = None,
+    execute_watch_trial_position_pct: float | None = None,
+    execute_watch_trial_phases: tuple[str, ...] | list[str] | None = None,
+    execute_watch_trial_min_above_ma20_days: int | None = None,
+    execute_watch_trial_min_above_ma20_days_phases: tuple[str, ...] | list[str] | None = None,
+    execute_watch_trial_require_above_ma60_phases: tuple[str, ...] | list[str] | None = None,
+    execute_watch_trial_require_above_ma120_phases: tuple[str, ...] | list[str] | None = None,
+    holding_max: int | None = None,
     trailing_stop: float | None = None,
+    time_stop_days: int | None = None,
+    stop_loss: float | None = None,
+    watch_loss_cooldown_days: int | None = None,
+    watch_loss_cooldown_phases: tuple[str, ...] | list[str] | None = None,
+    scale_in_enabled: bool | None = None,
+    scale_in_profit_threshold: float | None = None,
+    scale_in_step_position_pct: float | None = None,
+    scale_in_max_position_pct: float | None = None,
+    scale_in_max_adds: int | None = None,
+    scale_in_min_days_between: int | None = None,
+    scale_in_routes: tuple[str, ...] | list[str] | None = None,
+    scale_in_market_signals: tuple[str, ...] | list[str] | None = None,
+    scale_in_actions: tuple[str, ...] | list[str] | None = None,
+    scale_in_require_entry_signal: bool | None = None,
+    scale_in_score_min: float | None = None,
+    scale_in_reset_time_stop: bool | None = None,
+    scale_in_aggressive_max_position_pct: float | None = None,
+    scale_in_aggressive_step_position_pct: float | None = None,
+    scale_in_aggressive_market_signals: tuple[str, ...] | list[str] | None = None,
+    scale_in_aggressive_routes: tuple[str, ...] | list[str] | None = None,
+    scale_in_aggressive_phase_buckets: tuple[str, ...] | list[str] | None = None,
+    trade_record_limit: int | None = 50,
     signal_record_limit: int | None = 50,
     include_signal_alpha: bool = True,
     load_financials: bool = True,
@@ -2036,23 +2869,100 @@ def run_backtest(
     cfg.adjustflag = adjustflag
     if trailing_stop is not None:
         cfg.trailing_stop = float(trailing_stop)
+    if time_stop_days is not None:
+        cfg.time_stop_days = int(time_stop_days)
+    if stop_loss is not None:
+        cfg.stop_loss = float(stop_loss)
+    if watch_loss_cooldown_days is not None:
+        cfg.watch_loss_cooldown_days = int(watch_loss_cooldown_days)
+    if watch_loss_cooldown_phases is not None:
+        cfg.watch_loss_cooldown_phase_buckets = tuple(
+            str(item) for item in watch_loss_cooldown_phases if str(item)
+        )
+    if scale_in_enabled is not None:
+        cfg.scale_in_enabled = bool(scale_in_enabled)
+    if scale_in_profit_threshold is not None:
+        cfg.scale_in_profit_threshold = float(scale_in_profit_threshold)
+    if scale_in_step_position_pct is not None:
+        cfg.scale_in_step_position_pct = float(scale_in_step_position_pct)
+    if scale_in_max_position_pct is not None:
+        cfg.scale_in_max_position_pct = float(scale_in_max_position_pct)
+    if scale_in_max_adds is not None:
+        cfg.scale_in_max_adds = int(scale_in_max_adds)
+    if scale_in_min_days_between is not None:
+        cfg.scale_in_min_days_between = int(scale_in_min_days_between)
+    if scale_in_routes is not None:
+        cfg.scale_in_routes = tuple(str(item) for item in scale_in_routes if str(item))
+    if scale_in_market_signals is not None:
+        cfg.scale_in_market_signals = tuple(str(item) for item in scale_in_market_signals if str(item))
+    if scale_in_actions is not None:
+        cfg.scale_in_actions = tuple(str(item) for item in scale_in_actions if str(item))
+    if scale_in_require_entry_signal is not None:
+        cfg.scale_in_require_entry_signal = bool(scale_in_require_entry_signal)
+    if scale_in_score_min is not None:
+        cfg.scale_in_score_min = float(scale_in_score_min)
+    if scale_in_reset_time_stop is not None:
+        cfg.scale_in_reset_time_stop = bool(scale_in_reset_time_stop)
+    if scale_in_aggressive_max_position_pct is not None:
+        cfg.scale_in_aggressive_max_position_pct = float(scale_in_aggressive_max_position_pct)
+    if scale_in_aggressive_step_position_pct is not None:
+        cfg.scale_in_aggressive_step_position_pct = float(scale_in_aggressive_step_position_pct)
+    if scale_in_aggressive_market_signals is not None:
+        cfg.scale_in_aggressive_market_signals = tuple(
+            str(item) for item in scale_in_aggressive_market_signals if str(item)
+        )
+    if scale_in_aggressive_routes is not None:
+        cfg.scale_in_aggressive_routes = tuple(str(item) for item in scale_in_aggressive_routes if str(item))
+    if scale_in_aggressive_phase_buckets is not None:
+        cfg.scale_in_aggressive_phase_buckets = tuple(
+            str(item) for item in scale_in_aggressive_phase_buckets if str(item)
+        )
+    if holding_max is not None:
+        cfg.holding_max = int(holding_max)
     if red_multiplier is not None:
         cfg.market_multipliers = {**cfg.market_multipliers, "RED": red_multiplier}
+    cfg.disable_market_reduce_sell = bool(disable_market_reduce_sell)
     if execute_red_trial_buy:
         cfg.execute_trial_buy_market_signals = tuple(
             dict.fromkeys([*cfg.execute_trial_buy_market_signals, "RED"])
         )
-    cfg.execute_trial_buy_routes = tuple(str(item) for item in (execute_trial_buy_routes or ()) if str(item))
-    cfg.execute_watch_trial_market_signals = tuple(
-        str(item) for item in (execute_watch_trial_markets or ()) if str(item)
-    )
-    cfg.execute_watch_trial_routes = tuple(
-        str(item) for item in (execute_watch_trial_routes or ()) if str(item)
-    )
-    cfg.execute_watch_trial_pairs = tuple(
-        str(item) for item in (execute_watch_trial_pairs or ()) if str(item)
-    )
-    cfg.execute_watch_trial_score_min = float(execute_watch_trial_score_min or 0.0)
+    if execute_trial_buy_routes is not None:
+        cfg.execute_trial_buy_routes = tuple(str(item) for item in execute_trial_buy_routes if str(item))
+    if execute_buy_phases is not None:
+        cfg.execute_buy_phase_buckets = tuple(str(item) for item in execute_buy_phases if str(item))
+    if execute_watch_trial_markets is not None:
+        cfg.execute_watch_trial_market_signals = tuple(
+            str(item) for item in execute_watch_trial_markets if str(item)
+        )
+    if execute_watch_trial_routes is not None:
+        cfg.execute_watch_trial_routes = tuple(str(item) for item in execute_watch_trial_routes if str(item))
+    if execute_watch_trial_pairs is not None:
+        cfg.execute_watch_trial_pairs = tuple(str(item) for item in execute_watch_trial_pairs if str(item))
+    if execute_watch_trial_phases is not None:
+        cfg.execute_watch_trial_phase_buckets = tuple(
+            str(item) for item in execute_watch_trial_phases if str(item)
+        )
+    if execute_watch_trial_min_above_ma20_days is not None:
+        cfg.execute_watch_trial_min_above_ma20_days = int(execute_watch_trial_min_above_ma20_days or 0)
+    if execute_watch_trial_min_above_ma20_days_phases is not None:
+        cfg.execute_watch_trial_min_above_ma20_days_phase_buckets = tuple(
+            str(item) for item in execute_watch_trial_min_above_ma20_days_phases if str(item)
+        )
+    if execute_watch_trial_require_above_ma60_phases is not None:
+        cfg.execute_watch_trial_require_above_ma60_phase_buckets = tuple(
+            str(item) for item in execute_watch_trial_require_above_ma60_phases if str(item)
+        )
+    if execute_watch_trial_require_above_ma120_phases is not None:
+        cfg.execute_watch_trial_require_above_ma120_phase_buckets = tuple(
+            str(item) for item in execute_watch_trial_require_above_ma120_phases if str(item)
+        )
+    if execute_watch_trial_score_min is not None:
+        cfg.execute_watch_trial_score_min = float(execute_watch_trial_score_min or 0.0)
+    if execute_watch_trial_score_max is not None:
+        cfg.execute_watch_trial_score_max = float(execute_watch_trial_score_max)
+    if execute_watch_trial_position_pct is not None:
+        cfg.execute_watch_trial_position_pct = float(execute_watch_trial_position_pct)
+    cfg.trade_record_limit = trade_record_limit
     cfg.signal_record_limit = signal_record_limit
     cfg.include_signal_alpha = bool(include_signal_alpha)
     cfg.score_dimension_mode = score_dimension_mode
@@ -2063,7 +2973,7 @@ def run_backtest(
     cfg.use_financial_cache = use_stored_data or hydrate_data
     cfg.hydrate_financial_cache = hydrate_data
 
-    history_conn = _open_history_connection(use_history_mirror, history_db_path)
+    history_conn = _open_history_connection(use_history_mirror)
     market_conn = _open_market_data_connection(
         use_market_bars=cfg.use_market_bars,
         hydrate_market_bars=cfg.hydrate_market_bars,
@@ -2073,9 +2983,9 @@ def run_backtest(
     # 初始化引擎
     engine = BacktestEngine(cfg, history_conn=history_conn, market_conn=market_conn)
     try:
-        # 向前多拉 90 天用于 MA 计算
+        # 向前多拉 260 天，支撑 MA120 与 MA120 斜率等长周期市场制度字段。
         from datetime import date as date_type, timedelta as td
-        pre_start = (date_type.fromisoformat(start) - td(days=90)).isoformat()
+        pre_start = (date_type.fromisoformat(start) - td(days=260)).isoformat()
 
         load_result = engine.load_data(code_list, start, end, pre_start)
         if "error" in load_result:
@@ -2089,13 +2999,13 @@ def run_backtest(
             market_conn.close()
 
 
-def _open_history_connection(use_history_mirror: bool, history_db_path: Optional[Path]):
+def _open_history_connection(use_history_mirror: bool):
     if not use_history_mirror:
         return None
     try:
         from astock_trading.platform.db import connect
 
-        return connect(history_db_path) if history_db_path else connect()
+        return connect()
     except Exception:
         return None
 

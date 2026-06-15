@@ -38,7 +38,12 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     market_state, index_data = asyncio.run(ctx.market_svc.collect_market_state(run_id))
     signal = market_state.signal.value
     multiplier = market_state.multiplier
-    _logger.info(f"[morning] 大盘信号: {signal} (multiplier={multiplier})")
+    market_timing = _morning_market_timing()
+    _logger.info(
+        "[morning] 大盘前收参考信号: %s (multiplier=%s)",
+        signal,
+        multiplier,
+    )
 
     # 同步指数数据到 projection_market_state 表
     if index_data:
@@ -60,13 +65,9 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     risk_results = check_position_risks(ctx, positions, run_id)
     risk_alerts = []
     stop_loss_reminders = []
-    # 区分 immediate 和 advisory 级别的风控信号
-    has_immediate_risk = False
     for pos, signals in risk_results:
         for s in signals:
             risk_alerts.append(f"⚠️ {pos.name}({pos.code}): {s.description} [{s.urgency}]")
-            if s.urgency == "immediate":
-                has_immediate_risk = True
             # 提取止损挂单提醒
             if s.signal_type in ("stop_loss", "ma_exit", "trailing_stop"):
                 stop_loss_reminders.append({
@@ -95,21 +96,26 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         for r in pool_rows
     ]
 
-    # 4. 今日决策
-    # 只有 immediate 级别的风控信号才阻止买入，advisory（如时间止损）不阻止
-    can_buy = signal in ("GREEN", "YELLOW") and not has_immediate_risk
-    reasons = [f"market_signal={signal}"]
+    # 4. 盘前操作指引：9 点前后的大盘状态只能作为前收/缓存参考。
+    # 当日行情刷新前，不用它生成新增买入执行结论。
+    can_buy = False
+    reasons = [
+        f"market_signal={signal}",
+        "pre_market_signal_reference_only",
+        market_timing["reason"],
+    ]
     if risk_alerts:
         reasons.extend(risk_alerts)
 
-    if signal in ("RED", "CLEAR"):
-        decision_action = "NO_TRADE"
-    elif not can_buy:
-        decision_action = "NO_TRADE"
-    elif signal == "YELLOW":
-        decision_action = "REDUCED_BUY"
-    else:
-        decision_action = "BUY_ALLOWED"
+    decision_action = "PRE_MARKET_REFERENCE"
+    decision = {
+        "action": decision_action,
+        "multiplier": multiplier,
+        "holding_count": len(positions),
+        "risk_alerts": risk_alerts,
+        "execution_enabled": False,
+        "reason": market_timing["reason"],
+    }
 
     try:
         auto_trade_readiness = build_auto_trade_readiness(ctx, include_account=False)
@@ -138,10 +144,16 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         run_id=run_id,
         market_state_detail=market_state.detail,
         market_signal=signal,
-        decision={"action": decision_action},
+        decision={**decision, "market_signal_scope": market_timing["signal_scope"]},
     )
 
-    log_lines = ["## 盘前摘要", "", f"大盘信号: **{signal}** (仓位系数 {multiplier})", ""]
+    log_lines = [
+        "## 盘前摘要",
+        "",
+        f"大盘信号（前收参考）: **{signal}** (仓位系数 {multiplier})",
+        f"> {market_timing['reason']}",
+        "",
+    ]
     log_lines.extend(_readiness_log_lines(auto_trade_readiness))
     if positions:
         log_lines.append(f"持仓 {len(positions)} 只")
@@ -162,9 +174,10 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     hot_stocks = asyncio.run(ctx.market_svc.collect_hot_stocks(run_id=run_id))
     xueqiu_hot_stocks = asyncio.run(ctx.market_svc.collect_xueqiu_hot_stocks(run_id=run_id))
     cross_platform_hot_stocks = asyncio.run(ctx.market_svc.collect_cross_platform_hot_stocks(run_id=run_id))
-    finance_flash = asyncio.run(ctx.market_svc.collect_finance_flash(limit=5, run_id=run_id))
-    global_risk_news = asyncio.run(ctx.market_svc.collect_global_risk_news(limit=5, run_id=run_id))
-    market_announcements = asyncio.run(ctx.market_svc.collect_market_announcements(limit=5, run_id=run_id))
+    cached_items = getattr(ctx.market_svc, "cached_observation_items", None)
+    finance_flash = cached_items("finance_flash", "cn_a", limit=5) if callable(cached_items) else []
+    global_risk_news = cached_items("global_risk_news", "global", limit=5) if callable(cached_items) else []
+    market_announcements = cached_items("market_announcements", "cn_a", limit=5) if callable(cached_items) else []
     northbound = asyncio.run(ctx.market_svc.collect_northbound_realtime(run_id=run_id))
     signal_lines = format_market_signals_markdown(
         hot_stocks=hot_stocks,
@@ -195,15 +208,12 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     discord_data = {
         "date": local_today_str(),
         "market_signal": signal,
+        "market_signal_scope": market_timing["signal_scope"],
+        "market_timing": market_timing,
         "market": market_state.detail.get("indices", {}),
         "positions": [{"name": p.name, "shares": p.shares, "price": p.current_price or p.avg_cost, "currency": getattr(p, "currency", "CNY")} for p in positions],
         "core_pool": core_pool[:5],
-        "decision": {
-            "action": decision_action,
-            "multiplier": multiplier,
-            "holding_count": len(positions),
-            "risk_alerts": risk_alerts,
-        },
+        "decision": decision,
         "auto_trade_readiness": auto_trade_readiness,
         "stop_loss_reminders": stop_loss_reminders,
         "xueqiu_hot_stocks": xueqiu_hot_stocks[:5],
@@ -237,6 +247,8 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
 
     return {
         "signal": signal, "multiplier": multiplier,
+        "market_timing": market_timing,
+        "decision": decision,
         "positions": len(positions), "core_pool": len(core_pool),
         "risk_alerts": risk_alerts, "discord_embed": embed,
         "hot_stocks": len(hot_stocks),
@@ -248,6 +260,15 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
         "sector_heatmap_pushed": sector_heatmap_pushed,
         "history_group_id": history_group_id,
         "auto_trade_readiness": auto_trade_readiness,
+    }
+
+
+def _morning_market_timing() -> dict[str, object]:
+    return {
+        "phase": "morning",
+        "signal_scope": "previous_close_reference",
+        "execution_gate_enabled": False,
+        "reason": "盘前当日行情尚未刷新，大盘综合信号仅作前收参考，不作为当天新增买入判断。",
     }
 
 

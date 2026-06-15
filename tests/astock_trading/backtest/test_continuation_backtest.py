@@ -4,7 +4,6 @@ import pandas as pd
 
 from astock_trading.backtest.continuation_backtest import run_continuation_backtest
 from astock_trading.market.store import MarketStore
-from astock_trading.platform.db import connect, init_db
 
 
 def test_continuation_backtest_returns_hold_window_metrics(tmp_path):
@@ -44,10 +43,8 @@ def test_continuation_backtest_returns_hold_window_metrics(tmp_path):
     assert len(result["trades"]) == 2
 
 
-def test_continuation_backtest_uses_market_bars_when_available(tmp_path):
-    db_path = tmp_path / "astock_trading.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_continuation_backtest_uses_market_bars_when_available(mysql_conn):
+    conn = mysql_conn
     try:
         store = MarketStore(conn)
         dates = [f"2026-01-0{i}" for i in range(1, 9)]
@@ -72,7 +69,6 @@ def test_continuation_backtest_uses_market_bars_when_available(tmp_path):
         end="2026-01-06",
         hold_days=2,
         top_n=1,
-        db_path=db_path,
     )
 
     assert result["trades"]

@@ -2,28 +2,20 @@
 
 import json
 import pytest
-import sqlite3
 
-from astock_trading.platform.db import init_db
 from astock_trading.platform.config import ConfigRegistry
 from astock_trading.platform.runs import RunJournal
 
 
 @pytest.fixture
-def journal(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-
+def journal(mysql_conn):
+    conn = mysql_conn
     # Need a config version for foreign-key-like references
     registry = ConfigRegistry()
     snapshot = registry.freeze(conn)
 
     j = RunJournal(conn)
     yield j, conn, snapshot.version
-    conn.close()
 
 
 def test_start_and_complete(journal):

@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
 
 import astock_trading.platform.stock_analysis as stock_analysis
 from astock_trading.market.models import StockQuote, StockSnapshot, TechnicalIndicators
-from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.history_mirror import archive_signal_history
 from astock_trading.platform.stock_analysis import (
     build_stock_analysis_payload,
@@ -97,30 +95,8 @@ def test_resolve_stock_identifier_uses_spot_snapshot_for_name_when_screener_miss
     assert result == {"code": "600703", "name": "三安光电", "source": "spot"}
 
 
-def test_lookup_stock_identifier_from_db_resolves_recent_observation_name():
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        """CREATE TABLE projection_candidate_pool (
-            code TEXT,
-            pool_tier TEXT,
-            name TEXT,
-            score REAL,
-            added_at TEXT,
-            last_scored_at TEXT
-        )"""
-    )
-    conn.execute(
-        """CREATE TABLE market_observations (
-            observation_id TEXT,
-            source TEXT,
-            kind TEXT,
-            symbol TEXT,
-            observed_at TEXT,
-            run_id TEXT,
-            payload_json TEXT
-        )"""
-    )
+def test_lookup_stock_identifier_from_db_resolves_recent_observation_name(mysql_conn):
+    conn = mysql_conn
     conn.execute(
         """INSERT INTO market_observations
            (observation_id, source, kind, symbol, observed_at, payload_json)
@@ -171,10 +147,8 @@ def test_with_resolved_snapshot_name_updates_quote_name_when_provider_returns_co
     assert result.quote.name == "三安光电"
 
 
-def test_recent_history_signal_analysis_returns_real_miss_reason(tmp_path):
-    db_path = tmp_path / "history.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_recent_history_signal_analysis_returns_real_miss_reason(mysql_conn):
+    conn = mysql_conn
     try:
         archive_signal_history(
             conn,

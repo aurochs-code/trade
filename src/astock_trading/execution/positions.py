@@ -106,7 +106,7 @@ class PositionManager:
         )
 
         self._conn.execute(
-            """INSERT OR REPLACE INTO projection_positions
+            """REPLACE INTO projection_positions
                (code, name, style, shares, avg_cost_cents, cost_basis_cents, entry_date,
                 entry_day_low_cents, highest_since_entry_cents,
                 current_price_cents, unrealized_pnl_cents, updated_at, currency)
@@ -415,7 +415,7 @@ class PositionProjector:
             if pos is not None:
                 # 写入投影
                 self._conn.execute(
-                    """INSERT OR REPLACE INTO projection_positions
+                    """REPLACE INTO projection_positions
                        (code, name, style, shares, avg_cost_cents, cost_basis_cents, entry_date,
                         entry_day_low_cents, highest_since_entry_cents,
                         current_price_cents, unrealized_pnl_cents, updated_at, currency)

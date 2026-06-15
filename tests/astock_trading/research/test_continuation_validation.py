@@ -9,7 +9,6 @@ from astock_trading.research.continuation_validation import (
     run_continuation_validation,
 )
 from astock_trading.market.store import MarketStore
-from astock_trading.platform.db import connect, init_db
 from astock_trading.strategy.continuation_models import ContinuationScoreResult
 
 
@@ -103,10 +102,8 @@ def test_run_continuation_validation_returns_bucket_and_top_n_sections(tmp_path)
     assert result["candidate_report"][0]["score"] == pytest.approx(5.1)
 
 
-def test_run_continuation_validation_uses_market_bars_when_available(tmp_path):
-    db_path = tmp_path / "astock_trading.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_run_continuation_validation_uses_market_bars_when_available(mysql_conn):
+    conn = mysql_conn
     try:
         store = MarketStore(conn)
         dates = [f"2026-01-0{i}" for i in range(1, 9)]
@@ -142,7 +139,6 @@ def test_run_continuation_validation_uses_market_bars_when_available(tmp_path):
         start="2026-01-05",
         end="2026-01-06",
         top_n=2,
-        db_path=db_path,
     )
 
     assert result["score_bucket_report"]

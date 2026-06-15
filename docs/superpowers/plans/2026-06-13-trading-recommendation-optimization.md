@@ -150,7 +150,7 @@ bin/trade commands --json
   - `TushareFlowAdapter`：`moneyflow`。
   - `TushareMarketAdapter` 增强方法：`stock_basic`、`top_list`、`share_float`、`hk_hold`。
 - [ ] provider 顺序建议：
-  - 行情/K 线：`MXMarketAdapter -> TushareMarketAdapter -> 其他 fallback`。
+  - 行情/K 线：`TushareMarketAdapter -> MXMarketAdapter -> 其他 fallback`。
   - 财务：`TushareFinancialAdapter -> TencentFinancialAdapter -> AkShare`。
   - 资金流：`TushareFlowAdapter -> BaiduFundFlowAdapter -> AkShareFlowAdapter`。
 - [ ] 每次 Tushare 成功观测由 `MarketService` 写入对应 `market_observations`；失败经 `SourceRouter` 或 provider 失败记录进入结构化诊断。

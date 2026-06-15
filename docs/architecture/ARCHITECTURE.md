@@ -139,5 +139,5 @@ MCP 工具按治理风险分类，具体清单和审批策略由 `config/mcp_ser
 - 金额字段用 _cents 整数
 - 每次 run 冻结 config_version + run_id
 - reporting/ 不反写业务表
-- Runtime 只通过 `ASTOCK_DATABASE_URL` 连接 MySQL
-- SQLite 只用于测试替身和 `migrate-sqlite-to-mysql` 的历史源读取
+- Runtime 只通过 `ASTOCK_DATABASE_URL=mysql+pymysql://...` 连接 MySQL
+- 不再维护 SQLite 运行、测试替身或历史迁移入口

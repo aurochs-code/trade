@@ -203,7 +203,8 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     cross_platform_hot_stocks = asyncio.run(
         _attach_realtime_hot_stock_quotes(ctx.market_svc, cross_platform_hot_stocks, run_id)
     )
-    finance_flash = asyncio.run(ctx.market_svc.collect_finance_flash(limit=5, run_id=run_id))
+    cached_items = getattr(ctx.market_svc, "cached_observation_items", None)
+    finance_flash = cached_items("finance_flash", "cn_a", limit=5) if callable(cached_items) else []
     signal_lines = format_market_signals_markdown(
         cross_platform_hot_stocks=cross_platform_hot_stocks,
         finance_flash=finance_flash,

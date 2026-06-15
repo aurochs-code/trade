@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from astock_trading.pipeline.param_calibration import run_calibration
-from astock_trading.platform.db import connect, init_db
 from astock_trading.platform.events import EventStore
 
 
@@ -67,10 +66,8 @@ def _seed_review_sample(store: EventStore, conn, *, code: str, return_pct: float
     )
 
 
-def test_run_calibration_outputs_p5_suggestions_and_records_event(tmp_path):
-    db_path = tmp_path / "calibration.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_run_calibration_outputs_p5_suggestions_and_records_event(mysql_conn):
+    conn = mysql_conn
     try:
         store = EventStore(conn)
         _seed_review_sample(store, conn, code="600703", return_pct=0.06, mfe_pct=0.11, mae_pct=-0.03)
@@ -102,10 +99,8 @@ def test_run_calibration_outputs_p5_suggestions_and_records_event(tmp_path):
     assert payload["recorded_event_id"]
 
 
-def test_run_calibration_reports_insufficient_data_without_guessing(tmp_path):
-    db_path = tmp_path / "empty.db"
-    init_db(db_path)
-    conn = connect(db_path)
+def test_run_calibration_reports_insufficient_data_without_guessing(mysql_conn):
+    conn = mysql_conn
     try:
         payload = run_calibration(conn, min_samples=20, record=False, config_version="v_test")
     finally:

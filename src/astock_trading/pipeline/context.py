@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Optional
 
 from astock_trading.platform.events import EventStore
@@ -58,9 +57,9 @@ class PipelineContext:
         return self.cfg.get("capital", 450000)
 
 
-def build_context(db_path: Optional[Path] = None) -> PipelineContext:
+def build_context() -> PipelineContext:
     """构建完整的 pipeline 上下文。"""
-    services = service_factory.build_runtime_services(db_path)
+    services = service_factory.build_runtime_services()
 
     return PipelineContext(
         conn=services.conn,

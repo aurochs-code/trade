@@ -19,6 +19,8 @@ def signal_alpha_summary(
 ) -> dict[str, Any]:
     """Summarize forward-return quality for recorded strategy signals."""
     rows = [dict(item) for item in signals]
+    scored_rows = _rows_with_score_bucket(rows)
+    phased_rows = _rows_with_market_phase(scored_rows)
     return {
         "overall": _group_summary(
             rows,
@@ -47,6 +49,37 @@ def signal_alpha_summary(
             rows,
             "market_signal",
             "primary_strategy_route",
+            horizons=horizons,
+            bootstrap_iterations=bootstrap_iterations,
+            bootstrap_confidence=bootstrap_confidence,
+            bootstrap_seed=bootstrap_seed,
+        ),
+        "by_score_bucket": _summaries_by_key(
+            scored_rows,
+            "_score_bucket",
+            horizons=horizons,
+            bootstrap_iterations=bootstrap_iterations,
+            bootstrap_confidence=bootstrap_confidence,
+            bootstrap_seed=bootstrap_seed,
+        ),
+        "by_route_score_bucket": _nested_summaries_by_keys(
+            scored_rows,
+            "primary_strategy_route",
+            "_score_bucket",
+            horizons=horizons,
+            bootstrap_iterations=bootstrap_iterations,
+            bootstrap_confidence=bootstrap_confidence,
+            bootstrap_seed=bootstrap_seed,
+        ),
+        "by_market_route_score_bucket": _market_route_score_bucket_summary(
+            scored_rows,
+            horizons=horizons,
+            bootstrap_iterations=bootstrap_iterations,
+            bootstrap_confidence=bootstrap_confidence,
+            bootstrap_seed=bootstrap_seed,
+        ),
+        "by_market_phase_route_score_bucket": _market_phase_route_score_bucket_summary(
+            phased_rows,
             horizons=horizons,
             bootstrap_iterations=bootstrap_iterations,
             bootstrap_confidence=bootstrap_confidence,
@@ -116,10 +149,11 @@ def _summaries_by_key(
 
 
 def _unknown_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    route_gap_labels = {"unknown", "no_entry_route", "generic_entry_signal_watch"}
     return [
         row
         for row in rows
-        if str(row.get("primary_strategy_route") or "unknown") == "unknown"
+        if str(row.get("primary_strategy_route") or "unknown") in route_gap_labels
     ]
 
 
@@ -151,6 +185,143 @@ def _nested_summaries_by_keys(
         }
         for outer, inner_groups in sorted(groups.items())
     }
+
+
+def _market_route_score_bucket_summary(
+    rows: list[dict[str, Any]],
+    *,
+    horizons: tuple[str, ...],
+    bootstrap_iterations: int,
+    bootstrap_confidence: float,
+    bootstrap_seed: int,
+) -> dict[str, Any]:
+    groups: dict[str, dict[str, dict[str, list[dict[str, Any]]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(list))
+    )
+    for row in rows:
+        market = str(row.get("market_signal") or "unknown")
+        route = str(row.get("primary_strategy_route") or "unknown")
+        score_bucket = str(row.get("_score_bucket") or "unknown")
+        groups[market][route][score_bucket].append(row)
+    return {
+        market: {
+            route: {
+                score_bucket: _group_summary(
+                    items,
+                    horizons=horizons,
+                    bootstrap_iterations=bootstrap_iterations,
+                    bootstrap_confidence=bootstrap_confidence,
+                    bootstrap_seed=bootstrap_seed,
+                )
+                for score_bucket, items in sorted(score_groups.items())
+            }
+            for route, score_groups in sorted(route_groups.items())
+        }
+        for market, route_groups in sorted(groups.items())
+    }
+
+
+def _market_phase_route_score_bucket_summary(
+    rows: list[dict[str, Any]],
+    *,
+    horizons: tuple[str, ...],
+    bootstrap_iterations: int,
+    bootstrap_confidence: float,
+    bootstrap_seed: int,
+) -> dict[str, Any]:
+    groups: dict[str, dict[str, dict[str, list[dict[str, Any]]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(list))
+    )
+    for row in rows:
+        phase = str(row.get("_market_phase_bucket") or "unknown")
+        route = str(row.get("primary_strategy_route") or "unknown")
+        score_bucket = str(row.get("_score_bucket") or "unknown")
+        groups[phase][route][score_bucket].append(row)
+    return {
+        phase: {
+            route: {
+                score_bucket: _group_summary(
+                    items,
+                    horizons=horizons,
+                    bootstrap_iterations=bootstrap_iterations,
+                    bootstrap_confidence=bootstrap_confidence,
+                    bootstrap_seed=bootstrap_seed,
+                )
+                for score_bucket, items in sorted(score_groups.items())
+            }
+            for route, score_groups in sorted(route_groups.items())
+        }
+        for phase, route_groups in sorted(groups.items())
+    }
+
+
+def _rows_with_score_bucket(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    scored_rows: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["_score_bucket"] = _score_bucket(item.get("score"))
+        scored_rows.append(item)
+    return scored_rows
+
+
+def _rows_with_market_phase(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    phased_rows: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["_market_phase_bucket"] = market_phase_bucket(item.get("market_context"))
+        phased_rows.append(item)
+    return phased_rows
+
+
+def market_phase_bucket(context: Any) -> str:
+    if not isinstance(context, dict):
+        return "unknown"
+    deviation = _float_or_none(context.get("index_ma20_deviation_pct"))
+    slope = _float_or_none(context.get("index_ma20_slope_5d_pct"))
+    if deviation is None or slope is None:
+        return "unknown"
+
+    if deviation < -5:
+        distance = "deep_below_ma20"
+    elif deviation < 0:
+        distance = "below_ma20"
+    elif deviation <= 3:
+        distance = "near_ma20"
+    else:
+        distance = "extended_above_ma20"
+
+    if slope >= 0.5:
+        trend = "slope_up"
+    elif slope <= -0.5:
+        trend = "slope_down"
+    else:
+        trend = "slope_flat"
+    return f"{distance}_{trend}"
+
+
+def _score_bucket(raw_score: Any) -> str:
+    try:
+        score = float(raw_score)
+    except (TypeError, ValueError):
+        return "unknown"
+    if score < 4.5:
+        return "<4.5"
+    if score < 5.0:
+        return "4.5-5.0"
+    if score < 5.5:
+        return "5.0-5.5"
+    if score < 6.0:
+        return "5.5-6.0"
+    if score < 6.5:
+        return "6.0-6.5"
+    return ">=6.5"
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _group_summary(

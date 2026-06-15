@@ -9,6 +9,9 @@ LOG_DIR="$HOME/.local/state/a-stock-trading/logs/cron"
 # 盘前舆情 08:00：扫描持仓 + 核心/观察/强势观察候选的隔夜舆情
 0 8 * * 1-5 $TRADE run-pipeline sentiment --json >> $LOG_DIR/cron_sentiment.log 2>&1
 
+# 新闻公告增量采集：交易日持续抓取持仓 + 候选池新闻公告，写入 MySQL 观测表
+*/30 8-20 * * 1-5 $TRADE market-intel hydrate-news --json >> $LOG_DIR/cron_news_hydrate.log 2>&1
+
 # 盘前摘要 08:25
 25 8 * * 1-5 $TRADE run-pipeline morning --json >> $LOG_DIR/cron_morning.log 2>&1
 

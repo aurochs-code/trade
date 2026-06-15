@@ -7,6 +7,7 @@ market/health.py — 数据源健康聚合。
 from __future__ import annotations
 
 import json
+import uuid
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -266,6 +267,40 @@ def _provider_failure_resolution(
         tuple(params),
     ).fetchone()
     return dict(row) if row else None
+
+
+def record_data_source_health_snapshot(
+    conn,
+    health: dict,
+    *,
+    run_id: Optional[str] = None,
+    observed_at: Optional[datetime] = None,
+) -> str:
+    """把一次数据源健康评估结果记录为市场观测快照。"""
+    observed = observed_at or datetime.now(timezone.utc)
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    observed_text = observed.isoformat()
+    observation_id = str(uuid.uuid4())
+    payload = {
+        **health,
+        "recorded_at": observed_text,
+    }
+    conn.execute(
+        """REPLACE INTO market_observations
+           (observation_id, source, kind, symbol, observed_at, run_id, payload_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (
+            observation_id,
+            "market_health",
+            "data_source_health",
+            "cn_a",
+            observed_text,
+            run_id,
+            json.dumps(payload, ensure_ascii=False, default=str),
+        ),
+    )
+    return observation_id
 
 
 def evaluate_data_source_health(
