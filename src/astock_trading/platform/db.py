@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from astock_trading.platform.database import Database, DatabaseSettings
 
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 _RUNTIME_DB: Database | None = None
 _RUNTIME_DB_URL: str | None = None
 

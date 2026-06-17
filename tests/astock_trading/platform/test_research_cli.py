@@ -121,6 +121,16 @@ def test_backtest_record_run_json_persists_result(monkeypatch):
             "short_continuation,volume_breakout",
             "--scale-in-aggressive-phases",
             "extended_above_ma20_slope_up,below_ma20_slope_up",
+            "--commission-bps",
+            "3.0",
+            "--min-commission",
+            "2.0",
+            "--stamp-tax-bps",
+            "6.0",
+            "--transfer-fee-bps",
+            "0.2",
+            "--slippage-bps",
+            "8.0",
             "--trade-output-limit",
             "-1",
             "--record-run",
@@ -139,6 +149,8 @@ def test_backtest_record_run_json_persists_result(monkeypatch):
     assert saved["request"]["codes"] == ["600000"]
     assert saved["request"]["start"] == "2026-01-02"
     assert saved["request"]["end"] == "2026-01-05"
+    assert saved["run_kwargs"]["preset"] == "攻_C_recovery_ma120_green_scale04"
+    assert saved["request"]["preset"] == "攻_C_recovery_ma120_green_scale04"
     assert saved["run_kwargs"]["execute_watch_trial_position_pct"] == 0.06
     assert saved["run_kwargs"]["execute_watch_trial_phases"] == ("below_ma20_slope_up",)
     assert saved["run_kwargs"]["execute_buy_phases"] == ("extended_above_ma20_slope_up",)
@@ -177,6 +189,11 @@ def test_backtest_record_run_json_persists_result(monkeypatch):
         "extended_above_ma20_slope_up",
         "below_ma20_slope_up",
     )
+    assert saved["run_kwargs"]["commission_bps"] == 3.0
+    assert saved["run_kwargs"]["min_commission"] == 2.0
+    assert saved["run_kwargs"]["stamp_tax_bps"] == 6.0
+    assert saved["run_kwargs"]["transfer_fee_bps"] == 0.2
+    assert saved["run_kwargs"]["slippage_bps"] == 8.0
     assert saved["run_kwargs"]["trade_record_limit"] is None
     assert saved["request"]["watch_trial_position_pct"] == 0.06
     assert saved["request"]["watch_trial_phases"] == ("below_ma20_slope_up",)
@@ -216,6 +233,11 @@ def test_backtest_record_run_json_persists_result(monkeypatch):
         "extended_above_ma20_slope_up",
         "below_ma20_slope_up",
     )
+    assert saved["request"]["commission_bps"] == 3.0
+    assert saved["request"]["min_commission"] == 2.0
+    assert saved["request"]["stamp_tax_bps"] == 6.0
+    assert saved["request"]["transfer_fee_bps"] == 0.2
+    assert saved["request"]["slippage_bps"] == 8.0
     assert saved["request"]["trade_output_limit"] == -1
     assert saved["closed"] is True
 
@@ -227,6 +249,7 @@ def test_backtest_cli_preserves_preset_research_fields_when_not_overridden(monke
     saved: dict = {}
 
     def fake_run_backtest(**kwargs):
+        print("第三方库 stdout 污染")
         saved["run_kwargs"] = kwargs
         return {
             "preset": kwargs["preset"],
@@ -269,6 +292,70 @@ def test_backtest_cli_preserves_preset_research_fields_when_not_overridden(monke
     assert saved["run_kwargs"]["execute_watch_trial_position_pct"] is None
 
 
+def test_replay_production_cli_runs_reachable_history_mirror_backtest(monkeypatch):
+    from astock_trading.platform.cli import app
+    import astock_trading.backtest.engine as engine_module
+
+    saved: dict = {}
+
+    def fake_run_backtest(**kwargs):
+        print("第三方库 stdout 污染")
+        saved["run_kwargs"] = kwargs
+        return {
+            "preset": kwargs["preset"],
+            "initial_cash": kwargs["initial_cash"],
+            "final_value": 100000.0,
+            "total_return_pct": 0.0,
+            "annual_return_pct": 0.0,
+            "max_drawdown_pct": 0.0,
+            "win_rate_pct": 0.0,
+            "total_trades": 0,
+            "buy_trades": 0,
+            "sell_trades": 0,
+            "positions_open": 0,
+            "execution_semantics": {"reachable_only": True},
+            "discovery_reachability": {"enabled": True, "lookback_days": 5},
+            "execution_constraints": {"t_plus_one": True},
+            "cost_model": {"commission_bps": 2.5},
+            "trade_log": [],
+            "trades": [],
+            "equity_curve": [],
+        }
+
+    monkeypatch.setattr(engine_module, "run_backtest", fake_run_backtest)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "replay-production",
+            "2024-01-01",
+            "2024-12-31",
+            "--codes",
+            "600000,300475",
+            "--progress-log",
+            "--no-signal-alpha",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert "第三方库 stdout 污染" not in result.stdout
+    assert "第三方库 stdout 污染" in result.stderr
+    assert payload["mode"] == "production_replay"
+    assert payload["reachable_definition"]["lookback_days"] == 5
+    assert payload["point_in_time_contract"]["adjustflag"] == "3"
+    assert saved["run_kwargs"]["codes"] == "600000,300475"
+    assert saved["run_kwargs"]["use_history_mirror"] is True
+    assert saved["run_kwargs"]["reachable_only"] is True
+    assert saved["run_kwargs"]["reachable_lookback_days"] == 5
+    assert saved["run_kwargs"]["use_stored_data"] is True
+    assert saved["run_kwargs"]["adjustflag"] == "3"
+    assert saved["run_kwargs"]["pnl_adjustflag"] == "3"
+    assert saved["run_kwargs"]["progress_log"] is True
+    assert saved["run_kwargs"]["include_signal_alpha"] is False
+
+
 def test_command_catalog_marks_backtest_record_run_as_state_write():
     from astock_trading.platform.cli.agent import _command_catalog
 
@@ -276,8 +363,13 @@ def test_command_catalog_marks_backtest_record_run_as_state_write():
 
     assert commands["backtest"]["writes_state"] is False
     assert commands["backtest"]["writes_order"] is False
+    assert commands["backtest"]["options"]["--preset"]["default"] == "攻_C_recovery_ma120_green_scale04"
+    assert commands["backtest_batch"]["writes_state"] is False
+    assert commands["backtest_batch"]["writes_order"] is False
+    assert commands["backtest_batch"]["options"]["--preset"]["default"] == "攻_C_recovery_ma120_green_scale04"
     assert commands["backtest_record_run"]["writes_state"] is True
     assert commands["backtest_record_run"]["writes_order"] is False
+    assert commands["backtest_record_run"]["options"]["--preset"]["default"] == "攻_C_recovery_ma120_green_scale04"
     assert commands["backtest_record_run"]["state_events"] == [
         "backtest_runs",
         "backtest_trades",

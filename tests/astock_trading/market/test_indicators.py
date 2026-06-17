@@ -88,7 +88,17 @@ def test_golden_cross_detection():
 
 def test_above_ma20_uses_quote():
     """When quote is provided, above_ma20 should use quote.close, not kline close."""
-    df = _make_kline(60, base_price=15.0, trend=0.001)
+    prices = [15.0 + i * 0.02 for i in range(60)]
+    df = pd.DataFrame({
+        "日期": pd.date_range("2026-01-01", periods=60, freq="B").strftime("%Y-%m-%d"),
+        "开盘": prices,
+        "收盘": prices,
+        "最高": [p * 1.01 for p in prices],
+        "最低": [p * 0.99 for p in prices],
+        "成交量": [5_000_000] * 60,
+        "成交额": [p * 5_000_000 for p in prices],
+        "涨跌幅": [0.0] * 60,
+    })
     # Quote with price well above MA20
     quote = StockQuote(
         code="002138", name="test", price=30.0,
@@ -98,6 +108,34 @@ def test_above_ma20_uses_quote():
     result = compute_technical_indicators(df, quote)
     assert result.above_ma20 is True
     assert result.change_pct == 2.0
+
+
+def test_adjusted_kline_is_aligned_to_quote_price_axis():
+    """前复权 K 线和实时未复权 quote 明显不同尺度时，技术指标应先归一价格口径。"""
+    prices = [48.0 + i * 0.05 for i in range(60)]
+    df = pd.DataFrame({
+        "date": pd.date_range("2026-03-01", periods=60, freq="B").strftime("%Y-%m-%d"),
+        "open": [p * 0.99 for p in prices],
+        "close": prices,
+        "high": [p * 1.01 for p in prices],
+        "low": [p * 0.98 for p in prices],
+        "volume": [1_000_000] * 60,
+        "amount": [p * 1_000_000 for p in prices],
+    })
+    quote = StockQuote(
+        code="002475", name="立讯精密", price=67.29,
+        open=68.15, high=68.70, low=67.27, close=67.29,
+        volume=58_170_700, amount=3_954_760_035.78, change_pct=-1.26,
+    )
+
+    result = compute_technical_indicators(df, quote)
+
+    factor = quote.close / prices[-1]
+    expected_ma20_raw = float(pd.Series(prices).rolling(20).mean().iloc[-1]) * factor
+    expected_ma20 = round(expected_ma20_raw, 2)
+    assert result.ma20 == expected_ma20
+    assert result.deviation_rate == round((quote.close - expected_ma20_raw) / expected_ma20_raw * 100, 2)
+    assert result.change_pct == -1.26
 
 
 def test_volume_ratio_uses_quote_volume_when_latest_kline_volume_missing():

@@ -50,6 +50,7 @@ STATUS_CN = {
     "ok": "正常",
     "warning": "警告",
     "failed": "失败",
+    "critical": "严重",
     "error": "错误",
     "running": "运行中",
     "unknown": "未知",
@@ -1639,6 +1640,91 @@ def format_opportunity_watch_embed(monitor: dict) -> dict:
         fields=fields,
         footer="A-Stock Trading · opportunity_watch",
     )
+
+
+def format_ops_watchdog_embed(monitor: dict) -> dict:
+    """运维 watchdog 状态变化 → Discord embed dict。"""
+    report = monitor.get("report", {}) or {}
+    current_status = str(monitor.get("current_status") or report.get("status") or "unknown")
+    incidents = report.get("incidents", []) or []
+    next_actions = report.get("next_actions", []) or []
+    recovered = current_status == "ok" and "ops_recovered" in (monitor.get("change_types", []) or [])
+    color = COLORS["profit_alert"] if recovered else COLORS["stop_alert"] if current_status == "critical" else COLORS["info"]
+
+    fields = [
+        _field(
+            "状态",
+            "当前={current}\n变化={change}\n结论={summary}".format(
+                current=_label_cn(current_status),
+                change=_label_cn(monitor.get("status", "changed")),
+                summary=str(monitor.get("summary") or report.get("summary") or ""),
+            ),
+            inline=False,
+        )
+    ]
+
+    if incidents:
+        fields.append(_field(
+            "断点",
+            "\n".join(_ops_watchdog_incident_lines(incidents[:5])),
+            inline=False,
+        ))
+
+    if next_actions:
+        fields.append(_field(
+            "恢复动作",
+            "\n".join(_ops_watchdog_action_lines(next_actions[:5])),
+            inline=False,
+        ))
+
+    fields.append(_field(
+        "交易边界",
+        "watchdog 只负责监测和提醒，不运行 pipeline，不记录成交，不会下单。观察不等于买入意向。",
+        inline=False,
+    ))
+
+    title_status = "已恢复" if recovered else _label_cn(current_status)
+    return _embed(
+        title=f"运维 watchdog — {title_status}",
+        color=color,
+        fields=fields,
+        footer="A-Stock Trading · ops_watchdog",
+    )
+
+
+def _ops_watchdog_incident_lines(incidents: list[dict]) -> list[str]:
+    lines = []
+    for item in incidents:
+        evidence = item.get("evidence", {}) or {}
+        parts = [
+            f"- {_label_cn(item.get('label', item.get('reason', '运维断点')))}",
+            f"级别：{_label_cn(item.get('severity', 'warning'))}",
+        ]
+        summary = str(item.get("summary") or "").strip()
+        if summary:
+            parts.append(f"说明：{_finding_cn(summary)}")
+        name = str(evidence.get("name") or "").strip()
+        if name:
+            parts.append(f"任务：{_label_cn(name)}")
+        error_type = str(evidence.get("error_type") or "").strip()
+        if error_type:
+            parts.append(f"错误：{_label_cn(error_type)}")
+        log_path = str(evidence.get("log_path") or "").strip()
+        if log_path:
+            parts.append(f"日志：`{log_path}`")
+        lines.append("\n".join(parts))
+    return lines
+
+
+def _ops_watchdog_action_lines(actions: list[dict]) -> list[str]:
+    lines = []
+    for action in actions:
+        label = _label_cn(action.get("label", "复核运维断点"))
+        command = action.get("command", "atrade ops watchdog --json")
+        writes_state = "会写状态" if action.get("writes_state") else "只读"
+        writes_order = "可能下单" if action.get("writes_order") else "不会下单"
+        lines.append(f"- {label}\n命令：`{command}`\n边界：{writes_state} / {writes_order}")
+    return lines
 
 
 def format_daily_inspection_embed(summary: dict) -> dict:

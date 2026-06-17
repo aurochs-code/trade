@@ -1,7 +1,10 @@
-# A-Stock Trading V2 crontab
+# A-Stock Trading V2 crontab（legacy 示例）
 #
-# 安装：先运行 `atrade init` 并填写 ~/.config/a-stock-trading/.env，再用 crontab -e 粘贴以下内容
-# 说明：以下时间按机器本地时区执行，建议服务器/本机统一设置为 Asia/Shanghai
+# 当前本机生产节奏由 Hermes trading profile 承担；不要把本文件当作当前事实来源。
+# 系统化异常感知由 launchd ops-watchdog 承担，模板见 config/launchd/com.astock.trade.ops-watchdog.plist。
+# 仅在不用 Hermes 的独立部署里，把本文件作为 crontab 迁移参考；安装前必须先和
+# docs/operations/HERMES_SCHEDULE.md、`atrade diagnose schedule --json` 的当前节奏逐项对齐。
+# 说明：以下时间按机器本地时区执行，建议服务器/本机统一设置为 Asia/Shanghai。
 
 TRADE="atrade"
 LOG_DIR="$HOME/.local/state/a-stock-trading/logs/cron"
@@ -18,8 +21,8 @@ LOG_DIR="$HOME/.local/state/a-stock-trading/logs/cron"
 # 午休检查 11:55
 55 11 * * 1-5 $TRADE run-pipeline noon --json >> $LOG_DIR/cron_noon.log 2>&1
 
-# 盘中候选池轻量刷新 13:40：在 14:00 模拟盘自动交易前补当天候选证据
-40 13 * * 1-5 $TRADE screener refresh --limit 10 --json >> $LOG_DIR/cron_screener_refresh_intraday.log 2>&1
+# 盘中候选池刷新 13:40：使用 strategy.screening.refresh_scan_limit，给 14:00 模拟盘补当天候选证据
+40 13 * * 1-5 $TRADE screener refresh --json >> $LOG_DIR/cron_screener_refresh_intraday.log 2>&1
 
 # 盘中影子试运行记录 13:45：只写 paper.trial.recorded，不下单
 45 13 * * 1-5 $TRADE paper trial-plan --record --json >> $LOG_DIR/cron_paper_trial.log 2>&1
@@ -34,8 +37,8 @@ LOG_DIR="$HOME/.local/state/a-stock-trading/logs/cron"
 # 模拟盘自动交易 14:00（盘中风控/卖出检查；买入侧仍受新鲜评分 gate 约束）
 0 14 * * 1-5 $TRADE run-pipeline auto_trade --json >> $LOG_DIR/cron_auto_trade.log 2>&1
 
-# 盘中候选-模拟闭环 14:12 + 14:24：先刷新候选并承接一次，买入窗口结束前再兜底承接一次
-12 14 * * 1-5 $TRADE screener refresh --limit 20 --json >> $LOG_DIR/cron_screener_refresh_intraday.log 2>&1
+# 盘中候选-模拟闭环 14:12 + 14:24：先按默认深度刷新候选并承接一次，买入窗口结束前再兜底承接一次
+12 14 * * 1-5 $TRADE screener refresh --json >> $LOG_DIR/cron_screener_refresh_intraday.log 2>&1
 24 14 * * 1-5 $TRADE run-pipeline auto_trade --json >> $LOG_DIR/cron_auto_trade.log 2>&1
 
 # 候选池刷新 15:10：刷新强势观察、观察池和核心候选池

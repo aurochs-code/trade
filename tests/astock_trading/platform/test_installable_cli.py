@@ -44,6 +44,41 @@ def test_runtime_env_loads_config_dir_env_without_overriding_process_env(tmp_pat
     assert os.environ["MX_APIKEY"] == "already-set"
 
 
+def test_runtime_env_uses_explicit_env_parent_as_config_dir(tmp_path, monkeypatch):
+    from astock_trading.platform.runtime_env import load_runtime_env
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / ".env").write_text(
+        "ASTOCK_DATABASE_URL=mysql+pymysql://user:pass@127.0.0.1:3306/from_config\n",
+        encoding="utf-8",
+    )
+    (config_dir / "strategy.yaml").write_text(
+        "scoring:\n"
+        "  weights:\n"
+        "    technical: 3\n"
+        "    fundamental: 2\n"
+        "    flow: 2\n"
+        "    sentiment: 3\n"
+        "  thresholds:\n"
+        "    buy: 5.5\n"
+        "    watch: 5.0\n"
+        "    reject: 3.0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ASTOCK_ENV_FILE", str(config_dir / ".env"))
+    monkeypatch.delenv("ASTOCK_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("ASTOCK_DATABASE_URL", raising=False)
+
+    loaded = load_runtime_env()
+
+    assert loaded == config_dir / ".env"
+    assert os.environ["ASTOCK_CONFIG_DIR"] == str(config_dir)
+    assert os.environ["ASTOCK_DATABASE_URL"] == (
+        "mysql+pymysql://user:pass@127.0.0.1:3306/from_config"
+    )
+
+
 def test_config_registry_uses_astock_config_dir(tmp_path, monkeypatch):
     from astock_trading.platform.config import ConfigRegistry
 

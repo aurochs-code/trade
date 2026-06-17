@@ -107,6 +107,47 @@ def test_batched_backtest_passes_score_dimension_mode_to_runner():
     assert report["config"]["score_dimension_mode"] == "tech_fundamental"
 
 
+def test_batched_backtest_passes_cost_model_to_runner_and_report():
+    captured: dict[str, object] = {}
+
+    def runner(codes: list[str], **kwargs):
+        captured["config"] = kwargs["config"]
+        return {
+            "total_return_pct": 0.0,
+            "max_drawdown_pct": 0.0,
+            "win_rate_pct": 0.0,
+            "signal_validation": {"sample_size": 0, "signals": []},
+        }
+
+    report = run_batched_backtest(
+        ["600036"],
+        "2024-01-01",
+        "2024-12-31",
+        BacktestBatchConfig(
+            batch_size=1,
+            commission_bps=3.0,
+            min_commission=2.0,
+            stamp_tax_bps=6.0,
+            transfer_fee_bps=0.2,
+            slippage_bps=8.0,
+        ),
+        batch_runner=runner,
+    )
+
+    config = captured["config"]
+    assert config.commission_bps == 3.0
+    assert config.min_commission == 2.0
+    assert config.stamp_tax_bps == 6.0
+    assert config.transfer_fee_bps == 0.2
+    assert config.slippage_bps == 8.0
+    assert report["config"]["commission_bps"] == 3.0
+    assert report["config"]["min_commission"] == 2.0
+    assert report["config"]["stamp_tax_bps"] == 6.0
+    assert report["config"]["transfer_fee_bps"] == 0.2
+    assert report["config"]["slippage_bps"] == 8.0
+    assert report["execution_semantics"]["cost_model"] == "commission_stamp_transfer_slippage"
+
+
 def test_batched_backtest_passes_watch_trial_config_to_runner():
     captured: dict[str, object] = {}
 

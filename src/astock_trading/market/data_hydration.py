@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import date as date_type
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from astock_trading.market.store import MarketStore
@@ -212,6 +213,302 @@ def _is_supported_a_share_symbol(symbol: str) -> bool:
     if len(text) != 6 or not text.isdigit():
         return False
     return text.startswith(("0", "3", "6", "4", "8"))
+
+
+def select_historical_discovery_pools(
+    rows: list[dict[str, Any]],
+    *,
+    start: str,
+    end: str,
+    lookback_days: int = 60,
+    min_history_days: int = 20,
+    min_avg_amount_yuan: float = 200_000_000.0,
+    min_avg_amplitude_pct: float = 3.0,
+    min_price: float = 5.0,
+    max_price: float = 200.0,
+    limit: int = 600,
+) -> list[dict[str, Any]]:
+    """用历史 K 线滚动构造每日发现池，只表达“当时可能被选股链路看见”。"""
+    if not rows:
+        return []
+
+    import pandas as pd
+
+    start_iso = _iso_date(start)
+    end_iso = _iso_date(end)
+    frame = pd.DataFrame(rows).copy()
+    if frame.empty:
+        return []
+    frame["symbol"] = frame["symbol"].astype(str)
+    frame = frame[frame["symbol"].map(_is_supported_a_share_symbol)].copy()
+    if frame.empty:
+        return []
+
+    frame["bar_date"] = frame["bar_date"].astype(str)
+    frame["close_yuan"] = pd.to_numeric(frame["close_cents"], errors="coerce").fillna(0.0) / 100.0
+    frame["amount_yuan"] = pd.to_numeric(frame["amount_cents"], errors="coerce").fillna(0.0) / 100.0
+    high = pd.to_numeric(frame["high_cents"], errors="coerce").fillna(0.0)
+    low = pd.to_numeric(frame["low_cents"], errors="coerce").fillna(0.0)
+    close = pd.to_numeric(frame["close_cents"], errors="coerce").fillna(0.0)
+    frame["amplitude_pct"] = 0.0
+    valid_close = close > 0
+    frame.loc[valid_close, "amplitude_pct"] = ((high[valid_close] - low[valid_close]) * 100.0 / close[valid_close])
+    frame = frame.sort_values(["symbol", "bar_date"]).reset_index(drop=True)
+
+    window = max(int(lookback_days or 1), 1)
+    grouped = frame.groupby("symbol", sort=False)
+    frame["history_days"] = grouped["close_yuan"].transform(
+        lambda values: values.rolling(window=window, min_periods=1).count()
+    )
+    frame["avg_amount_yuan"] = grouped["amount_yuan"].transform(
+        lambda values: values.rolling(window=window, min_periods=1).mean()
+    )
+    frame["avg_amplitude_pct"] = grouped["amplitude_pct"].transform(
+        lambda values: values.rolling(window=window, min_periods=1).mean()
+    )
+    frame["fitness_score"] = (frame["avg_amount_yuan"] / 100_000_000.0) * frame["avg_amplitude_pct"]
+
+    frame = frame[
+        (frame["bar_date"] >= start_iso)
+        & (frame["bar_date"] <= end_iso)
+        & (frame["history_days"] >= int(min_history_days))
+        & (frame["avg_amount_yuan"] >= float(min_avg_amount_yuan))
+        & (frame["avg_amplitude_pct"] >= float(min_avg_amplitude_pct))
+        & (frame["close_yuan"] >= float(min_price))
+        & (frame["close_yuan"] <= float(max_price))
+    ].copy()
+    if frame.empty:
+        return []
+
+    snapshots: list[dict[str, Any]] = []
+    for snapshot_date, day_frame in frame.groupby("bar_date", sort=True):
+        selected = day_frame.sort_values(["fitness_score", "symbol"], ascending=[False, True]).head(max(int(limit), 0))
+        pool = []
+        for _, row in selected.iterrows():
+            avg_amount = round(float(row["avg_amount_yuan"] or 0.0), 2)
+            avg_amplitude = round(float(row["avg_amplitude_pct"] or 0.0), 4)
+            fitness_score = round(float(row["fitness_score"] or 0.0), 4)
+            pool.append({
+                "code": str(row["symbol"]),
+                "name": str(row["symbol"]),
+                "pool_tier": "historical_discovery",
+                "score": fitness_score,
+                "note": "历史发现回放：基于滚动成交额、振幅、价格和覆盖率筛入。",
+                "discovery_metrics": {
+                    "history_days": int(row["history_days"]),
+                    "avg_amount_yuan": avg_amount,
+                    "avg_amplitude_pct": avg_amplitude,
+                    "latest_close": round(float(row["close_yuan"] or 0.0), 4),
+                    "fitness_score": fitness_score,
+                },
+            })
+        snapshots.append({
+            "snapshot_date": str(snapshot_date),
+            "pool": pool,
+        })
+    return snapshots
+
+
+def replay_historical_discovery_snapshots(
+    conn,
+    *,
+    source: str = "tushare",
+    adjustflag: str = "3",
+    start: str,
+    end: str,
+    lookback_days: int = 60,
+    min_history_days: int = 20,
+    min_avg_amount_yuan: float = 200_000_000.0,
+    min_avg_amplitude_pct: float = 3.0,
+    min_price: float = 5.0,
+    max_price: float = 200.0,
+    limit: int = 600,
+    write: bool = False,
+    run_id: str = "historical_discovery_replay",
+    phase: str = "historical_discovery",
+) -> dict[str, Any]:
+    """从已落库 K 线重建历史发现层，并按天写入 pool-only 信号镜像。"""
+    start_iso = _iso_date(start)
+    end_iso = _iso_date(end)
+    warmup_days = max(int(lookback_days or 1) * 3, 30)
+    warmup_start = (date_type.fromisoformat(start_iso) - timedelta(days=warmup_days)).isoformat()
+    rows = conn.execute(
+        """SELECT symbol, bar_date, high_cents, low_cents, close_cents, amount_cents
+           FROM market_price_bars
+           WHERE source = ?
+             AND adjustflag = ?
+             AND period = 'daily'
+             AND bar_date >= ?
+             AND bar_date <= ?
+           ORDER BY symbol, bar_date""",
+        (str(source), str(adjustflag), warmup_start, end_iso),
+    ).fetchall()
+    snapshots = select_historical_discovery_pools(
+        [dict(row) for row in rows],
+        start=start_iso,
+        end=end_iso,
+        lookback_days=lookback_days,
+        min_history_days=min_history_days,
+        min_avg_amount_yuan=min_avg_amount_yuan,
+        min_avg_amplitude_pct=min_avg_amplitude_pct,
+        min_price=min_price,
+        max_price=max_price,
+        limit=limit,
+    )
+
+    from astock_trading.platform.history_mirror import archive_signal_history
+
+    dates: list[dict[str, Any]] = []
+    pool_item_count = 0
+    for snapshot in snapshots:
+        snapshot_date = snapshot["snapshot_date"]
+        pool = snapshot["pool"]
+        pool_item_count += len(pool)
+        group_id = f"hist_discovery_{snapshot_date.replace('-', '')}_{source}_{adjustflag}"
+        if write:
+            archive_signal_history(
+                conn,
+                snapshot_date=snapshot_date,
+                history_group_id=group_id,
+                run_id=run_id,
+                phase=phase,
+                market={},
+                pool=pool,
+                candidates=[],
+                decisions=[],
+            )
+        dates.append({
+            "snapshot_date": snapshot_date,
+            "history_group_id": group_id,
+            "selected_count": len(pool),
+            "top_codes": [str(item.get("code")) for item in pool[:5]],
+        })
+
+    if write and snapshots and hasattr(conn, "commit"):
+        conn.commit()
+
+    status = "empty" if not snapshots else ("ok" if write else "dry_run")
+    return {
+        "diagnostic": "historical_discovery_replay",
+        "status": status,
+        "source": str(source),
+        "adjustflag": str(adjustflag),
+        "start": start_iso,
+        "end": end_iso,
+        "lookback_start": warmup_start,
+        "filters": {
+            "lookback_days": int(lookback_days),
+            "min_history_days": int(min_history_days),
+            "min_avg_amount_yuan": float(min_avg_amount_yuan),
+            "min_avg_amplitude_pct": float(min_avg_amplitude_pct),
+            "min_price": float(min_price),
+            "max_price": float(max_price),
+            "limit": int(limit),
+        },
+        "source_row_count": len(rows),
+        "processed_date_count": len(snapshots),
+        "snapshot_count": len(snapshots) if write else 0,
+        "planned_snapshot_count": len(snapshots),
+        "pool_item_count": pool_item_count,
+        "dates": dates,
+        "warnings": [
+            "历史发现回放只写候选池镜像，不写评分候选或买卖决策；回测应继续用历史 K 线重算策略信号。",
+            "该结果用于评估生产发现链路可承接性，不是买入建议。",
+        ],
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def select_latest_lightweight_discovery_candidates(
+    conn,
+    *,
+    source: str = "tushare",
+    adjustflag: str = "3",
+    as_of_date: str | None = None,
+    lookback_days: int = 60,
+    min_history_days: int = 20,
+    min_avg_amount_yuan: float = 200_000_000.0,
+    min_avg_amplitude_pct: float = 3.0,
+    min_price: float = 5.0,
+    max_price: float = 200.0,
+    limit: int = 600,
+) -> dict[str, Any]:
+    """读取最新落库 K 线，生成真实 screener 可复用的轻量发现候选。"""
+    end_limit = _iso_date(as_of_date) if as_of_date else ""
+    latest_query = (
+        "SELECT MAX(bar_date) AS latest_date "
+        "FROM market_price_bars "
+        "WHERE source = ? AND adjustflag = ? AND period = 'daily'"
+    )
+    params: list[Any] = [str(source), str(adjustflag)]
+    if end_limit:
+        latest_query += " AND bar_date <= ?"
+        params.append(end_limit)
+    latest_row = conn.execute(latest_query, tuple(params)).fetchone()
+    latest_date = str((latest_row or {}).get("latest_date") or "")
+    if not latest_date:
+        return {
+            "status": "empty",
+            "source": str(source),
+            "adjustflag": str(adjustflag),
+            "snapshot_date": "",
+            "selected_count": 0,
+            "candidates": [],
+        }
+
+    warmup_days = max(int(lookback_days or 1) * 3, 30)
+    warmup_start = (date_type.fromisoformat(latest_date) - timedelta(days=warmup_days)).isoformat()
+    rows = conn.execute(
+        """SELECT symbol, bar_date, high_cents, low_cents, close_cents, amount_cents
+           FROM market_price_bars
+           WHERE source = ?
+             AND adjustflag = ?
+             AND period = 'daily'
+             AND bar_date >= ?
+             AND bar_date <= ?
+           ORDER BY symbol, bar_date""",
+        (str(source), str(adjustflag), warmup_start, latest_date),
+    ).fetchall()
+    snapshots = select_historical_discovery_pools(
+        [dict(row) for row in rows],
+        start=latest_date,
+        end=latest_date,
+        lookback_days=lookback_days,
+        min_history_days=min_history_days,
+        min_avg_amount_yuan=min_avg_amount_yuan,
+        min_avg_amplitude_pct=min_avg_amplitude_pct,
+        min_price=min_price,
+        max_price=max_price,
+        limit=limit,
+    )
+    pool = snapshots[-1]["pool"] if snapshots else []
+    candidates = [
+        {
+            "code": str(item.get("code") or ""),
+            "name": str(item.get("name") or item.get("code") or ""),
+            "score": float(item.get("score") or 0.0),
+        }
+        for item in pool
+        if item.get("code")
+    ]
+    return {
+        "status": "ok" if candidates else "empty",
+        "source": str(source),
+        "adjustflag": str(adjustflag),
+        "snapshot_date": latest_date,
+        "lookback_start": warmup_start,
+        "selected_count": len(candidates),
+        "candidates": candidates,
+        "filters": {
+            "lookback_days": int(lookback_days),
+            "min_history_days": int(min_history_days),
+            "min_avg_amount_yuan": float(min_avg_amount_yuan),
+            "min_avg_amplitude_pct": float(min_avg_amplitude_pct),
+            "min_price": float(min_price),
+            "max_price": float(max_price),
+            "limit": int(limit),
+        },
+    }
 
 
 def select_backtest_universe(

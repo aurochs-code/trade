@@ -12,7 +12,7 @@ backtest/engine.py — 生产级回测引擎
       ↓
   Decider.decide() → DecisionIntent
       ↓
-  SimulatedBroker.submit_order()（立即收盘价成交）
+  SimulatedBroker.submit_order()（按 A 股 T+1、涨跌停和成本模型撮合）
       ↓
   持仓管理 + 风控检查
       ↓
@@ -37,6 +37,7 @@ import pandas as pd
 import yaml
 
 from astock_trading.backtest.signal_analysis import market_phase_bucket, signal_alpha_summary
+from astock_trading.strategy.route_policy import iter_route_policy_entries, route_policy_values
 
 if TYPE_CHECKING:
     from astock_trading.strategy.models import MarketState
@@ -91,6 +92,22 @@ def _cache_covers_range(df: pd.DataFrame, pre_start: str, end_date: str) -> bool
     start_target = pd.Timestamp(pre_start) + pd.Timedelta(days=10)
     end_target = pd.Timestamp(end_date) - pd.Timedelta(days=10)
     return dates.min() <= start_target and dates.max() >= end_target
+
+
+def _cache_covers_backtest_range(df: pd.DataFrame, start_date: str, end_date: str) -> bool:
+    """判断缓存是否覆盖正式回测区间；不要求覆盖 MA warmup 的前置窗口。"""
+    return _cache_covers_range(df, start_date, end_date)
+
+
+def _cache_covers_end_date(df: pd.DataFrame, end_date: str) -> bool:
+    """判断缓存尾部是否覆盖回测结束；允许股票在区间中途上市。"""
+    if df.empty or "日期" not in df.columns:
+        return False
+    dates = pd.to_datetime(df["日期"], errors="coerce").dropna()
+    if dates.empty:
+        return False
+    end_target = pd.Timestamp(end_date) - pd.Timedelta(days=10)
+    return dates.max() >= end_target
 
 
 def _missing_ranges_for_cache(
@@ -507,10 +524,14 @@ def _market_state_from_history_bundle(payload: dict, fallback: "MarketState") ->
 
     signal_value = str(payload.get("signal") or fallback.signal.value)
     signal = MarketSignal(signal_value) if signal_value in MarketSignal._value2member_map_ else fallback.signal
+    detail = payload.get("detail")
+    if not isinstance(detail, dict) or not detail:
+        detail = dict(getattr(fallback, "detail", {}) or {})
+        detail.setdefault("source", "history_mirror")
     return MarketState(
         signal=signal,
         multiplier=float(payload.get("multiplier", fallback.multiplier) or 0.0),
-        detail=payload.get("detail") or {"source": "history_mirror"},
+        detail=detail,
     )
 
 
@@ -533,6 +554,13 @@ def _data_quality_from_history(value: object, data_quality_enum):
 
 def _counter_inc(counter: dict[str, int], key: str, amount: int = 1) -> None:
     counter[key] = int(counter.get(key, 0)) + int(amount)
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _market_signal_value(market: object) -> str:
@@ -572,6 +600,25 @@ def _score_route_label(score: object) -> str:
     if bool(getattr(score, "entry_signal", False)):
         return "generic_entry_signal_watch"
     return "no_entry_route"
+
+
+def _history_discovery_sources(sections: dict[str, Any]) -> dict[str, list[str]]:
+    sources_by_code: dict[str, set[str]] = {}
+    for source_name in ("pool", "candidates", "decision"):
+        payload = sections.get(source_name) or []
+        if not isinstance(payload, list):
+            continue
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("code") or "").strip()
+            if not code:
+                continue
+            sources_by_code.setdefault(code, set()).add(source_name)
+    return {
+        code: sorted(sources)
+        for code, sources in sorted(sources_by_code.items())
+    }
 
 
 def _decision_reason_keys(intent: object) -> list[str]:
@@ -621,6 +668,19 @@ def _decision_reason_keys(intent: object) -> list[str]:
     return list(dict.fromkeys(reasons))
 
 
+def _veto_reason_keys(score: object, intent: object | None = None) -> list[str]:
+    reasons: list[str] = []
+    sources = [getattr(score, "hard_veto", []) or []]
+    if intent is not None:
+        sources.append(getattr(intent, "veto_reasons", []) or [])
+    for source in sources:
+        for item in source:
+            reason = str(item or "").strip()
+            if reason and reason not in reasons:
+                reasons.append(reason)
+    return reasons
+
+
 # ---------------------------------------------------------------------------
 # BacktestEngine
 # ---------------------------------------------------------------------------
@@ -630,6 +690,7 @@ class BacktestConfig:
     preset_name: str = "保守验证C"
     initial_cash: float = 100000.0
     adjustflag: str = "2"
+    pnl_adjustflag: str = "1"
     # 风控参数（来自 preset）
     trailing_stop: float = 0.10
     stop_loss: float = 0.08
@@ -698,6 +759,13 @@ class BacktestConfig:
     use_financial_cache: bool = False
     hydrate_financial_cache: bool = False
     financial_query_timeout_seconds: float = 45.0
+    require_reachable_candidate_for_buy: bool = False
+    reachable_lookback_days: int = 5
+    commission_bps: float = 2.5
+    min_commission: float = 5.0
+    stamp_tax_bps: float = 5.0
+    transfer_fee_bps: float = 0.1
+    slippage_bps: float = 5.0
 
 
 @dataclass
@@ -707,10 +775,31 @@ class Position:
     entry_price: float
     entry_date: str
     high_water: float
+    pnl_units: float = 0.0
+    pnl_entry_price: float = 0.0
+    pnl_high_water: float = 0.0
     market_reduced: bool = False  # 是否已因大盘CLEAR减过仓
     position_pct: float = 0.0
+    entry_route: str = ""
+    entry_market_signal: str = ""
+    market_reduce_exempt: bool = False
     add_count: int = 0
     last_add_date: str = ""
+    cost_basis: float = 0.0
+    pending_exit_reason: str = ""
+    pending_exit_trigger_date: str = ""
+    pending_exit_shares: int = 0
+
+
+@dataclass
+class PendingBuyOrder:
+    signal_date: str
+    execution_date: str
+    score: Any
+    intent: Any
+    market: Any
+    position_pct: float
+    kind: str = "buy"
 
 
 class BacktestEngine:
@@ -733,17 +822,20 @@ class BacktestEngine:
         self._scorer = None
         self._decider = None
         self._bars: dict[str, pd.DataFrame] = {}       # code -> df
+        self._pnl_bars: dict[str, pd.DataFrame] = {}   # code -> 后复权/收益口径 df
         self._index_df: Optional[pd.DataFrame] = None  # 上证指数
         self._sorted_dates: list[str] = []
         self._portfolio_value_series: list[dict] = []
         self._trades: list[dict] = []
         self._positions: dict[str, Position] = {}
+        self._pending_buy_orders: list[PendingBuyOrder] = []
         self._cash: float = config.initial_cash
         self._weekly_buy_count: int = 0
         self._last_week: str = ""
         self._last_index_date: str = ""
         self._financial_cache: dict[str, list[dict]] = {}  # code -> point-in-time snapshots
         self._history_mirror_dates: list[str] = []
+        self._history_mirror_cache: dict[str, dict[str, Any]] | None = None
         self._proxy_replay_dates: list[str] = []
         self._signal_records: list[dict[str, Any]] = []
         self._execution_funnel: dict[str, Any] = {
@@ -760,10 +852,40 @@ class BacktestEngine:
             "veto_reasons": {},
             "by_market_route": {},
         }
+        self._recent_discoveries: dict[str, dict[str, Any]] = {}
+        self._discovery_reachability: dict[str, Any] = {
+            "candidate_checks": 0,
+            "reachable_candidates": 0,
+            "blocked_candidates": 0,
+            "discovery_sources": {},
+            "blocked_reasons": {},
+            "blocked_codes": {},
+        }
         self._requested_codes: list[str] = []
         self._loaded_codes: list[str] = []
         self._current_date_index: int = 0
         self._watch_loss_cooldown_until_index: int = -1
+        self._execution_constraints: dict[str, Any] = {
+            "t_plus_one": True,
+            "t_plus_one_blocked_sells": 0,
+            "buy_signals": 0,
+            "buy_orders_scheduled": 0,
+            "buy_orders_expired": 0,
+            "buy_untradable": 0,
+            "sell_triggers": 0,
+            "sell_orders_pending": 0,
+            "sell_untradable": 0,
+            "pnl_price_missing_risk_skips": 0,
+            "untradable_reasons": {},
+        }
+        self._cost_totals: dict[str, float] = {
+            "commission": 0.0,
+            "stamp_tax": 0.0,
+            "transfer_fee": 0.0,
+            "fee_total": 0.0,
+            "slippage_cost": 0.0,
+            "total_cost": 0.0,
+        }
 
     def _log_progress(self, event: str, **fields: Any) -> None:
         if not self.cfg.progress_log:
@@ -799,18 +921,63 @@ class BacktestEngine:
             end=end_date,
             pre_start=pre_start,
         )
+        bulk_market_bars: dict[str, pd.DataFrame] | None = None
+        if self.cfg.use_market_bars and not self.cfg.hydrate_market_bars and self._market_store is not None:
+            bulk_started_at = time.monotonic()
+            bulk_codes = sorted({*codes, "000001"})
+            self._log_progress("kline_cache_bulk_start", codes=len(bulk_codes))
+            bulk_market_bars = self._market_store.get_price_bars_bulk(
+                bulk_codes,
+                start=pre_start,
+                end=end_date,
+                adjustflag=self.cfg.adjustflag,
+                chunk_size=100,
+            )
+            self._log_progress(
+                "kline_cache_bulk_done",
+                codes=len(bulk_market_bars),
+                rows=sum(len(frame) for frame in bulk_market_bars.values()),
+                seconds=round(time.monotonic() - bulk_started_at, 2),
+            )
 
         # 加载股票数据（baostock 单次最多返回 ~120 条，分多批取再合并）
-        def _fetch_code(code: str) -> Optional[pd.DataFrame]:
+        def _fetch_code(code: str, *, adjustflag: str | None = None) -> Optional[pd.DataFrame]:
+            bar_adjustflag = str(adjustflag or self.cfg.adjustflag)
             code_started_at = time.monotonic()
-            self._log_progress("kline_start", code=code)
+            self._log_progress("kline_start", code=code, adjustflag=bar_adjustflag)
             cached: pd.DataFrame | None = None
             if self.cfg.use_market_bars:
-                cached = self._load_market_bars_cache(code, pre_start, end_date, require_full=False)
+                if bulk_market_bars is not None and bar_adjustflag == str(self.cfg.adjustflag):
+                    cached = self._normalize_market_bars_cache(code, bulk_market_bars.get(code))
+                else:
+                    cached = self._load_market_bars_cache(
+                        code,
+                        pre_start,
+                        end_date,
+                        require_full=False,
+                        adjustflag=bar_adjustflag,
+                    )
                 if cached is not None and _cache_covers_range(cached, pre_start, end_date):
                     self._log_progress(
                         "kline_cache_hit",
                         code=code,
+                        adjustflag=bar_adjustflag,
+                        rows=len(cached),
+                        seconds=round(time.monotonic() - code_started_at, 2),
+                    )
+                    return cached
+                if (
+                    cached is not None
+                    and not self.cfg.hydrate_market_bars
+                    and (
+                        _cache_covers_backtest_range(cached, start_date, end_date)
+                        or _cache_covers_end_date(cached, end_date)
+                    )
+                ):
+                    self._log_progress(
+                        "kline_cache_hit_backtest_range",
+                        code=code,
+                        adjustflag=bar_adjustflag,
                         rows=len(cached),
                         seconds=round(time.monotonic() - code_started_at, 2),
                     )
@@ -818,8 +985,18 @@ class BacktestEngine:
                 self._log_progress(
                     "kline_cache_partial" if cached is not None and not cached.empty else "kline_cache_miss",
                     code=code,
+                    adjustflag=bar_adjustflag,
                     cached_rows=0 if cached is None else len(cached),
                 )
+                if cached is not None and not cached.empty and not self.cfg.hydrate_market_bars:
+                    self._log_progress(
+                        "kline_cache_hit_partial_no_hydrate",
+                        code=code,
+                        adjustflag=bar_adjustflag,
+                        rows=len(cached),
+                        seconds=round(time.monotonic() - code_started_at, 2),
+                    )
+                    return cached
             ranges = _missing_ranges_for_cache(cached, pre_start, end_date)
 
             dfs = []
@@ -828,6 +1005,7 @@ class BacktestEngine:
                 self._log_progress(
                     "kline_segment_start",
                     code=code,
+                    adjustflag=bar_adjustflag,
                     segment=f"{i + 1}/{len(ranges)}",
                     start=segment_start,
                     end=segment_end,
@@ -836,11 +1014,12 @@ class BacktestEngine:
                     code, period="daily",
                     count=0,
                     start_date=segment_start, end_date=segment_end,
-                    adjustflag=self.cfg.adjustflag,
+                    adjustflag=bar_adjustflag,
                 ))
                 self._log_progress(
                     "kline_segment_done",
                     code=code,
+                    adjustflag=bar_adjustflag,
                     segment=f"{i + 1}/{len(ranges)}",
                     rows=0 if df is None else len(df),
                     seconds=round(time.monotonic() - segment_started_at, 2),
@@ -864,7 +1043,7 @@ class BacktestEngine:
                     code,
                     combined,
                     source="baostock",
-                    adjustflag=self.cfg.adjustflag,
+                    adjustflag=bar_adjustflag,
                 )
                 if self._market_conn is not None:
                     self._market_conn.commit()
@@ -872,6 +1051,7 @@ class BacktestEngine:
             self._log_progress(
                 "kline_done",
                 code=code,
+                adjustflag=bar_adjustflag,
                 rows=len(combined),
                 seconds=round(time.monotonic() - code_started_at, 2),
             )
@@ -885,6 +1065,18 @@ class BacktestEngine:
 
         if not self._bars:
             return {"error": "所有股票均无法获取数据", "codes": codes}
+
+        if self._uses_separate_pnl_bars():
+            self._log_progress(
+                "pnl_kline_start",
+                codes=len(self._bars),
+                adjustflag=self.cfg.pnl_adjustflag,
+            )
+            for code in list(self._bars.keys()):
+                pnl_df = _fetch_code(code, adjustflag=self.cfg.pnl_adjustflag)
+                if pnl_df is not None and not pnl_df.empty:
+                    self._pnl_bars[code] = pnl_df
+            self._log_progress("pnl_kline_done", loaded=len(self._pnl_bars))
 
         # 加载上证指数数据（同样需要分批，绕过 120 条限制）
         self._log_progress("index_start", code="000001")
@@ -928,6 +1120,7 @@ class BacktestEngine:
         end_date: str,
         *,
         require_full: bool = True,
+        adjustflag: str | None = None,
     ) -> pd.DataFrame | None:
         if self._market_store is None:
             return None
@@ -935,11 +1128,16 @@ class BacktestEngine:
             code,
             start=pre_start,
             end=end_date,
-            adjustflag=self.cfg.adjustflag,
+            adjustflag=str(adjustflag or self.cfg.adjustflag),
         )
         if cached.empty or (require_full and not _cache_covers_range(cached, pre_start, end_date)):
             return None
-        cached = cached.copy().sort_values("日期").reset_index(drop=True)
+        return self._normalize_market_bars_cache(code, cached)
+
+    def _normalize_market_bars_cache(self, code: str, cached: pd.DataFrame | None) -> pd.DataFrame | None:
+        if cached is None or cached.empty:
+            return None
+        cached = cached.copy().drop_duplicates(subset=["日期"]).sort_values("日期").reset_index(drop=True)
         cached["证券名称"] = code
         cached["名称"] = code
         if "涨跌幅" not in cached.columns:
@@ -999,6 +1197,7 @@ class BacktestEngine:
             "clear_days_ma60": 15,
             "market_multipliers": self.cfg.market_multipliers,
         }
+        self._preload_history_mirror_cache()
 
         for i, d in enumerate(self._sorted_dates):
             self._current_date_index = i
@@ -1026,26 +1225,31 @@ class BacktestEngine:
                 market = mirror_replay["market"]
                 self._market_state = market
                 self._history_mirror_dates.append(d)
+                self._record_discoveries_for_date(d, mirror_replay)
             else:
                 self._proxy_replay_dates.append(d)
 
+            # ── 2. 撮合前一交易日产生的买入意图 ───────────────────────────
+            # 信号由前一交易日收盘后生成，最早只能在当前交易日开盘撮合。
+            self._execute_pending_buy_orders(d)
+
             # ── 2. 持仓权益 ──────────────────────────────────────────
-            portfolio_value = self._cash + sum(
-                close * pos.shares
-                for code, pos in self._positions.items()
-                if (close := self._close_on_or_before(self._bars.get(code), d)) is not None
-            )
+            portfolio_value = self._cash + self._positions_market_value(d)
 
             # ── 3. 风控检查（止损/止盈/到期）─────────────────────────
             self._risk_check(d, i)
+            portfolio_value = self._cash + self._positions_market_value(d)
 
             # ── 4. 评分 + 决策 ───────────────────────────────────────
             current_exposure = (portfolio_value - self._cash) / portfolio_value if portfolio_value > 0 else 0.0
-            if mirror_replay is not None:
+            if mirror_replay is not None and mirror_replay.get("has_strategy_intents", bool(mirror_replay["intents"])):
                 intents = mirror_replay["intents"]
             else:
+                if mirror_replay is not None:
+                    self._proxy_replay_dates.append(d)
                 intents = []
-                for code in self._bars:
+                candidate_codes = self._candidate_codes_for_date(d)
+                for code in candidate_codes:
                     snapshot = self._build_snapshot(code, d)
                     if snapshot is None:
                         continue
@@ -1070,41 +1274,22 @@ class BacktestEngine:
                     continue
 
                 pos = self._positions[score.code]
-                df = self._bars[score.code]
-                row = df[df["日期"] == d]
-                if row.empty:
+                if pos.pending_exit_reason:
                     continue
-                price = float(row["收盘"].iloc[0])
 
-                if is_market_clear and not pos.market_reduced:
-                    # 大盘 CLEAR/RED → 减仓 50%（每个持仓只减一次）
+                if self._should_reduce_position_for_market(pos, market):
+                    # 大盘 CLEAR/RED → 下一交易日减仓 50%（每个持仓只减一次）
+                    self._execution_constraints["sell_triggers"] += 1
                     sell_shares = pos.shares // 2
                     pos.market_reduced = True
                     if sell_shares <= 0:
                         # 不足2手则全部清仓
                         sell_shares = pos.shares
                     reason = f"大盘{market.signal.value}减仓"
-                    if sell_shares >= pos.shares:
-                        self._positions.pop(score.code)
-                    else:
-                        pos.shares -= sell_shares
+                    self._queue_exit(pos, reason=reason, trigger_date=d, shares=sell_shares)
                 else:
                     # 个股分数低 → 不强制卖，等止损/时间止损自然退出
                     continue
-
-                pnl = (price - pos.entry_price) * sell_shares
-                self._cash += price * sell_shares
-                trade = {
-                    "date": d, "code": score.code, "name": score.name,
-                    "side": "sell", "price": price, "shares": sell_shares,
-                    "entry_price": pos.entry_price,
-                    "pnl": round(pnl, 2),
-                    "return_pct": round((price - pos.entry_price) / pos.entry_price * 100, 2),
-                    "reason": reason,
-                    "score": round(score.total, 1),
-                }
-                self._trades.append(trade)
-                self._register_loss_cooldown(trade, i)
 
             # ── 6. 趋势加仓（研究 what-if）────────────────────────────
             self._scale_in_positions(
@@ -1129,8 +1314,16 @@ class BacktestEngine:
                     if not execution_status["executable"]:
                         self._record_execution_funnel_skip(execution_status["reason"], score, intent, market)
                         continue
+                    reachability_status = self._reachability_status(d, score.code)
+                    self._record_reachability_check(reachability_status, score.code)
+                    if not reachability_status["reachable"]:
+                        self._record_execution_funnel_skip(reachability_status["reason"], score, intent, market)
+                        continue
                     if score.code in self._positions:
                         self._record_execution_funnel_skip("already_held", score, intent, market)
+                        continue
+                    if self._has_pending_buy_order(score.code):
+                        self._record_execution_funnel_skip("buy_order_pending", score, intent, market)
                         continue
                     self._record_execution_funnel_executable(score, intent, market)
                     buy_candidates.append((score, intent))
@@ -1144,23 +1337,32 @@ class BacktestEngine:
                     reverse=True,
                 )
 
-                daily_max_buys = int(self.cfg.daily_max_buys or 2)
-                for index, (score, intent) in enumerate(buy_candidates):
-                    if index >= daily_max_buys:
+                execution_date = self._next_trade_date(d)
+                daily_remaining = max(
+                    0,
+                    int(self.cfg.daily_max_buys or 2)
+                    - self._pending_buy_order_count(execution_date=execution_date, include_scale_in=False),
+                )
+                weekly_remaining = max(
+                    0,
+                    self._weekly_max_for_market(market)
+                    - self._weekly_buy_count
+                    - self._pending_buy_order_count(include_scale_in=False),
+                )
+                for score, intent in buy_candidates:
+                    if daily_remaining <= 0:
                         self._record_execution_funnel_skip("daily_limit", score, intent, market)
                         continue
                     if score.code in self._positions:
                         self._record_execution_funnel_skip("already_held", score, intent, market)
                         continue
-                    if self._weekly_buy_count >= self._weekly_max_for_market(market):
+                    if self._has_pending_buy_order(score.code):
+                        self._record_execution_funnel_skip("buy_order_pending", score, intent, market)
+                        continue
+                    if weekly_remaining <= 0:
                         self._record_execution_funnel_skip("weekly_limit", score, intent, market)
                         continue
-                    df = self._bars[score.code]
-                    row = df[df["日期"] == d]
-                    if row.empty:
-                        self._record_execution_funnel_skip("missing_price_row", score, intent, market)
-                        continue
-                    price = float(row["收盘"].iloc[0])
+                    self._execution_constraints["buy_signals"] += 1
                     position_pct = self._execution_position_pct(
                         intent,
                         market,
@@ -1169,34 +1371,20 @@ class BacktestEngine:
                     if position_pct <= 0:
                         self._record_execution_funnel_skip("zero_position_pct", score, intent, market)
                         continue
-                    allocate = self._allocation_budget_for_position(d, position_pct)
-                    shares = int(allocate / price / 100) * 100
-                    if shares <= 0:
-                        self._record_execution_funnel_skip("shares_zero", score, intent, market)
+                    if not execution_date:
+                        self._record_execution_funnel_skip("no_next_trade_date", score, intent, market)
                         continue
-
-                    self._cash -= price * shares
-                    self._positions[score.code] = Position(
-                        code=score.code,
-                        shares=shares,
-                        entry_price=price,
-                        entry_date=d,
-                        high_water=price,
+                    self._pending_buy_orders.append(PendingBuyOrder(
+                        signal_date=d,
+                        execution_date=execution_date,
+                        score=score,
+                        intent=intent,
+                        market=market,
                         position_pct=position_pct,
-                    )
-                    self._weekly_buy_count += 1
-                    self._trades.append(
-                        self._buy_trade_record(
-                            trade_date=d,
-                            score=score,
-                            intent=intent,
-                            market=market,
-                            price=price,
-                            shares=shares,
-                            position_pct=position_pct,
-                        )
-                    )
-                    self._record_execution_funnel_buy(score, intent, market)
+                    ))
+                    self._execution_constraints["buy_orders_scheduled"] += 1
+                    daily_remaining -= 1
+                    weekly_remaining -= 1
             else:
                 block_reason = "holding_max" if len(self._positions) >= int(self.cfg.holding_max or 5) else "cash_floor"
                 for score, intent in intents:
@@ -1208,10 +1396,19 @@ class BacktestEngine:
                         score.code,
                         route,
                         score_total=score.total,
+                        market=market,
                     ):
-                        self._record_execution_funnel_skip(block_reason, score, intent, market)
+                        reachability_status = self._reachability_status(d, score.code)
+                        self._record_reachability_check(reachability_status, score.code)
+                        self._record_execution_funnel_skip(
+                            reachability_status["reason"] if not reachability_status["reachable"] else block_reason,
+                            score,
+                            intent,
+                            market,
+                        )
 
             # ── 7. 记录权益曲线 ─────────────────────────────────────
+            portfolio_value = self._cash + self._positions_market_value(d)
             self._portfolio_value_series.append({
                 "date": d,
                 "equity": round(portfolio_value, 2),
@@ -1249,10 +1446,7 @@ class BacktestEngine:
             for reason in _decision_reason_keys(intent):
                 _counter_inc(self._execution_funnel["decision_reasons"], reason)
                 _counter_inc(bucket["decision_reasons"], reason)
-            for veto_reason in getattr(score, "hard_veto", []) or []:
-                veto_key = str(veto_reason or "")
-                if not veto_key:
-                    continue
+            for veto_key in _veto_reason_keys(score, intent):
                 _counter_inc(self._execution_funnel["veto_reasons"], veto_key)
                 _counter_inc(bucket["veto_reasons"], veto_key)
 
@@ -1305,6 +1499,232 @@ class BacktestEngine:
     def _should_market_reduce_position(self, market: "MarketState") -> bool:
         return (not self.cfg.disable_market_reduce_sell) and _is_market_reduce_signal(market)
 
+    def _uses_separate_pnl_bars(self) -> bool:
+        return str(self.cfg.adjustflag) == "3" and str(self.cfg.pnl_adjustflag or "") not in {"", "3"}
+
+    def _pnl_df_for_code(self, code: str) -> pd.DataFrame | None:
+        pnl_df = self._pnl_bars.get(code)
+        if pnl_df is not None:
+            return pnl_df
+        return self._bars.get(code)
+
+    def _pnl_price_on(self, code: str, trade_date: str, *, field: str = "收盘") -> float | None:
+        return self._price_on(self._pnl_df_for_code(code), trade_date, field=field)
+
+    def _pnl_price_on_or_before(self, code: str, trade_date: str, *, field: str = "收盘") -> float | None:
+        return self._price_on_or_before(self._pnl_df_for_code(code), trade_date, field=field)
+
+    def _pnl_execution_price(self, code: str, trade_date: str, *, field: str, side: str) -> float | None:
+        base_price = self._pnl_price_on(code, trade_date, field=field)
+        if base_price is None:
+            return None
+        direction = 1.0 if str(side).lower() == "buy" else -1.0
+        return base_price * (1.0 + direction * float(self.cfg.slippage_bps or 0.0) / 10000.0)
+
+    def _next_trade_date(self, trade_date: str) -> str:
+        try:
+            idx = self._sorted_dates.index(trade_date)
+        except ValueError:
+            return ""
+        next_idx = idx + 1
+        if next_idx >= len(self._sorted_dates):
+            return ""
+        return self._sorted_dates[next_idx]
+
+    def _has_pending_buy_order(self, code: str) -> bool:
+        normalized = str(code or "").strip()
+        return any(str(getattr(order.score, "code", "") or "").strip() == normalized for order in self._pending_buy_orders)
+
+    def _pending_buy_order_count(self, *, execution_date: str | None = None, include_scale_in: bool = True) -> int:
+        count = 0
+        for order in self._pending_buy_orders:
+            if execution_date is not None and order.execution_date != execution_date:
+                continue
+            if not include_scale_in and order.kind == "scale_in":
+                continue
+            count += 1
+        return count
+
+    def _execute_pending_buy_orders(self, trade_date: str) -> None:
+        if not self._pending_buy_orders:
+            return
+        remaining: list[PendingBuyOrder] = []
+        for order in self._pending_buy_orders:
+            if order.execution_date != trade_date:
+                remaining.append(order)
+                continue
+            executed = self._execute_pending_buy_order(order, trade_date)
+            if not executed:
+                self._execution_constraints["buy_orders_expired"] += 1
+        self._pending_buy_orders = remaining
+
+    def _execute_pending_buy_order(self, order: PendingBuyOrder, trade_date: str) -> bool:
+        score = order.score
+        intent = order.intent
+        market = order.market
+        code = str(getattr(score, "code", "") or "")
+        if not code:
+            return False
+        if self._weekly_buy_count >= self._weekly_max_for_market(market):
+            self._record_execution_funnel_skip("weekly_limit_at_execution", score, intent, market)
+            return False
+        df = self._bars.get(code)
+        if df is None:
+            self._record_execution_funnel_skip("missing_price_row_at_execution", score, intent, market)
+            return False
+        price = self._price_on(df, trade_date, field="开盘")
+        if price is None or price <= 0:
+            self._record_execution_funnel_skip("missing_open_price_at_execution", score, intent, market)
+            return False
+        tradeability = self._tradeability_status(
+            df,
+            trade_date,
+            side="buy",
+            code=code,
+            name=getattr(score, "name", ""),
+            price_field="开盘",
+        )
+        if not tradeability["tradable"]:
+            self._record_untradable(tradeability["reason"], side="buy")
+            self._record_execution_funnel_skip(tradeability["reason"], score, intent, market)
+            return False
+
+        if order.kind == "scale_in":
+            return self._execute_pending_scale_in_order(order, trade_date, price)
+
+        if len(self._positions) >= int(self.cfg.holding_max or 5):
+            self._record_execution_funnel_skip("holding_max_at_execution", score, intent, market)
+            return False
+        if self._cash <= self.cfg.initial_cash * 0.05:
+            self._record_execution_funnel_skip("cash_floor_at_execution", score, intent, market)
+            return False
+        if code in self._positions:
+            self._record_execution_funnel_skip("already_held_at_execution", score, intent, market)
+            return False
+
+        allocate = self._allocation_budget_for_position(trade_date, order.position_pct, price_field="开盘")
+        shares = self._shares_for_buy_budget(budget=allocate, price=price)
+        if shares <= 0:
+            self._record_execution_funnel_skip("shares_zero_at_execution", score, intent, market)
+            return False
+
+        buy_costs = self._trade_costs_for_order(side="buy", price=price, shares=shares)
+        pnl_execution_price = self._pnl_execution_price(code, trade_date, field="开盘", side="buy")
+        if pnl_execution_price is None or pnl_execution_price <= 0:
+            pnl_execution_price = buy_costs["execution_price"]
+        pnl_units = float(shares)
+        self._cash -= buy_costs["cash_effect"]
+        self._record_trade_costs(buy_costs)
+        route = getattr(score, "primary_strategy_route", None)
+        entry_policy = self._route_execution_policy(
+            _market_signal_value(market),
+            route,
+            action=str(getattr(getattr(intent, "action", None), "value", "") or ""),
+            score_total=float(getattr(score, "total", 0.0) or 0.0),
+            market=market,
+        )
+        self._positions[code] = Position(
+            code=code,
+            shares=shares,
+            entry_price=buy_costs["execution_price"],
+            entry_date=trade_date,
+            high_water=buy_costs["execution_price"],
+            pnl_units=pnl_units,
+            pnl_entry_price=pnl_execution_price,
+            pnl_high_water=pnl_execution_price,
+            position_pct=order.position_pct,
+            entry_route=str(route or ""),
+            entry_market_signal=_market_signal_value(market),
+            market_reduce_exempt=bool(entry_policy.get("market_reduce_exempt")),
+            cost_basis=buy_costs["cash_effect"],
+        )
+        self._weekly_buy_count += 1
+        trade = self._buy_trade_record(
+            trade_date=trade_date,
+            signal_date=order.signal_date,
+            score=score,
+            intent=intent,
+            market=market,
+            price=buy_costs["execution_price"],
+            shares=shares,
+            position_pct=order.position_pct,
+        )
+        trade["signal_price"] = round(price, 4)
+        trade["trade_cost"] = buy_costs
+        trade["cash_outlay"] = round(buy_costs["cash_effect"], 2)
+        self._trades.append(trade)
+        self._record_execution_funnel_buy(score, intent, market)
+        return True
+
+    def _execute_pending_scale_in_order(self, order: PendingBuyOrder, trade_date: str, price: float) -> bool:
+        score = order.score
+        intent = order.intent
+        market = order.market
+        code = str(getattr(score, "code", "") or "")
+        pos = self._positions.get(code)
+        if pos is None:
+            return False
+        if pos.pending_exit_reason:
+            return False
+        allocate = self._allocation_budget_to_target_position(
+            trade_date,
+            code,
+            order.position_pct,
+            price_field="开盘",
+        )
+        shares = self._shares_for_buy_budget(budget=allocate, price=price)
+        if shares <= 0:
+            return False
+
+        buy_costs = self._trade_costs_for_order(side="buy", price=price, shares=shares)
+        pnl_execution_price = self._pnl_execution_price(code, trade_date, field="开盘", side="buy")
+        if pnl_execution_price is None or pnl_execution_price <= 0:
+            pnl_execution_price = buy_costs["execution_price"]
+        added_pnl_units = float(shares)
+        old_shares = pos.shares
+        old_cost = pos.entry_price * old_shares
+        new_cost = buy_costs["execution_price"] * shares
+        pos.shares = old_shares + shares
+        pos.entry_price = (old_cost + new_cost) / pos.shares
+        pos.high_water = max(pos.high_water, buy_costs["execution_price"])
+        pos.pnl_units = float(pos.pnl_units or old_shares) + added_pnl_units
+        pos.pnl_entry_price = (
+            (float(pos.pnl_entry_price or 0.0) * old_shares + pnl_execution_price * shares) / pos.pnl_units
+            if pos.pnl_units > 0
+            else pnl_execution_price
+        )
+        pos.pnl_high_water = max(float(pos.pnl_high_water or pos.pnl_entry_price), pnl_execution_price)
+        pos.position_pct = round(order.position_pct, 4)
+        pos.add_count += 1
+        pos.last_add_date = trade_date
+        pos.cost_basis = float(pos.cost_basis or old_cost) + buy_costs["cash_effect"]
+        if self.cfg.scale_in_reset_time_stop:
+            pos.entry_date = trade_date
+        if not self._should_market_reduce_position(market):
+            pos.market_reduced = False
+
+        self._cash -= buy_costs["cash_effect"]
+        self._record_trade_costs(buy_costs)
+        self._weekly_buy_count += 1
+        trade = self._scale_in_trade_record(
+            trade_date=trade_date,
+            signal_date=order.signal_date,
+            score=score,
+            intent=intent,
+            market=market,
+            price=buy_costs["execution_price"],
+            shares=shares,
+            position_pct=order.position_pct,
+        )
+        trade["signal_date"] = order.signal_date
+        trade["execution_date"] = trade_date
+        trade["signal_price"] = round(price, 4)
+        trade["trade_cost"] = buy_costs
+        trade["cash_outlay"] = round(buy_costs["cash_effect"], 2)
+        self._trades.append(trade)
+        self._record_execution_funnel_buy(score, intent, market)
+        return True
+
     def _register_loss_cooldown(self, trade: dict[str, Any], date_index: int) -> None:
         days = int(self.cfg.watch_loss_cooldown_days or 0)
         if days <= 0:
@@ -1332,10 +1752,172 @@ class BacktestEngine:
             return "watch_loss_cooldown"
         return ""
 
+    def _record_discoveries_for_date(self, trade_date: str, mirror_replay: dict[str, Any]) -> None:
+        """记录历史运行当天实盘发现链路实际看见过的股票。"""
+        sources_by_code = mirror_replay.get("discovery_sources") or {}
+        for code, sources in sources_by_code.items():
+            normalized = str(code or "").strip()
+            if not normalized:
+                continue
+            source_list = sorted({str(source) for source in (sources or []) if str(source)})
+            self._recent_discoveries[normalized] = {
+                "last_seen_date": trade_date,
+                "sources": source_list,
+            }
+
+    def _candidate_codes_for_date(self, trade_date: str) -> list[str]:
+        """返回当日策略层允许评分的股票池；reachable-only 时先由发现层收窄。"""
+        if not self.cfg.require_reachable_candidate_for_buy:
+            return list(self._bars.keys())
+        lookback_days = max(int(self.cfg.reachable_lookback_days or 0), 0)
+        try:
+            current = date_type.fromisoformat(trade_date)
+        except ValueError:
+            return []
+        codes: list[str] = []
+        for code, info in self._recent_discoveries.items():
+            normalized = str(code or "").strip()
+            if normalized not in self._bars:
+                continue
+            last_seen = str((info or {}).get("last_seen_date") or "")
+            try:
+                age_days = (current - date_type.fromisoformat(last_seen)).days
+            except ValueError:
+                continue
+            if 0 <= age_days <= lookback_days:
+                codes.append(normalized)
+        return sorted(set(codes))
+
+    def _reachability_status(self, trade_date: str, code: str) -> dict[str, Any]:
+        """判断买入候选是否在近期被实盘发现链路看见过。"""
+        if not self.cfg.require_reachable_candidate_for_buy:
+            return {
+                "reachable": True,
+                "reason": "reachability_disabled",
+                "sources": [],
+                "last_seen_date": "",
+            }
+        normalized = str(code or "").strip()
+        info = self._recent_discoveries.get(normalized)
+        if not info:
+            info = self._lookup_recent_discovery_from_history(trade_date, normalized)
+        if not info:
+            return {
+                "reachable": False,
+                "reason": "not_discovered_by_screener",
+                "sources": [],
+                "last_seen_date": "",
+            }
+        last_seen = str(info.get("last_seen_date") or "")
+        lookback_days = max(int(self.cfg.reachable_lookback_days or 0), 0)
+        try:
+            age_days = (date_type.fromisoformat(trade_date) - date_type.fromisoformat(last_seen)).days
+        except ValueError:
+            age_days = lookback_days + 1
+        if age_days < 0 or age_days > lookback_days:
+            refreshed_info = self._lookup_recent_discovery_from_history(trade_date, normalized)
+            if refreshed_info:
+                last_seen = str(refreshed_info.get("last_seen_date") or "")
+                try:
+                    age_days = (date_type.fromisoformat(trade_date) - date_type.fromisoformat(last_seen)).days
+                except ValueError:
+                    age_days = lookback_days + 1
+                if 0 <= age_days <= lookback_days:
+                    return {
+                        "reachable": True,
+                        "reason": "discovered_by_screener",
+                        "sources": list(refreshed_info.get("sources") or []),
+                        "last_seen_date": last_seen,
+                    }
+            return {
+                "reachable": False,
+                "reason": "discovery_stale",
+                "sources": list(info.get("sources") or []),
+                "last_seen_date": last_seen,
+            }
+        return {
+            "reachable": True,
+            "reason": "discovered_by_screener",
+            "sources": list(info.get("sources") or []),
+            "last_seen_date": last_seen,
+        }
+
+    def _lookup_recent_discovery_from_history(self, trade_date: str, code: str) -> dict[str, Any] | None:
+        """按需查询历史发现池，避免全周期预加载大体量 pool JSON。"""
+        normalized = str(code or "").strip()
+        if self._history_conn is None or not normalized:
+            return None
+        lookback_days = max(int(self.cfg.reachable_lookback_days or 0), 0)
+        try:
+            end_date = date_type.fromisoformat(trade_date)
+        except ValueError:
+            return None
+        start_date = (end_date - timedelta(days=lookback_days)).isoformat()
+        rows = self._history_conn.execute(
+            """SELECT snapshot_date, source
+               FROM signal_history_discoveries
+               WHERE code = ?
+                 AND snapshot_date >= ?
+                 AND snapshot_date <= ?
+               ORDER BY snapshot_date DESC, source""",
+            (normalized, start_date, trade_date),
+        ).fetchall()
+        latest_date = ""
+        sources: set[str] = set()
+        for row in rows:
+            item = dict(getattr(row, "_mapping", row))
+            snapshot_date = str(item.get("snapshot_date") or "")
+            if not snapshot_date:
+                continue
+            if not latest_date:
+                latest_date = snapshot_date
+            if snapshot_date != latest_date:
+                continue
+            source = str(item.get("source") or "")
+            if source in {"pool", "candidates", "decision"}:
+                sources.add(source)
+        if not latest_date:
+            return None
+        info = {
+            "last_seen_date": latest_date,
+            "sources": sorted(sources),
+        }
+        self._recent_discoveries[normalized] = info
+        return info
+
+    def _record_reachability_check(self, status: dict[str, Any], code: str) -> None:
+        if not self.cfg.require_reachable_candidate_for_buy:
+            return
+        self._discovery_reachability["candidate_checks"] += 1
+        if status.get("reachable"):
+            self._discovery_reachability["reachable_candidates"] += 1
+            for source in status.get("sources") or ["unknown"]:
+                _counter_inc(self._discovery_reachability["discovery_sources"], str(source))
+            return
+        self._discovery_reachability["blocked_candidates"] += 1
+        _counter_inc(self._discovery_reachability["blocked_reasons"], str(status.get("reason") or "unknown"))
+        _counter_inc(self._discovery_reachability["blocked_codes"], str(code or "unknown"))
+
+    def _preload_history_mirror_cache(self) -> None:
+        """小日期集批量预载历史信号镜像；长周期避免 MySQL 大 IN 查询。"""
+        self._history_mirror_cache = None
+        if self._history_conn is None or not self._sorted_dates:
+            return
+        if len(self._sorted_dates) > 250:
+            return
+        from astock_trading.platform.history_mirror import load_signal_history_bundles
+
+        self._history_mirror_cache = load_signal_history_bundles(
+            self._history_conn,
+            snapshot_dates=self._sorted_dates,
+            phases=("historical_discovery", "screener", "scoring"),
+        )
+
     def _buy_trade_record(
         self,
         *,
         trade_date: str,
+        signal_date: str | None = None,
         score: Any,
         intent: Any,
         market: "MarketState",
@@ -1347,6 +1929,8 @@ class BacktestEngine:
         action = str(getattr(getattr(intent, "action", None), "value", "") or "UNKNOWN")
         return {
             "date": trade_date,
+            "signal_date": signal_date or trade_date,
+            "execution_date": trade_date,
             "code": getattr(score, "code", ""),
             "name": getattr(score, "name", ""),
             "side": "buy",
@@ -1434,7 +2018,13 @@ class BacktestEngine:
                     if code in self._positions
                     else {"executable": True, "reason": "trial_buy_market"}
                 )
-            policy = self._route_execution_policy(signal, route_name)
+            policy = self._route_execution_policy(
+                signal,
+                route_name,
+                action=action,
+                score_total=total,
+                market=market,
+            )
             if policy and self._route_policy_allows_action(policy, action):
                 score_min = float(policy.get("score_min", self.cfg.execute_watch_trial_score_min or 0.0) or 0.0)
                 if total < score_min:
@@ -1471,7 +2061,13 @@ class BacktestEngine:
                 else {"executable": True, "reason": "watch_trial_pair"}
             )
 
-        policy = self._route_execution_policy(signal, route_name)
+        policy = self._route_execution_policy(
+            signal,
+            route_name,
+            action=action,
+            score_total=total,
+            market=market,
+        )
         if policy and self._route_policy_allows_action(policy, action):
             score_min = float(policy.get("score_min", self.cfg.execute_watch_trial_score_min or 0.0) or 0.0)
             if total < score_min:
@@ -1588,7 +2184,13 @@ class BacktestEngine:
     def _execution_position_pct(self, intent: Any, market: "MarketState", route: str | None = None) -> float:
         action = str(getattr(getattr(intent, "action", None), "value", "") or "")
         signal = str(getattr(getattr(market, "signal", None), "value", "") or "")
-        policy = self._route_execution_policy(signal, route)
+        policy = self._route_execution_policy(
+            signal,
+            route,
+            action=action,
+            score_total=float(getattr(intent, "score", 0.0) or 0.0),
+            market=market,
+        )
         if (
             action in {"BUY", "WATCH", "TRIAL_BUY"}
             and policy
@@ -1612,13 +2214,23 @@ class BacktestEngine:
             return round(self.cfg.single_max_pct * float(getattr(market, "multiplier", 0.0) or 0.0), 4)
         return 0.0
 
-    def _route_execution_policy(self, signal: str, route: str | None) -> dict:
-        route_name = str(route or "unknown")
-        policy_map = self.cfg.route_execution_policy or {}
-        for key in (f"{signal}:{route_name}", f"*:{route_name}", route_name):
-            policy = policy_map.get(key)
-            if isinstance(policy, dict):
-                return policy
+    def _route_execution_policy(
+        self,
+        signal: str,
+        route: str | None,
+        *,
+        action: str | None = None,
+        score_total: float | None = None,
+        market: "MarketState" | None = None,
+    ) -> dict:
+        for _key, policy in iter_route_policy_entries(self.cfg.route_execution_policy or {}, signal, route):
+            if action is not None and not self._route_policy_allows_action(policy, action):
+                continue
+            if score_total is not None and not self._route_policy_matches_score(policy, score_total):
+                continue
+            if market is not None and not self._route_policy_matches_phase(policy, market):
+                continue
+            return policy
         return {}
 
     def _route_policy_allows_action(self, policy: dict, action: str) -> bool:
@@ -1629,6 +2241,34 @@ class BacktestEngine:
             return action == "BUY"
         allowed = {str(item) for item in actions or () if str(item)}
         return action in allowed
+
+    def _route_policy_matches_score(self, policy: dict, score_total: float) -> bool:
+        try:
+            score = float(score_total or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        score_min = policy.get("score_min")
+        if score_min is not None and score < float(score_min or 0.0):
+            return False
+        score_max = policy.get("score_max")
+        if score_max is not None and score > float(score_max or 0.0):
+            return False
+        return True
+
+    def _route_policy_matches_phase(self, policy: dict, market: "MarketState") -> bool:
+        market_context = _market_context_payload(market)
+        if policy.get("require_above_ma120") is not None:
+            if bool(market_context.get("above_ma120")) is not bool(policy.get("require_above_ma120")):
+                return False
+        min_ma120_slope = policy.get("min_index_ma120_slope_20d_pct")
+        if min_ma120_slope is not None:
+            slope = market_context.get("index_ma120_slope_20d_pct")
+            if slope is None or float(slope) < float(min_ma120_slope):
+                return False
+        phases = {str(item) for item in policy.get("phase_buckets", []) or [] if str(item)}
+        if not phases:
+            return True
+        return market_context.get("market_phase_bucket") in phases
 
     def _buy_candidate_sort_key(
         self,
@@ -1641,7 +2281,13 @@ class BacktestEngine:
         action = str(getattr(getattr(intent, "action", None), "value", "") or "")
         signal = str(getattr(getattr(market, "signal", None), "value", "") or "")
         action_priority = {"BUY": 1000.0, "TRIAL_BUY": 500.0, "WATCH": 0.0}.get(action, -1000.0)
-        policy = self._route_execution_policy(signal, route)
+        policy = self._route_execution_policy(
+            signal,
+            route,
+            action=action,
+            score_total=score_total,
+            market=market,
+        )
         route_priority = float(policy.get("priority", 0.0) or 0.0) if self._route_policy_allows_action(policy, action) else 0.0
         return (action_priority + route_priority, float(score_total or 0.0), float(getattr(intent, "confidence", 0.0) or 0.0))
 
@@ -1652,20 +2298,22 @@ class BacktestEngine:
             return int(self.cfg.weekly_max)
         return int(override)
 
-    def _positions_market_value(self, trade_date: str) -> float:
+    def _should_reduce_position_for_market(self, pos: Position, market: "MarketState") -> bool:
+        if pos.market_reduce_exempt:
+            return False
+        return self._should_market_reduce_position(market) and not pos.market_reduced
+
+    def _positions_market_value(self, trade_date: str, *, price_field: str = "收盘") -> float:
         value = 0.0
         for code, pos in self._positions.items():
-            df = self._bars.get(code)
-            if df is None:
+            close = self._price_on_or_before(self._bars.get(code), trade_date, field=price_field)
+            if close is None or close <= 0:
                 continue
-            close = self._close_on_or_before(df, trade_date)
-            if close is None:
-                continue
-            value += close * pos.shares
+            value += close * float(pos.shares or 0.0)
         return value
 
-    def _allocation_budget_for_position(self, trade_date: str, position_pct: float) -> float:
-        position_value = self._positions_market_value(trade_date)
+    def _allocation_budget_for_position(self, trade_date: str, position_pct: float, *, price_field: str = "收盘") -> float:
+        position_value = self._positions_market_value(trade_date, price_field=price_field)
         portfolio_value = self._cash + position_value
         if portfolio_value <= 0:
             return 0.0
@@ -1674,24 +2322,28 @@ class BacktestEngine:
         remaining_total_budget = max(0.0, total_budget - position_value)
         return round(max(0.0, min(self._cash, single_budget, remaining_total_budget)), 2)
 
-    def _position_market_value(self, trade_date: str, code: str) -> float:
+    def _position_market_value(self, trade_date: str, code: str, *, price_field: str = "收盘") -> float:
         pos = self._positions.get(code)
         if pos is None:
             return 0.0
-        df = self._bars.get(code)
-        if df is None:
+        close = self._price_on_or_before(self._bars.get(code), trade_date, field=price_field)
+        if close is None or close <= 0:
             return 0.0
-        close = self._close_on_or_before(df, trade_date)
-        if close is None:
-            return 0.0
-        return close * pos.shares
+        return close * float(pos.shares or 0.0)
 
-    def _allocation_budget_to_target_position(self, trade_date: str, code: str, target_pct: float) -> float:
-        position_value = self._positions_market_value(trade_date)
+    def _allocation_budget_to_target_position(
+        self,
+        trade_date: str,
+        code: str,
+        target_pct: float,
+        *,
+        price_field: str = "收盘",
+    ) -> float:
+        position_value = self._positions_market_value(trade_date, price_field=price_field)
         portfolio_value = self._cash + position_value
         if portfolio_value <= 0:
             return 0.0
-        current_value = self._position_market_value(trade_date, code)
+        current_value = self._position_market_value(trade_date, code, price_field=price_field)
         target_value = portfolio_value * max(0.0, float(target_pct or 0.0))
         add_budget = max(0.0, target_value - current_value)
         total_budget = portfolio_value * float(self.cfg.total_max_pct or 0.0)
@@ -1732,7 +2384,10 @@ class BacktestEngine:
         )
 
         for score, intent in held_candidates:
-            if self._weekly_buy_count >= self._weekly_max_for_market(market):
+            if (
+                self._weekly_buy_count + self._pending_buy_order_count()
+                >= self._weekly_max_for_market(market)
+            ):
                 break
             code = getattr(score, "code", "")
             df = self._bars.get(code)
@@ -1742,43 +2397,26 @@ class BacktestEngine:
             if row.empty:
                 continue
             price = float(row["收盘"].iloc[0])
-            status = self._scale_in_execution_status(score, market, price=price, day_index=day_index)
+            pnl_price = self._pnl_price_on(code, trade_date) or price
+            status = self._scale_in_execution_status(score, market, price=pnl_price, day_index=day_index)
             if not status["executable"]:
                 continue
             target_pct = self._scale_in_target_position_pct(trade_date, code, score=score, market=market)
-            allocate = self._allocation_budget_to_target_position(trade_date, code, target_pct)
-            shares = int(allocate / price / 100) * 100
-            if shares <= 0:
+            execution_date = self._next_trade_date(trade_date)
+            if not execution_date:
                 continue
-
-            pos = self._positions[code]
-            old_shares = pos.shares
-            old_cost = pos.entry_price * old_shares
-            new_cost = price * shares
-            pos.shares = old_shares + shares
-            pos.entry_price = (old_cost + new_cost) / pos.shares
-            pos.high_water = max(pos.high_water, price)
-            pos.position_pct = round(target_pct, 4)
-            pos.add_count += 1
-            pos.last_add_date = trade_date
-            if self.cfg.scale_in_reset_time_stop:
-                pos.entry_date = trade_date
-            if not self._should_market_reduce_position(market):
-                pos.market_reduced = False
-
-            self._cash -= price * shares
-            self._weekly_buy_count += 1
-            self._trades.append(
-                self._scale_in_trade_record(
-                    trade_date=trade_date,
-                    score=score,
-                    intent=intent,
-                    market=market,
-                    price=price,
-                    shares=shares,
-                    position_pct=target_pct,
-                )
-            )
+            if self._has_pending_buy_order(code):
+                continue
+            self._pending_buy_orders.append(PendingBuyOrder(
+                signal_date=trade_date,
+                execution_date=execution_date,
+                score=score,
+                intent=intent,
+                market=market,
+                position_pct=target_pct,
+                kind="scale_in",
+            ))
+            self._execution_constraints["buy_orders_scheduled"] += 1
 
     def _scale_in_execution_status(
         self,
@@ -1794,6 +2432,8 @@ class BacktestEngine:
         pos = self._positions.get(code)
         if pos is None:
             return {"executable": False, "reason": "scale_in_no_position"}
+        if pos.pending_exit_reason:
+            return {"executable": False, "reason": "scale_in_pending_exit"}
         signal = _market_signal_value(market)
         allowed_signals = {str(item) for item in self.cfg.scale_in_market_signals if str(item)}
         if allowed_signals and signal not in allowed_signals:
@@ -1812,9 +2452,10 @@ class BacktestEngine:
             last_index = self._sorted_dates.index(pos.last_add_date)
             if day_index - last_index < int(self.cfg.scale_in_min_days_between or 0):
                 return {"executable": False, "reason": "scale_in_too_soon"}
-        if price <= 0 or pos.entry_price <= 0:
+        entry_price = float(pos.pnl_entry_price or pos.entry_price or 0.0)
+        if price <= 0 or entry_price <= 0:
             return {"executable": False, "reason": "scale_in_missing_price"}
-        unrealized_return = (price - pos.entry_price) / pos.entry_price
+        unrealized_return = (price - entry_price) / entry_price
         if unrealized_return < float(self.cfg.scale_in_profit_threshold or 0.0):
             return {"executable": False, "reason": "scale_in_profit_below_threshold"}
         trade_date = self._sorted_dates[day_index] if 0 <= day_index < len(self._sorted_dates) else ""
@@ -1892,6 +2533,7 @@ class BacktestEngine:
         self,
         *,
         trade_date: str,
+        signal_date: str | None = None,
         score: Any,
         intent: Any,
         market: "MarketState",
@@ -1901,6 +2543,7 @@ class BacktestEngine:
     ) -> dict[str, Any]:
         trade = self._buy_trade_record(
             trade_date=trade_date,
+            signal_date=signal_date or trade_date,
             score=score,
             intent=intent,
             market=market,
@@ -1917,7 +2560,6 @@ class BacktestEngine:
         if self._history_conn is None:
             return None
 
-        from astock_trading.platform.history_mirror import load_signal_history_bundle
         from astock_trading.strategy.models import (
             Action,
             DataQuality,
@@ -1925,12 +2567,22 @@ class BacktestEngine:
             ScoreResult,
         )
 
-        bundle = load_signal_history_bundle(self._history_conn, snapshot_date=trade_date)
+        if self._history_mirror_cache is not None:
+            bundle = self._history_mirror_cache.get(trade_date)
+        else:
+            from astock_trading.platform.history_mirror import load_signal_history_bundle
+
+            bundle = load_signal_history_bundle(
+                self._history_conn,
+                snapshot_date=trade_date,
+                phases=("historical_discovery", "screener", "scoring"),
+            )
         if not bundle:
             return None
 
         sections = bundle.get("sections") or {}
         market = _market_state_from_history_bundle(sections.get("market") or {}, fallback_market)
+        discovery_sources = _history_discovery_sources(sections)
         candidates = {
             str(item.get("code", "")): item
             for item in sections.get("candidates", [])
@@ -1978,6 +2630,8 @@ class BacktestEngine:
             "history_group_id": bundle.get("history_group_id", ""),
             "market": market,
             "intents": intents,
+            "has_strategy_intents": bool(candidates or decisions),
+            "discovery_sources": discovery_sources,
         }
 
     def _record_signal_validation_rows(
@@ -1998,6 +2652,8 @@ class BacktestEngine:
             if not (route or entry_signal or action in {"BUY", "TRIAL_BUY"} or high_score_watch):
                 continue
             technical_snapshot = _signal_technical_snapshot(score)
+            decision_reasons = _decision_reason_keys(intent)
+            veto_reasons = _veto_reason_keys(score, intent)
             self._signal_records.append({
                 "code": getattr(score, "code", ""),
                 "name": getattr(score, "name", ""),
@@ -2006,6 +2662,8 @@ class BacktestEngine:
                 "score": round(float(getattr(score, "total", 0.0) or 0.0), 2),
                 "entry_signal": entry_signal,
                 "primary_strategy_route": _score_route_label(score),
+                "decision_reasons": decision_reasons,
+                "veto_reasons": veto_reasons,
                 "unknown_bucket": _unknown_signal_bucket(
                     route=route,
                     entry_signal=entry_signal,
@@ -2033,10 +2691,10 @@ class BacktestEngine:
         *,
         horizons: tuple[int, ...] = (5, 10, 20),
     ) -> dict[str, float]:
-        df = self._bars.get(code)
+        df = self._pnl_df_for_code(code)
         if df is None:
             return {}
-        current_close = self._close_on(df, trade_date)
+        current_close = self._price_on(df, trade_date)
         if current_close is None or current_close <= 0:
             return {}
         code_dates = [str(item) for item in df["日期"].tolist()]
@@ -2056,19 +2714,192 @@ class BacktestEngine:
 
     @staticmethod
     def _close_on(df: pd.DataFrame, trade_date: str) -> float | None:
-        row = df[df["日期"] == trade_date]
-        if row.empty:
-            return None
-        return float(row["收盘"].iloc[0])
+        return BacktestEngine._price_on(df, trade_date, field="收盘")
 
     @staticmethod
     def _close_on_or_before(df: pd.DataFrame | None, trade_date: str) -> float | None:
+        return BacktestEngine._price_on_or_before(df, trade_date, field="收盘")
+
+    @staticmethod
+    def _price_on(df: pd.DataFrame | None, trade_date: str, *, field: str = "收盘") -> float | None:
+        if df is None or df.empty:
+            return None
+        row = df[df["日期"] == trade_date]
+        if row.empty:
+            return None
+        series = row.iloc[0]
+        value = series.get(field)
+        if value in (None, "") and field != "收盘":
+            value = series.get("收盘")
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            return None
+        return price if price > 0 else None
+
+    @staticmethod
+    def _price_on_or_before(df: pd.DataFrame | None, trade_date: str, *, field: str = "收盘") -> float | None:
         if df is None or df.empty:
             return None
         rows = df[df["日期"] <= trade_date]
         if rows.empty:
             return None
-        return float(rows.iloc[-1]["收盘"])
+        row = rows.iloc[-1]
+        if str(row.get("日期") or "") == str(trade_date):
+            value = row.get(field)
+            if value not in (None, ""):
+                try:
+                    price = float(value)
+                    if price > 0:
+                        return price
+                except (TypeError, ValueError):
+                    pass
+        try:
+            price = float(row.get("收盘"))
+        except (TypeError, ValueError):
+            return None
+        return price if price > 0 else None
+
+    @staticmethod
+    def _row_on(df: pd.DataFrame | None, trade_date: str) -> pd.Series | None:
+        if df is None or df.empty:
+            return None
+        row = df[df["日期"] == trade_date]
+        if row.empty:
+            return None
+        return row.iloc[0]
+
+    def _tradeability_status(
+        self,
+        df: pd.DataFrame | None,
+        trade_date: str,
+        *,
+        side: str,
+        code: str = "",
+        name: str = "",
+        price_field: str = "收盘",
+    ) -> dict[str, Any]:
+        row = self._row_on(df, trade_date)
+        if row is None:
+            return {"tradable": False, "reason": "missing_price_row"}
+        volume = _safe_float(row.get("成交量"), 1.0)
+        if volume <= 0:
+            return {"tradable": False, "reason": "zero_volume"}
+        close = _safe_float(row.get("收盘"), 0.0)
+        open_price = _safe_float(row.get("开盘"), close)
+        high = _safe_float(row.get("最高"), close)
+        low = _safe_float(row.get("最低"), close)
+        if min(open_price, high, low, close) <= 0:
+            return {"tradable": False, "reason": "invalid_price"}
+        execution_price = _safe_float(row.get(price_field), close)
+        if execution_price <= 0:
+            return {"tradable": False, "reason": "invalid_price"}
+        change_pct = self._row_change_pct(df, trade_date, row, price=execution_price)
+        limit_pct = self._limit_pct_for_code(code, name or str(row.get("证券名称", row.get("名称", ""))))
+        tolerance = 0.2
+        if side == "buy" and change_pct >= limit_pct - tolerance:
+            return {"tradable": False, "reason": "limit_up_locked"}
+        if side == "sell" and change_pct <= -limit_pct + tolerance:
+            return {"tradable": False, "reason": "limit_down_locked"}
+        return {"tradable": True, "reason": "tradable"}
+
+    def _row_change_pct(
+        self,
+        df: pd.DataFrame | None,
+        trade_date: str,
+        row: pd.Series,
+        *,
+        price: float | None = None,
+    ) -> float:
+        close = _safe_float(row.get("收盘"), 0.0)
+        if price is None or abs(float(price or 0.0) - close) < 1e-8:
+            value = row.get("涨跌幅")
+            if value not in (None, ""):
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    pass
+        execution_price = _safe_float(price, 0.0) if price is not None else close
+        if execution_price <= 0:
+            return 0.0
+        if df is None or df.empty:
+            return 0.0
+        rows = df[df["日期"] < trade_date].sort_values("日期")
+        if rows.empty:
+            return 0.0
+        prev_close = _safe_float(rows.iloc[-1].get("收盘"), 0.0)
+        if prev_close <= 0:
+            return 0.0
+        return (execution_price / prev_close - 1.0) * 100.0
+
+    @staticmethod
+    def _limit_pct_for_code(code: str, name: str = "") -> float:
+        normalized = str(code or "")
+        display_name = str(name or "").strip().upper().replace(" ", "")
+        if display_name.startswith(("*ST", "ST", "退市")):
+            return 5.0
+        if normalized.startswith(("300", "301", "688", "689", "787")):
+            return 20.0
+        if normalized.startswith(("8", "4", "92")):
+            return 30.0
+        return 10.0
+
+    def _trade_costs_for_order(self, *, side: str, price: float, shares: int) -> dict[str, float]:
+        side = str(side or "").lower()
+        base_price = max(float(price or 0.0), 0.0)
+        direction = 1.0 if side == "buy" else -1.0
+        execution_price = base_price * (1.0 + direction * float(self.cfg.slippage_bps or 0.0) / 10000.0)
+        notional = execution_price * max(int(shares or 0), 0)
+        if notional <= 0:
+            return {
+                "notional": 0.0,
+                "commission": 0.0,
+                "stamp_tax": 0.0,
+                "transfer_fee": 0.0,
+                "slippage_cost": 0.0,
+                "fee_total": 0.0,
+                "total_cost": 0.0,
+                "cash_effect": 0.0,
+                "execution_price": round(execution_price, 4),
+            }
+        commission = max(float(self.cfg.min_commission or 0.0), notional * float(self.cfg.commission_bps or 0.0) / 10000.0)
+        stamp_tax = notional * float(self.cfg.stamp_tax_bps or 0.0) / 10000.0 if side == "sell" else 0.0
+        transfer_fee = notional * float(self.cfg.transfer_fee_bps or 0.0) / 10000.0
+        slippage_cost = abs(execution_price - base_price) * max(int(shares or 0), 0)
+        fee_total = commission + stamp_tax + transfer_fee
+        total_cost = fee_total + slippage_cost
+        cash_effect = notional + fee_total if side == "buy" else notional - fee_total
+        return {
+            "notional": round(notional, 2),
+            "commission": round(commission, 2),
+            "stamp_tax": round(stamp_tax, 2),
+            "transfer_fee": round(transfer_fee, 2),
+            "slippage_cost": round(slippage_cost, 2),
+            "fee_total": round(fee_total, 2),
+            "total_cost": round(total_cost, 2),
+            "cash_effect": round(cash_effect, 2),
+            "execution_price": round(execution_price, 4),
+        }
+
+    def _record_trade_costs(self, costs: dict[str, float]) -> None:
+        for key in ("commission", "stamp_tax", "transfer_fee", "fee_total", "slippage_cost", "total_cost"):
+            self._cost_totals[key] = round(float(self._cost_totals.get(key, 0.0) or 0.0) + float(costs.get(key, 0.0) or 0.0), 2)
+
+    def _shares_for_buy_budget(self, *, budget: float, price: float) -> int:
+        shares = int(max(float(budget or 0.0), 0.0) / max(float(price or 0.0), 0.0001) / 100) * 100
+        while shares > 0:
+            costs = self._trade_costs_for_order(side="buy", price=price, shares=shares)
+            if costs["cash_effect"] <= budget + 1e-6:
+                return shares
+            shares -= 100
+        return 0
+
+    def _record_untradable(self, reason: str, *, side: str) -> None:
+        if side == "buy":
+            self._execution_constraints["buy_untradable"] += 1
+        else:
+            self._execution_constraints["sell_untradable"] += 1
+        _counter_inc(self._execution_constraints["untradable_reasons"], str(reason or "unknown"))
 
     def _build_snapshot(self, code: str, as_of_date: str):
         """从历史数据构建 StockSnapshot。"""
@@ -2147,32 +2978,86 @@ class BacktestEngine:
             kline=hist,
         )
 
+    def _queue_exit(self, pos: Position, *, reason: str, trigger_date: str, shares: int = 0) -> None:
+        if pos.pending_exit_reason:
+            return
+        pos.pending_exit_reason = str(reason or "")
+        pos.pending_exit_trigger_date = str(trigger_date or "")
+        pos.pending_exit_shares = max(int(shares or 0), 0)
+        self._execution_constraints["sell_orders_pending"] += 1
+
+    def _execute_pending_exit(self, code: str, pos: Position, trade_date: str, day_idx: int) -> bool:
+        if not pos.pending_exit_reason:
+            return False
+        if pos.pending_exit_trigger_date == trade_date:
+            return False
+        df = self._bars.get(code)
+        if df is None:
+            return False
+        if self._sell_block_reason(pos, trade_date):
+            self._execution_constraints["t_plus_one_blocked_sells"] += 1
+            return False
+        tradeability = self._tradeability_status(df, trade_date, side="sell", code=code, price_field="开盘")
+        if not tradeability["tradable"]:
+            self._record_untradable(tradeability["reason"], side="sell")
+            return False
+        price = self._price_on(df, trade_date, field="开盘")
+        if price is None:
+            return False
+        reason = pos.pending_exit_reason
+        trigger_date = pos.pending_exit_trigger_date or trade_date
+        shares = pos.pending_exit_shares or pos.shares
+        trade = self._close_position(
+            trade_date=trade_date,
+            code=code,
+            price=price,
+            shares=shares,
+            reason=reason,
+            score=0,
+            trigger_date=trigger_date,
+        )
+        self._trades.append(trade)
+        self._register_loss_cooldown(trade, day_idx)
+        return True
+
     def _risk_check(self, d: str, day_idx: int):
         """风控检查：止损/追踪止损/时间止损。"""
-        to_close = []
         for code, pos in list(self._positions.items()):
+            if self._execute_pending_exit(code, pos, d, day_idx):
+                continue
             df = self._bars.get(code)
             if df is None:
                 continue
-            row = df[df["日期"] == d]
-            if row.empty:
+            row = self._row_on(df, d)
+            if row is None:
                 continue
 
-            price = float(row["收盘"].iloc[0])
-            ret = (price - pos.entry_price) / pos.entry_price
+            raw_price = float(row["收盘"])
+            pnl_price = self._pnl_price_on(code, d)
+            if pnl_price is None and self._uses_separate_pnl_bars():
+                self._execution_constraints["pnl_price_missing_risk_skips"] += 1
+                continue
+            price = pnl_price or raw_price
+            entry_price = float(pos.pnl_entry_price or pos.entry_price or 0.0)
+            if entry_price <= 0:
+                continue
+            ret = (price - entry_price) / entry_price
 
             # 时间止损
             entry_idx = self._sorted_dates.index(pos.entry_date) if pos.entry_date in self._sorted_dates else 0
             days_held = day_idx - entry_idx
 
             # 追踪止损
-            pos.high_water = max(pos.high_water, price)
-            trail_drawdown = (price - pos.high_water) / pos.high_water if pos.high_water > 0 else 0.0
+            pos.pnl_high_water = max(float(pos.pnl_high_water or pos.high_water or entry_price), price)
+            pos.high_water = max(pos.high_water, raw_price)
+            trail_drawdown = (price - pos.pnl_high_water) / pos.pnl_high_water if pos.pnl_high_water > 0 else 0.0
 
             stop_loss_triggered = ret <= -self.cfg.stop_loss
             trail_stop_triggered = trail_drawdown <= -self.cfg.trailing_stop
             time_stop_triggered = days_held >= self.cfg.time_stop_days
 
+            reason = ""
+            trigger_date = d
             if stop_loss_triggered or trail_stop_triggered or time_stop_triggered:
                 if stop_loss_triggered:
                     reason = "止损"
@@ -2180,23 +3065,74 @@ class BacktestEngine:
                     reason = "追踪止损"
                 else:
                     reason = "到期"
-                to_close.append((code, price, ret, pos, reason))
 
-        for code, price, ret, pos, reason in to_close:
-            self._positions.pop(code)
-            pnl = (price - pos.entry_price) * pos.shares
-            self._cash += price * pos.shares
-            trade = {
-                "date": d, "code": code,
-                "side": "sell", "price": price, "shares": pos.shares,
-                "entry_price": pos.entry_price,
-                "pnl": round(pnl, 2),
-                "return_pct": round(ret * 100, 2),
-                "reason": reason,
-                "score": 0,
-            }
-            self._trades.append(trade)
-            self._register_loss_cooldown(trade, day_idx)
+            if not reason:
+                continue
+
+            self._execution_constraints["sell_triggers"] += 1
+            self._queue_exit(pos, reason=reason, trigger_date=trigger_date, shares=pos.shares)
+
+    @staticmethod
+    def _sell_block_reason(pos: Position, trade_date: str) -> str:
+        if pos.entry_date == trade_date:
+            return "t_plus_one"
+        return ""
+
+    def _close_position(
+        self,
+        *,
+        trade_date: str,
+        code: str,
+        price: float,
+        shares: int,
+        reason: str,
+        score: float,
+        trigger_date: str | None = None,
+    ) -> dict[str, Any]:
+        pos = self._positions[code]
+        sell_shares = min(max(int(shares or 0), 0), pos.shares)
+        sell_ratio = sell_shares / pos.shares if pos.shares > 0 else 0.0
+        pnl_units = float(pos.pnl_units or 0.0)
+        sold_pnl_units = pnl_units * sell_ratio if pnl_units > 0 else 0.0
+        costs = self._trade_costs_for_order(side="sell", price=price, shares=sell_shares)
+        gross_proceeds = costs["notional"]
+        net_proceeds = costs["cash_effect"]
+        position_cost_basis = float(pos.cost_basis or (pos.entry_price * pos.shares))
+        sold_cost_basis = position_cost_basis * (sell_shares / pos.shares) if pos.shares > 0 else 0.0
+        pnl = net_proceeds - sold_cost_basis
+        self._cash += net_proceeds
+        self._record_trade_costs(costs)
+        if sell_shares >= pos.shares:
+            self._positions.pop(code, None)
+        else:
+            pos.shares -= sell_shares
+            if pnl_units > 0:
+                pos.pnl_units = max(0.0, pnl_units - sold_pnl_units)
+            pos.cost_basis = max(0.0, position_cost_basis - sold_cost_basis)
+            pos.pending_exit_reason = ""
+            pos.pending_exit_trigger_date = ""
+            pos.pending_exit_shares = 0
+        return_pct = pnl / sold_cost_basis * 100 if sold_cost_basis > 0 else 0.0
+        return {
+            "date": trade_date,
+            "trigger_date": trigger_date or trade_date,
+            "execution_date": trade_date,
+            "code": code,
+            "side": "sell",
+            "price": costs["execution_price"],
+            "signal_price": round(float(price or 0.0), 4),
+            "shares": sell_shares,
+            "entry_price": pos.entry_price,
+            "pnl": round(pnl, 2),
+            "gross_proceeds": round(gross_proceeds, 2),
+            "cost_basis": round(sold_cost_basis, 2),
+            "trade_cost": costs,
+            "return_pct": round(return_pct, 2),
+            "reason": reason,
+            "score": round(float(score or 0.0), 1),
+            "source_route": pos.entry_route,
+            "market_signal": pos.entry_market_signal,
+        }
 
     def _load_financials(self, codes: list[str], start_date: str, end_date: str):
         """从 baostock 拉取区间内可用的季度财务快照并缓存。
@@ -2206,6 +3142,34 @@ class BacktestEngine:
         - YOYNI         → query_growth_data
         - CFOToOR       → query_cash_flow_data
         """
+        if self.cfg.use_financial_cache and not self.cfg.hydrate_financial_cache and self._market_store is not None:
+            started_at = time.monotonic()
+            self._log_progress("financial_cache_bulk_start", codes=len(codes))
+            snapshots_by_code = self._market_store.get_financial_snapshots_bulk(
+                codes,
+                end_available=end_date,
+                source="baostock",
+            )
+            snapshot_count = 0
+            for code in codes:
+                snapshots = sorted(
+                    snapshots_by_code.get(code) or [],
+                    key=lambda item: (
+                        str(item.get("available_date", "")),
+                        int(item.get("report_year", 0) or 0),
+                        int(item.get("report_quarter", 0) or 0),
+                    ),
+                )
+                self._financial_cache[code] = snapshots
+                snapshot_count += len(snapshots)
+            self._log_progress(
+                "financial_cache_bulk_done",
+                codes=len(codes),
+                snapshots=snapshot_count,
+                seconds=round(time.monotonic() - started_at, 2),
+            )
+            return
+
         import baostock as bs
 
         periods = _financial_periods(start_date, end_date)
@@ -2498,12 +3462,19 @@ class BacktestEngine:
         # 计算最终权益
         final_value = self._cash
         for code, pos in self._positions.items():
-            df = self._bars.get(code)
-            price = self._close_on_or_before(df, last_date)
+            price = self._price_on_or_before(self._bars.get(code), last_date)
             if price is not None:
-                final_value += price * pos.shares
+                final_value += price * float(pos.shares or 0.0)
 
         total_return = (final_value - self.cfg.initial_cash) / self.cfg.initial_cash * 100
+        total_cost = float(self._cost_totals.get("total_cost", 0.0) or 0.0)
+        fee_total = float(self._cost_totals.get("fee_total", 0.0) or 0.0)
+        before_fees_final_value = final_value + fee_total
+        before_fees_return = (before_fees_final_value - self.cfg.initial_cash) / self.cfg.initial_cash * 100
+        before_costs_final_value = final_value + total_cost
+        before_costs_return = (before_costs_final_value - self.cfg.initial_cash) / self.cfg.initial_cash * 100
+        gross_final_value = before_fees_final_value
+        gross_return = before_fees_return
 
         sells = [t for t in self._trades if t["side"] == "sell"]
         wins = [t for t in sells if t.get("pnl", 0) > 0]
@@ -2519,7 +3490,25 @@ class BacktestEngine:
             if dd > max_dd:
                 max_dd = dd
 
-        # 夏普比率（简化：日收益 / 日波动）
+        years = max(len(self._sorted_dates) / 252, 0.01)
+        if final_value > 0 and self.cfg.initial_cash > 0:
+            ann_return = ((final_value / self.cfg.initial_cash) ** (1 / years) - 1) * 100
+        else:
+            ann_return = -100.0
+        if gross_final_value > 0 and self.cfg.initial_cash > 0:
+            gross_ann_return = ((gross_final_value / self.cfg.initial_cash) ** (1 / years) - 1) * 100
+        else:
+            gross_ann_return = -100.0
+        if before_fees_final_value > 0 and self.cfg.initial_cash > 0:
+            before_fees_ann_return = ((before_fees_final_value / self.cfg.initial_cash) ** (1 / years) - 1) * 100
+        else:
+            before_fees_ann_return = -100.0
+        if before_costs_final_value > 0 and self.cfg.initial_cash > 0:
+            before_costs_ann_return = ((before_costs_final_value / self.cfg.initial_cash) ** (1 / years) - 1) * 100
+        else:
+            before_costs_ann_return = -100.0
+
+        # 夏普比率：净值日收益均值 / 日波动，rf 目前按 0 处理。
         if len(equity_series) > 2:
             rets = pd.Series(equity_series).pct_change().dropna()
             ann_ret = rets.mean() * 252 if len(rets) > 0 else 0
@@ -2528,7 +3517,6 @@ class BacktestEngine:
         else:
             sharpe = 0.0
 
-        ann_return = total_return / max(len(self._sorted_dates) / 252, 0.01)
         calmar = ann_return / max_dd if max_dd > 0 else 0.0
         unknown_route_signals = [
             item for item in self._signal_records
@@ -2559,8 +3547,17 @@ class BacktestEngine:
             "preset": self.cfg.preset_name,
             "initial_cash": self.cfg.initial_cash,
             "final_value": round(final_value, 2),
+            "before_fees_final_value": round(before_fees_final_value, 2),
+            "before_costs_final_value": round(before_costs_final_value, 2),
+            "gross_final_value": round(gross_final_value, 2),
             "total_return_pct": round(total_return, 2),
+            "before_fees_total_return_pct": round(before_fees_return, 2),
+            "before_costs_total_return_pct": round(before_costs_return, 2),
+            "gross_total_return_pct": round(gross_return, 2),
             "annual_return_pct": round(ann_return, 2),
+            "before_fees_annual_return_pct": round(before_fees_ann_return, 2),
+            "before_costs_annual_return_pct": round(before_costs_ann_return, 2),
+            "gross_annual_return_pct": round(gross_ann_return, 2),
             "max_drawdown_pct": round(max_dd, 2),
             "win_rate_pct": round(win_rate, 1),
             "sharpe_ratio": round(sharpe, 2),
@@ -2576,12 +3573,23 @@ class BacktestEngine:
                 "history_mirror_days": len(self._history_mirror_dates),
                 "proxy_replay_days": len(self._proxy_replay_dates),
             },
+            "discovery_reachability": self._discovery_reachability_summary(),
             "data_coverage": {
                 "requested_codes": len(self._requested_codes),
                 "loaded_codes": len(self._loaded_codes),
                 "loaded_code_list": self._loaded_codes,
+                "pnl_bar_coverage": self._pnl_bar_coverage_summary(),
             },
             "execution_semantics": self._execution_semantics(),
+            "execution_constraints": self._execution_constraints_summary(),
+            "cost_model": self._cost_model_summary(),
+            "trade_performance": self._trade_performance_summary(),
+            "performance_metric_notes": {
+                "annual_return_pct": "CAGR based on net equity curve final value and trading_days/252.",
+                "sharpe_ratio": "Uses arithmetic daily net returns annualized by 252 with rf=0.",
+                "gross_total_return_pct": "Alias of before_fees_total_return_pct; slippage remains reflected in execution prices.",
+                "before_costs_total_return_pct": "Theoretical reference with fees and slippage added back.",
+            },
             "execution_funnel": self._execution_funnel,
             "signal_alpha": (
                 signal_alpha_summary(self._signal_records)
@@ -2604,11 +3612,7 @@ class BacktestEngine:
         }
 
     def _execution_semantics(self) -> dict[str, Any]:
-        policy_values = [
-            policy
-            for policy in (self.cfg.route_execution_policy or {}).values()
-            if isinstance(policy, dict)
-        ]
+        policy_values = list(route_policy_values(self.cfg.route_execution_policy or {}))
         policy_watch_enabled = any(
             "WATCH" in {str(item) for item in (policy.get("actions") or [])}
             for policy in policy_values
@@ -2630,19 +3634,32 @@ class BacktestEngine:
         )
         loss_cooldown_enabled = int(self.cfg.watch_loss_cooldown_days or 0) > 0
         scale_in_enabled = bool(self.cfg.scale_in_enabled)
-        research_enabled = bool(watch_trial_enabled or trial_buy_enabled or loss_cooldown_enabled or scale_in_enabled)
+        research_enabled = bool(watch_trial_enabled or trial_buy_enabled or loss_cooldown_enabled)
         notes = [
-            "默认只执行正式 BUY；route_execution_policy 默认仅用于 BUY 排序和仓位覆盖。",
+            "默认只执行正式 BUY；route_execution_policy 可用于 BUY 排序、仓位覆盖和显式路线正式化。",
         ]
         if research_enabled:
             notes.append("本次回测包含显式研究 what-if：允许部分 WATCH/TRIAL_BUY 按规则模拟成交。")
         if loss_cooldown_enabled:
             notes.append("本次回测包含观察层亏损冷却：亏损卖出后暂停观察/试买模拟成交。")
         if scale_in_enabled:
-            notes.append("本次回测包含趋势加仓：盈利持仓在指定市场制度和路线重新确认后补仓。")
+            notes.append("本次回测包含生产支持的趋势加仓：盈利持仓在指定市场制度和路线重新确认后补仓。")
+        if self.cfg.require_reachable_candidate_for_buy:
+            notes.append("本次回测启用可发现性闸门：买入候选必须在历史候选池、评分候选或决策镜像中出现过。")
         return {
             "mode": "research_what_if" if research_enabled else "production_buy_only",
             "buy_only": not research_enabled,
+            "t_plus_one": True,
+            "signal_execution_lag": "next_trading_day_open",
+            "limit_price_model": "execution_price_near_limit_blocked",
+            "cost_model": "commission_stamp_transfer_slippage",
+            "pnl_price_model": (
+                f"adjustflag_{self.cfg.pnl_adjustflag}"
+                if self._uses_separate_pnl_bars()
+                else f"signal_adjustflag_{self.cfg.adjustflag}"
+            ),
+            "reachable_only": bool(self.cfg.require_reachable_candidate_for_buy),
+            "reachable_lookback_days": int(self.cfg.reachable_lookback_days or 0),
             "watch_trial_enabled": watch_trial_enabled,
             "trial_buy_enabled": trial_buy_enabled,
             "scale_in_enabled": scale_in_enabled,
@@ -2675,6 +3692,180 @@ class BacktestEngine:
             ),
             "route_policy_default_actions": ["BUY"],
             "notes": notes,
+        }
+
+    def _execution_constraints_summary(self) -> dict[str, Any]:
+        return {
+            "t_plus_one": True,
+            "t_plus_one_blocked_sells": int(self._execution_constraints.get("t_plus_one_blocked_sells") or 0),
+            "buy_signals": int(self._execution_constraints.get("buy_signals") or 0),
+            "buy_orders_scheduled": int(self._execution_constraints.get("buy_orders_scheduled") or 0),
+            "buy_orders_expired": int(self._execution_constraints.get("buy_orders_expired") or 0),
+            "buy_untradable": int(self._execution_constraints.get("buy_untradable") or 0),
+            "sell_triggers": int(self._execution_constraints.get("sell_triggers") or 0),
+            "sell_orders_pending": int(self._execution_constraints.get("sell_orders_pending") or 0),
+            "sell_untradable": int(self._execution_constraints.get("sell_untradable") or 0),
+            "pnl_price_missing_risk_skips": int(
+                self._execution_constraints.get("pnl_price_missing_risk_skips") or 0
+            ),
+            "untradable_reasons": dict(self._execution_constraints.get("untradable_reasons") or {}),
+        }
+
+    def _pnl_bar_coverage_summary(self) -> dict[str, Any]:
+        if not self._uses_separate_pnl_bars():
+            return {
+                "enabled": False,
+                "adjustflag": str(self.cfg.adjustflag),
+                "pnl_adjustflag": str(self.cfg.pnl_adjustflag or ""),
+            }
+
+        checked_codes = 0
+        missing_code_count = 0
+        missing_date_count = 0
+        sample_codes: dict[str, Any] = {}
+        for code, raw_df in sorted(self._bars.items()):
+            if raw_df is None or raw_df.empty or "日期" not in raw_df.columns:
+                continue
+            checked_codes += 1
+            raw_dates = {str(item) for item in raw_df["日期"].dropna().tolist()}
+            pnl_df = self._pnl_bars.get(code)
+            pnl_dates = (
+                {str(item) for item in pnl_df["日期"].dropna().tolist()}
+                if pnl_df is not None and not pnl_df.empty and "日期" in pnl_df.columns
+                else set()
+            )
+            missing_dates = sorted(raw_dates - pnl_dates)
+            if not missing_dates:
+                continue
+            missing_code_count += 1
+            missing_date_count += len(missing_dates)
+            if len(sample_codes) < 20:
+                sample_codes[code] = {
+                    "missing_date_count": len(missing_dates),
+                    "sample_dates": missing_dates[:5],
+                }
+
+        return {
+            "enabled": True,
+            "adjustflag": str(self.cfg.adjustflag),
+            "pnl_adjustflag": str(self.cfg.pnl_adjustflag or ""),
+            "checked_codes": checked_codes,
+            "pnl_loaded_codes": len(self._pnl_bars),
+            "missing_code_count": missing_code_count,
+            "missing_date_count": missing_date_count,
+            "sample_codes": sample_codes,
+        }
+
+    def _cost_model_summary(self) -> dict[str, Any]:
+        buy_trades = len([item for item in self._trades if item.get("side") in {"buy", "scale_in"}])
+        sell_trades = len([item for item in self._trades if item.get("side") == "sell"])
+        total_trades = buy_trades + sell_trades
+        total_cost = float(self._cost_totals.get("total_cost", 0.0) or 0.0)
+        return {
+            "commission_bps": float(self.cfg.commission_bps or 0.0),
+            "min_commission": float(self.cfg.min_commission or 0.0),
+            "stamp_tax_bps": float(self.cfg.stamp_tax_bps or 0.0),
+            "transfer_fee_bps": float(self.cfg.transfer_fee_bps or 0.0),
+            "slippage_bps": float(self.cfg.slippage_bps or 0.0),
+            "totals": dict(self._cost_totals),
+            "avg_cost_per_trade": round(total_cost / total_trades, 2) if total_trades else 0.0,
+            "cost_drag_pct": round(total_cost / self.cfg.initial_cash * 100, 4) if self.cfg.initial_cash else 0.0,
+            "gross_return_definition": "gross_* equals before-fees return; slippage remains in execution prices.",
+            "before_costs_definition": "before_costs_* adds back both fees and slippage as a theoretical zero-cost reference.",
+        }
+
+    def _trade_performance_summary(self) -> dict[str, Any]:
+        """按真实已平仓交易聚合路线表现，避免把未平仓浮盈算进路线胜率。"""
+
+        def empty_bucket() -> dict[str, Any]:
+            return {
+                "buy_trades": 0,
+                "scale_in_trades": 0,
+                "sell_trades": 0,
+                "winning_sells": 0,
+                "losing_sells": 0,
+                "pnl": 0.0,
+                "return_pct_sum": 0.0,
+                "trade_cost": 0.0,
+            }
+
+        def add_trade(target: dict[str, dict[str, Any]], key: str, trade: dict[str, Any]) -> None:
+            bucket = target.setdefault(key, empty_bucket())
+            side = str(trade.get("side") or "")
+            if side == "buy":
+                bucket["buy_trades"] += 1
+            elif side == "scale_in":
+                bucket["scale_in_trades"] += 1
+            elif side == "sell":
+                bucket["sell_trades"] += 1
+                pnl = float(trade.get("pnl") or 0.0)
+                return_pct = float(trade.get("return_pct") or 0.0)
+                bucket["pnl"] += pnl
+                bucket["return_pct_sum"] += return_pct
+                if return_pct > 0:
+                    bucket["winning_sells"] += 1
+                else:
+                    bucket["losing_sells"] += 1
+            trade_cost = trade.get("trade_cost") or {}
+            bucket["trade_cost"] += float(trade_cost.get("total_cost") or 0.0)
+
+        by_market_route: dict[str, dict[str, Any]] = {}
+        by_route: dict[str, dict[str, Any]] = {}
+        by_market_signal: dict[str, dict[str, Any]] = {}
+        for trade in self._trades:
+            route = str(trade.get("source_route") or "no_entry_route")
+            market_signal = str(trade.get("market_signal") or "UNKNOWN")
+            add_trade(by_market_route, f"{market_signal}:{route}", trade)
+            add_trade(by_route, route, trade)
+            add_trade(by_market_signal, market_signal, trade)
+
+        def finalize(source: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+            rows: list[tuple[str, dict[str, Any]]] = []
+            for key, bucket in source.items():
+                sell_trades = int(bucket["sell_trades"])
+                rows.append((
+                    key,
+                    {
+                        "buy_trades": int(bucket["buy_trades"]),
+                        "scale_in_trades": int(bucket["scale_in_trades"]),
+                        "sell_trades": sell_trades,
+                        "winning_sells": int(bucket["winning_sells"]),
+                        "losing_sells": int(bucket["losing_sells"]),
+                        "win_rate_pct": round(bucket["winning_sells"] / sell_trades * 100, 2)
+                        if sell_trades else 0.0,
+                        "avg_return_pct": round(bucket["return_pct_sum"] / sell_trades, 2)
+                        if sell_trades else 0.0,
+                        "pnl": round(float(bucket["pnl"]), 2),
+                        "trade_cost": round(float(bucket["trade_cost"]), 2),
+                    },
+                ))
+            rows.sort(key=lambda item: (item[1]["pnl"], item[1]["sell_trades"]), reverse=True)
+            return {key: value for key, value in rows}
+
+        return {
+            "by_market_route": finalize(by_market_route),
+            "by_route": finalize(by_route),
+            "by_market_signal": finalize(by_market_signal),
+            "notes": {
+                "sell_trades": "胜率、平均收益和 PnL 只统计已平仓卖出交易。",
+                "buy_trades": "买入和加仓仅用于频次与成本归因，未平仓浮动收益不计入路线胜率。",
+            },
+        }
+
+    def _discovery_reachability_summary(self) -> dict[str, Any]:
+        checks = int(self._discovery_reachability.get("candidate_checks") or 0)
+        reachable = int(self._discovery_reachability.get("reachable_candidates") or 0)
+        blocked = int(self._discovery_reachability.get("blocked_candidates") or 0)
+        return {
+            "enabled": bool(self.cfg.require_reachable_candidate_for_buy),
+            "lookback_days": int(self.cfg.reachable_lookback_days or 0),
+            "candidate_checks": checks,
+            "reachable_candidates": reachable,
+            "blocked_candidates": blocked,
+            "reachable_buy_rate_pct": round(reachable / checks * 100, 2) if checks else 0.0,
+            "discovery_sources": dict(self._discovery_reachability.get("discovery_sources") or {}),
+            "blocked_reasons": dict(self._discovery_reachability.get("blocked_reasons") or {}),
+            "blocked_codes": dict(self._discovery_reachability.get("blocked_codes") or {}),
         }
 
 
@@ -2712,6 +3903,23 @@ def load_config(preset_name: str) -> BacktestConfig:
         if isinstance(value, str):
             value = [part.strip() for part in value.split(",")]
         return tuple(str(item) for item in (value or ()) if str(item))
+
+    def _merge_mapping_by_key(base: dict[str, Any], override: Any) -> dict[str, Any]:
+        if not isinstance(override, dict):
+            return dict(base or {})
+        merged: dict[str, Any] = {
+            str(key): dict(value) if isinstance(value, dict) else value
+            for key, value in (base or {}).items()
+        }
+        for key, value in override.items():
+            key_str = str(key)
+            if isinstance(value, dict) and isinstance(merged.get(key_str), dict):
+                item = dict(merged[key_str])
+                item.update(value)
+                merged[key_str] = item
+            else:
+                merged[key_str] = value
+        return merged
 
     # 融合 preset 和评分配置
     return BacktestConfig(
@@ -2790,9 +3998,18 @@ def load_config(preset_name: str) -> BacktestConfig:
         weights=weights,
         veto_rules=veto_rules,
         decision_gates=decision_gates,
-        market_regime_overlays=market_regime_overlays,
+        market_regime_overlays=_merge_mapping_by_key(
+            market_regime_overlays,
+            p.get("market_regime_overlays"),
+        ),
         score_adjustments=score_adjustments,
         market_multipliers=p.get("market_multipliers", {}),
+        pnl_adjustflag=str(p.get("pnl_adjustflag", "1") or "1"),
+        commission_bps=float(p.get("commission_bps", 2.5) or 0.0),
+        min_commission=float(p.get("min_commission", 5.0) or 0.0),
+        stamp_tax_bps=float(p.get("stamp_tax_bps", 5.0) or 0.0),
+        transfer_fee_bps=float(p.get("transfer_fee_bps", 0.1) or 0.0),
+        slippage_bps=float(p.get("slippage_bps", 5.0) or 0.0),
     )
 
 
@@ -2803,6 +4020,7 @@ def run_backtest(
     preset: str = "保守验证C",
     initial_cash: float = 100000.0,
     adjustflag: str = "2",
+    pnl_adjustflag: str = "1",
     use_history_mirror: bool = True,
     red_multiplier: float | None = None,
     disable_market_reduce_sell: bool = False,
@@ -2847,12 +4065,19 @@ def run_backtest(
     signal_record_limit: int | None = 50,
     include_signal_alpha: bool = True,
     load_financials: bool = True,
+    reachable_only: bool = False,
+    reachable_lookback_days: int = 5,
     progress_log: bool = False,
     use_stored_data: bool = False,
     hydrate_data: bool = False,
     use_market_bars: bool = False,
     hydrate_market_bars: bool = False,
     score_dimension_mode: str = "full",
+    commission_bps: float | None = None,
+    min_commission: float | None = None,
+    stamp_tax_bps: float | None = None,
+    transfer_fee_bps: float | None = None,
+    slippage_bps: float | None = None,
 ) -> dict:
     """执行回测的主入口函数（MCP 和 CLI 共用）。
 
@@ -2867,6 +4092,7 @@ def run_backtest(
     cfg = load_config(preset)
     cfg.initial_cash = initial_cash
     cfg.adjustflag = adjustflag
+    cfg.pnl_adjustflag = str(pnl_adjustflag or cfg.pnl_adjustflag or "1")
     if trailing_stop is not None:
         cfg.trailing_stop = float(trailing_stop)
     if time_stop_days is not None:
@@ -2966,7 +4192,19 @@ def run_backtest(
     cfg.signal_record_limit = signal_record_limit
     cfg.include_signal_alpha = bool(include_signal_alpha)
     cfg.score_dimension_mode = score_dimension_mode
+    if commission_bps is not None:
+        cfg.commission_bps = float(commission_bps)
+    if min_commission is not None:
+        cfg.min_commission = float(min_commission)
+    if stamp_tax_bps is not None:
+        cfg.stamp_tax_bps = float(stamp_tax_bps)
+    if transfer_fee_bps is not None:
+        cfg.transfer_fee_bps = float(transfer_fee_bps)
+    if slippage_bps is not None:
+        cfg.slippage_bps = float(slippage_bps)
     cfg.load_financials = load_financials
+    cfg.require_reachable_candidate_for_buy = bool(reachable_only)
+    cfg.reachable_lookback_days = max(int(reachable_lookback_days or 0), 0)
     cfg.progress_log = progress_log
     cfg.use_market_bars = use_market_bars or use_stored_data or hydrate_data
     cfg.hydrate_market_bars = hydrate_market_bars or hydrate_data

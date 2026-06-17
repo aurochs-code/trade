@@ -54,6 +54,22 @@ def signal_alpha_summary(
             bootstrap_confidence=bootstrap_confidence,
             bootstrap_seed=bootstrap_seed,
         ),
+        "by_decision_reason": _multi_value_summaries_by_key(
+            rows,
+            "decision_reasons",
+            horizons=horizons,
+            bootstrap_iterations=bootstrap_iterations,
+            bootstrap_confidence=bootstrap_confidence,
+            bootstrap_seed=bootstrap_seed,
+        ),
+        "by_veto_reason": _multi_value_summaries_by_key(
+            rows,
+            "veto_reasons",
+            horizons=horizons,
+            bootstrap_iterations=bootstrap_iterations,
+            bootstrap_confidence=bootstrap_confidence,
+            bootstrap_seed=bootstrap_seed,
+        ),
         "by_score_bucket": _summaries_by_key(
             scored_rows,
             "_score_bucket",
@@ -102,6 +118,39 @@ def signal_alpha_summary(
             bootstrap_confidence=bootstrap_confidence,
             bootstrap_seed=bootstrap_seed,
         ),
+    }
+
+
+def _multi_value_summaries_by_key(
+    rows: list[dict[str, Any]],
+    key: str,
+    *,
+    horizons: tuple[str, ...],
+    bootstrap_iterations: int,
+    bootstrap_confidence: float,
+    bootstrap_seed: int,
+) -> dict[str, Any]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        values = row.get(key) or []
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, Iterable):
+            continue
+        for value in values:
+            label = str(value or "").strip()
+            if not label:
+                continue
+            groups[label].append(row)
+    return {
+        group: _group_summary(
+            items,
+            horizons=horizons,
+            bootstrap_iterations=bootstrap_iterations,
+            bootstrap_confidence=bootstrap_confidence,
+            bootstrap_seed=bootstrap_seed,
+        )
+        for group, items in sorted(groups.items())
     }
 
 

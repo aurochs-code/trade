@@ -85,6 +85,43 @@ def _cents(value: Any) -> int:
     return int(round((number or 0.0) * 100))
 
 
+def _financial_row_to_dict(row: Any) -> dict:
+    return {
+        "symbol": row["symbol"],
+        "report_year": row["report_year"],
+        "report_quarter": row["report_quarter"],
+        "report_date": row["report_date"],
+        "available_date": row["available_date"],
+        "roe": row["roe"],
+        "roe_3y_ago": row["roe_3y_ago"],
+        "revenue_growth": row["revenue_growth"],
+        "net_profit_growth": row["net_profit_growth"],
+        "operating_cash_flow": row["operating_cash_flow"],
+        "pe_ttm": row["pe_ttm"],
+        "pb": row["pb"],
+        "debt_ratio": row["debt_ratio"],
+        "source": row["source"],
+    }
+
+
+def _price_rows_to_frame(rows: list[Any]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
+    data = []
+    for row in rows:
+        data.append({
+            "日期": row["bar_date"],
+            "开盘": row["open_cents"] / 100,
+            "最高": row["high_cents"] / 100,
+            "最低": row["low_cents"] / 100,
+            "收盘": row["close_cents"] / 100,
+            "成交量": row["volume"],
+            "成交额": row["amount_cents"] / 100,
+            "涨跌幅": row["change_pct"] if row["change_pct"] is not None else 0.0,
+        })
+    return pd.DataFrame(data)
+
+
 class MarketRepository:
     """Repository for market observations and bars."""
 
@@ -345,22 +382,51 @@ class MarketRepository:
         query += " ORDER BY bar_date"
 
         rows = self._conn.execute(query, params).fetchall()
-        if not rows:
-            return pd.DataFrame()
+        return _price_rows_to_frame(rows)
 
-        data = []
-        for row in rows:
-            data.append({
-                "日期": row["bar_date"],
-                "开盘": row["open_cents"] / 100,
-                "最高": row["high_cents"] / 100,
-                "最低": row["low_cents"] / 100,
-                "收盘": row["close_cents"] / 100,
-                "成交量": row["volume"],
-                "成交额": row["amount_cents"] / 100,
-                "涨跌幅": row["change_pct"] if row["change_pct"] is not None else 0.0,
-            })
-        return pd.DataFrame(data)
+    def get_price_bars_bulk(
+        self,
+        symbols: list[str],
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        *,
+        period: str = "daily",
+        adjustflag: str = "2",
+        source: str | None = None,
+        chunk_size: int = 100,
+    ) -> dict[str, pd.DataFrame]:
+        """批量读取回测 K 线，供全量 replay 避免逐股点查。"""
+        unique_symbols = sorted({str(item).strip() for item in symbols if str(item).strip()})
+        result: dict[str, pd.DataFrame] = {symbol: pd.DataFrame() for symbol in unique_symbols}
+        if not unique_symbols:
+            return result
+
+        size = max(int(chunk_size or 1), 1)
+        for offset in range(0, len(unique_symbols), size):
+            chunk = unique_symbols[offset: offset + size]
+            placeholders = ",".join("?" for _ in chunk)
+            query = (
+                f"SELECT * FROM market_price_bars "
+                f"WHERE period = ? AND adjustflag = ? AND symbol IN ({placeholders})"
+            )
+            params: list[Any] = [period, str(adjustflag), *chunk]
+            if source:
+                query += " AND source = ?"
+                params.append(source)
+            if start:
+                query += " AND bar_date >= ?"
+                params.append(start)
+            if end:
+                query += " AND bar_date <= ?"
+                params.append(end)
+            query += " ORDER BY symbol, bar_date"
+            rows = self._conn.execute(query, params).fetchall()
+            grouped: dict[str, list[Any]] = {}
+            for row in rows:
+                grouped.setdefault(str(row["symbol"]), []).append(row)
+            for symbol, symbol_rows in grouped.items():
+                result[symbol] = _price_rows_to_frame(symbol_rows)
+        return result
 
     def save_price_bar_records(
         self,
@@ -476,22 +542,7 @@ class MarketRepository:
         row = self._conn.execute(query, params).fetchone()
         if not row:
             return None
-        return {
-            "symbol": row["symbol"],
-            "report_year": row["report_year"],
-            "report_quarter": row["report_quarter"],
-            "report_date": row["report_date"],
-            "available_date": row["available_date"],
-            "roe": row["roe"],
-            "roe_3y_ago": row["roe_3y_ago"],
-            "revenue_growth": row["revenue_growth"],
-            "net_profit_growth": row["net_profit_growth"],
-            "operating_cash_flow": row["operating_cash_flow"],
-            "pe_ttm": row["pe_ttm"],
-            "pb": row["pb"],
-            "debt_ratio": row["debt_ratio"],
-            "source": row["source"],
-        }
+        return _financial_row_to_dict(row)
 
     def get_financial_snapshots(
         self,
@@ -514,25 +565,44 @@ class MarketRepository:
             params.append(end_available)
         query += " ORDER BY available_date, report_year, report_quarter"
         rows = self._conn.execute(query, params).fetchall()
-        return [
-            {
-                "symbol": row["symbol"],
-                "report_year": row["report_year"],
-                "report_quarter": row["report_quarter"],
-                "report_date": row["report_date"],
-                "available_date": row["available_date"],
-                "roe": row["roe"],
-                "roe_3y_ago": row["roe_3y_ago"],
-                "revenue_growth": row["revenue_growth"],
-                "net_profit_growth": row["net_profit_growth"],
-                "operating_cash_flow": row["operating_cash_flow"],
-                "pe_ttm": row["pe_ttm"],
-                "pb": row["pb"],
-                "debt_ratio": row["debt_ratio"],
-                "source": row["source"],
-            }
-            for row in rows
-        ]
+        return [_financial_row_to_dict(row) for row in rows]
+
+    def get_financial_snapshots_bulk(
+        self,
+        symbols: list[str],
+        *,
+        start_available: str | None = None,
+        end_available: str | None = None,
+        source: str | None = None,
+        chunk_size: int = 800,
+    ) -> dict[str, list[dict]]:
+        """批量读取财务快照，供历史重放避免逐股逐季度点查。"""
+        unique_symbols = sorted({str(item).strip() for item in symbols if str(item).strip()})
+        result: dict[str, list[dict]] = {symbol: [] for symbol in unique_symbols}
+        if not unique_symbols:
+            return result
+
+        size = max(int(chunk_size or 1), 1)
+        for offset in range(0, len(unique_symbols), size):
+            chunk = unique_symbols[offset: offset + size]
+            placeholders = ",".join("?" for _ in chunk)
+            query = f"SELECT * FROM market_financials WHERE symbol IN ({placeholders})"
+            params: list[Any] = list(chunk)
+            if source:
+                query += " AND source = ?"
+                params.append(source)
+            if start_available:
+                query += " AND available_date >= ?"
+                params.append(start_available)
+            if end_available:
+                query += " AND available_date <= ?"
+                params.append(end_available)
+            query += " ORDER BY symbol, available_date, report_year, report_quarter"
+            rows = self._conn.execute(query, params).fetchall()
+            for row in rows:
+                item = _financial_row_to_dict(row)
+                result.setdefault(str(item["symbol"]), []).append(item)
+        return result
 
     def save_fund_flow_snapshot(
         self,

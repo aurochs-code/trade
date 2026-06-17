@@ -47,6 +47,127 @@ def _run_async(coro):
         loop.close()
 
 
+def test_financial_snapshots_bulk_groups_rows_with_fake_connection():
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class FakeConn:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, query, params=()):
+            self.calls.append((query, params))
+            return FakeResult([
+                {
+                    "symbol": "300750",
+                    "report_year": 2024,
+                    "report_quarter": 1,
+                    "report_date": "2024-03-31",
+                    "available_date": "2024-04-29",
+                    "roe": 10.1,
+                    "roe_3y_ago": None,
+                    "revenue_growth": None,
+                    "net_profit_growth": None,
+                    "operating_cash_flow": 0.2,
+                    "pe_ttm": None,
+                    "pb": None,
+                    "debt_ratio": None,
+                    "source": "baostock",
+                },
+                {
+                    "symbol": "600036",
+                    "report_year": 2024,
+                    "report_quarter": 1,
+                    "report_date": "2024-03-31",
+                    "available_date": "2024-04-30",
+                    "roe": 12.3,
+                    "roe_3y_ago": None,
+                    "revenue_growth": None,
+                    "net_profit_growth": None,
+                    "operating_cash_flow": 0.3,
+                    "pe_ttm": None,
+                    "pb": None,
+                    "debt_ratio": None,
+                    "source": "baostock",
+                },
+            ])
+
+    conn = FakeConn()
+
+    rows = MarketStore(conn).get_financial_snapshots_bulk(
+        ["600036", "300750", "999999"],
+        end_available="2024-05-01",
+        source="baostock",
+    )
+
+    assert "symbol IN" in conn.calls[0][0]
+    assert conn.calls[0][1][-2:] == ["baostock", "2024-05-01"]
+    assert sorted(rows) == ["300750", "600036", "999999"]
+    assert rows["300750"][0]["roe"] == 10.1
+    assert rows["600036"][0]["roe"] == 12.3
+    assert rows["999999"] == []
+
+
+def test_price_bars_bulk_groups_rows_with_fake_connection():
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class FakeConn:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, query, params=()):
+            self.calls.append((query, params))
+            return FakeResult([
+                {
+                    "symbol": "300750",
+                    "bar_date": "2026-01-02",
+                    "open_cents": 1000,
+                    "high_cents": 1100,
+                    "low_cents": 990,
+                    "close_cents": 1080,
+                    "volume": 100,
+                    "amount_cents": 200000,
+                    "change_pct": 2.0,
+                },
+                {
+                    "symbol": "600036",
+                    "bar_date": "2026-01-02",
+                    "open_cents": 3500,
+                    "high_cents": 3600,
+                    "low_cents": 3450,
+                    "close_cents": 3580,
+                    "volume": 200,
+                    "amount_cents": 300000,
+                    "change_pct": 1.5,
+                },
+            ])
+
+    conn = FakeConn()
+
+    rows = MarketStore(conn).get_price_bars_bulk(
+        ["600036", "300750", "999999"],
+        start="2026-01-01",
+        end="2026-01-31",
+        adjustflag="3",
+    )
+
+    assert "symbol IN" in conn.calls[0][0]
+    assert conn.calls[0][1][:2] == ["daily", "3"]
+    assert sorted(rows) == ["300750", "600036", "999999"]
+    assert rows["300750"]["收盘"].tolist() == [10.8]
+    assert rows["600036"]["成交额"].tolist() == [3000.0]
+    assert rows["999999"].empty
+
+
 def test_fetch_sina_intraday_suppresses_akshare_stderr(monkeypatch, capfd):
     class FakeAkshare:
         def stock_intraday_sina(self, symbol, date):
@@ -365,6 +486,47 @@ class TestMarketStore:
         assert q2["report_quarter"] == 2
         assert q2["roe"] == 14.0
 
+    def test_financial_snapshots_bulk_are_grouped_by_symbol(self, store):
+        store.save_financial_snapshot(
+            "600036",
+            report_year=2024,
+            report_quarter=1,
+            report_date="2024-03-31",
+            available_date="2024-04-30",
+            payload={"roe": 12.3},
+            source="baostock",
+        )
+        store.save_financial_snapshot(
+            "300750",
+            report_year=2024,
+            report_quarter=1,
+            report_date="2024-03-31",
+            available_date="2024-04-29",
+            payload={"roe": 10.1},
+            source="baostock",
+        )
+        store.save_financial_snapshot(
+            "300750",
+            report_year=2024,
+            report_quarter=2,
+            report_date="2024-06-30",
+            available_date="2024-08-30",
+            payload={"roe": 11.2},
+            source="baostock",
+        )
+
+        rows = store.get_financial_snapshots_bulk(
+            ["600036", "300750", "999999"],
+            end_available="2024-05-01",
+            source="baostock",
+            chunk_size=1,
+        )
+
+        assert sorted(rows) == ["300750", "600036", "999999"]
+        assert [item["report_quarter"] for item in rows["300750"]] == [1]
+        assert rows["600036"][0]["roe"] == 12.3
+        assert rows["999999"] == []
+
 
 # ---------------------------------------------------------------------------
 # Mock providers for MarketService tests
@@ -382,6 +544,10 @@ class MockMarketProvider:
 
     async def get_index(self, symbols):
         return {}
+
+
+class DailyQuoteProvider(MockMarketProvider):
+    realtime_quote = False
 
 
 class MockSectorProvider(MockMarketProvider):
@@ -964,6 +1130,47 @@ class TestMarketService:
         assert snap.quote is not None
         assert snap.quote.price == 15.0
         assert snap.financial is not None
+
+    def test_get_quote_prefers_realtime_provider_over_daily_quote_fallback(self):
+        daily_quote = StockQuote(
+            code="002475", name="立讯精密", price=68.15,
+            open=65.0, high=68.38, low=64.0, close=68.15,
+            volume=160091391, amount=10715165049.8, change_pct=6.89,
+        )
+        realtime_quote = StockQuote(
+            code="002475", name="立讯精密", price=67.29,
+            open=68.15, high=68.70, low=67.27, close=67.29,
+            volume=58170700, amount=3954760035.78, change_pct=-1.26,
+        )
+        kline = pd.DataFrame({
+            "date": ["2026-06-15", "2026-06-16"],
+            "open": [65.0, 68.15],
+            "high": [68.38, 68.70],
+            "low": [64.0, 67.27],
+            "close": [68.15, 67.29],
+            "volume": [160091391, 58170700],
+            "amount": [10715165049.8, 3954760035.78],
+        })
+        daily_provider = DailyQuoteProvider({"002475": daily_quote})
+        daily_provider._kline = kline
+        realtime_provider = MockMarketProvider({"002475": realtime_quote})
+        realtime_provider._kline = kline
+
+        async def _daily_kline(code, period="daily", count=120):
+            return daily_provider._kline
+
+        async def _realtime_kline(code, period="daily", count=120):
+            return realtime_provider._kline
+
+        daily_provider.get_kline = _daily_kline
+        realtime_provider.get_kline = _realtime_kline
+        svc = MarketService(market_providers=[daily_provider, realtime_provider])
+
+        quote = asyncio.get_event_loop().run_until_complete(svc._get_quote("002475"))
+
+        assert quote is not None
+        assert quote.close == 67.29
+        assert quote.change_pct == -1.26
 
     def test_market_state_falls_back_to_cached_signal_when_index_providers_fail(self, store):
         store.save_observation(

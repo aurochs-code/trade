@@ -9,9 +9,10 @@ screening:
   mx_query: "站上20日均线，股价5元到200元，上市天数大于60天，非ST，今日未涨停，近20日平均成交额大于5000万元，市值大于50亿元"
   mx_select_type: "A股"
   market_scan_limit: 300       # 手工 screener run 的粗筛广度
-  refresh_scan_limit: 10       # 调度 refresh 的逐票深度评分预算；需要全量时显式传 --limit
+  refresh_scan_limit: 50       # 调度 refresh 的逐票深度评分预算；候选来自召回池竞争，不放宽买入闸门
   screener_query_timeout_seconds: 30 # 粗筛源搜索超时，超时返回 JSON 失败而不是卡住调度
-  screener_scoring_timeout_seconds: 90 # 逐票评分/采集总超时，超时不刷新候选池
+  screener_scoring_timeout_seconds: 240 # 逐票评分/采集总超时，超时不刷新候选池
+  screener_scoring_chunk_size: 10 # 逐票评分 worker 分块大小，避免单批原生异常拖垮整次刷新
   snapshot_timeout_seconds: 20 # 单票深度采集总超时，避免慢 provider 拖住调度刷新
   sector_context_timeout_seconds: 15 # 行业/概念上下文总超时；超时只降级 L2 证据
   include_hot_recall: true
@@ -19,6 +20,16 @@ screening:
   include_recent_signal_recall: true
   recent_signal_recall_limit: 20
   recent_signal_recall_event_limit: 500
+  include_lightweight_discovery: true # 使用已落库全市场 K 线召回动量/回踩适配候选
+  lightweight_discovery_source: "tushare"
+  lightweight_discovery_adjustflag: "3"
+  lightweight_discovery_limit: 600
+  lightweight_discovery_lookback_days: 60
+  lightweight_discovery_min_history_days: 20
+  lightweight_discovery_min_avg_amount: 200000000 # 近 60 日均成交额 2 亿
+  lightweight_discovery_min_avg_amplitude: 3.0    # 近 60 日日均振幅 3%，过滤低弹性票
+  lightweight_discovery_min_price: 5
+  lightweight_discovery_max_price: 200
   candidate_cache_ttl_hours: 24
   fallback_filters:
     min_price: 5
@@ -132,7 +143,7 @@ risk:
   momentum:
     stop_loss: 0.08                  # -8% 止损（C版）
     stop_loss_anchor: entry_day_low  # 或跌破买入日最低价
-    trailing_stop: 0.18              # 移动止盈：最高点回撤 -18%（进攻候选）
+    trailing_stop: 0.16              # 移动止盈：最高点回撤 -16%（恢复相位进攻候选）
     trailing_ma_cross:               # 或 MA5 死叉 MA10
       fast: 5
       slow: 10
@@ -203,7 +214,7 @@ scoring:
       buy_threshold: 6.5
       allow_trial_buy: true
     YELLOW:
-      buy_threshold: 6.5
+      buy_threshold: 9.9
       allow_trial_buy: false
       disabled_trial_routes: [shrink_pullback]
     RED:
@@ -222,7 +233,7 @@ scoring:
       flow_threshold: 1.5
       flow_discount: 0.7
 
-  route_execution_policy: &route_execution_policy_v3
+  route_execution_policy_legacy_v3: &route_execution_policy_v3
     GREEN:dragon_head:
       score_min: 6.0
       position_pct: 0.22
@@ -239,6 +250,19 @@ scoring:
       score_min: 6.0
       position_pct: 0.22
       priority: 60
+    GREEN:trend_cooling_off:
+      actions: [BUY]
+      score_min: 4.0
+      score_max: 4.5
+      position_pct: 0.075
+      priority: 45
+      require_entry_signal: false
+      phase_buckets:
+        - extended_above_ma20_slope_up
+        - extended_above_ma20_slope_flat
+        - below_ma20_slope_flat
+        - below_ma20_slope_up
+        - below_ma20_slope_down
     YELLOW:shrink_pullback:
       score_min: 6.0
       position_pct: 0.11
@@ -255,14 +279,135 @@ scoring:
       score_min: 6.0
       position_pct: 0.11
       priority: 80
+    YELLOW:trend_cooling_off:
+      actions: [BUY]
+      score_min: 4.0
+      score_max: 4.5
+      position_pct: 0.075
+      priority: 40
+      require_entry_signal: false
+      phase_buckets:
+        - extended_above_ma20_slope_up
+        - extended_above_ma20_slope_flat
+        - below_ma20_slope_flat
+        - below_ma20_slope_up
+        - below_ma20_slope_down
     RED:volume_breakout:
       score_min: 6.0
       position_pct: 0.066
       priority: 75
+      allow_market_blocked: true
     RED:pullback_to_ma20:
       score_min: 6.0
       position_pct: 0.066
       priority: 65
+      allow_market_blocked: true
+    RED:relative_strength_overheat:
+      actions: [BUY]
+      score_min: 4.0
+      score_max: 4.5
+      position_pct: 0.066
+      priority: 35
+      require_entry_signal: false
+      allow_market_blocked: true
+      phase_buckets:
+        - extended_above_ma20_slope_up
+        - extended_above_ma20_slope_flat
+        - below_ma20_slope_flat
+        - below_ma20_slope_up
+        - below_ma20_slope_down
+
+  route_execution_policy: &runtime_route_execution_policy_recovery_ma120
+    GREEN:dragon_head:
+      score_min: 6.0
+      position_pct: 0.22
+      priority: 85
+    GREEN:volume_breakout:
+      score_min: 6.0
+      position_pct: 0.22
+      priority: 80
+    GREEN:short_continuation:
+      score_min: 6.0
+      position_pct: 0.22
+      priority: 70
+    GREEN:ma_golden_cross:
+      score_min: 6.0
+      position_pct: 0.22
+      priority: 60
+    GREEN:trend_cooling_off:
+      actions: [BUY]
+      score_min: 4.0
+      score_max: 4.5
+      position_pct: 0.075
+      priority: 45
+      require_entry_signal: false
+      phase_buckets:
+        - extended_above_ma20_slope_up
+        - extended_above_ma20_slope_flat
+        - below_ma20_slope_flat
+        - below_ma20_slope_up
+        - below_ma20_slope_down
+    YELLOW:shrink_pullback:
+      actions: []
+    YELLOW:pullback_to_ma20:
+      actions: []
+    YELLOW:volume_breakout:
+      actions: []
+    YELLOW:relative_strength_overheat:
+      actions: [BUY]
+      score_min: 3.5
+      score_max: 5.0
+      position_pct: 0.075
+      priority: 72
+      require_entry_signal: false
+      require_above_ma120: true
+      min_index_ma120_slope_20d_pct: 0.0
+      min_data_quality_for_buy: degraded
+      max_missing_fields_for_buy: 6
+      phase_buckets:
+        - below_ma20_slope_flat
+        - below_ma20_slope_up
+        - near_ma20_slope_up
+    YELLOW:trend_cooling_off:
+      actions: [BUY]
+      score_min: 3.5
+      score_max: 5.0
+      position_pct: 0.075
+      priority: 62
+      require_entry_signal: false
+      require_above_ma120: true
+      min_index_ma120_slope_20d_pct: 0.0
+      min_data_quality_for_buy: degraded
+      max_missing_fields_for_buy: 6
+      phase_buckets:
+        - below_ma20_slope_up
+        - below_ma20_slope_flat
+        - near_ma20_slope_up
+        - extended_above_ma20_slope_flat
+    RED:volume_breakout:
+      score_min: 6.0
+      position_pct: 0.066
+      priority: 75
+      allow_market_blocked: true
+    RED:pullback_to_ma20:
+      score_min: 6.0
+      position_pct: 0.066
+      priority: 65
+      allow_market_blocked: true
+    RED:relative_strength_overheat:
+      actions: [BUY]
+      score_min: 4.0
+      score_max: 4.5
+      position_pct: 0.066
+      priority: 35
+      require_entry_signal: false
+      allow_market_blocked: true
+      phase_buckets:
+        - extended_above_ma20_slope_up
+        - extended_above_ma20_slope_flat
+        - below_ma20_slope_flat
+        - below_ma20_slope_up
+        - below_ma20_slope_down
 
   veto:
     - below_ma20
@@ -522,6 +667,169 @@ backtest_presets:
       - near_ma20_slope_up
       - below_ma20_slope_up
 
+  攻_C_production_route_scale_in: &production_route_scale_in
+    description: "生产等价候选：route policy 正式路线升级 + 盈利持仓趋势加仓，不启用研究 what-if"
+    entry_mode: hybrid
+    require_entry_signal: true
+    buy_threshold: 6.5
+    momentum_stop_loss: 0.08
+    momentum_trailing_stop: 0.18
+    momentum_time_stop_days: 30
+    single_max_pct: 0.22
+    total_max_pct: 0.67
+    weekly_max: 5
+    daily_max_buys: 3
+    holding_max: 5
+    market_multipliers:
+      RED: 0.3
+    entry_trend_rsi_max: 70
+    entry_pullback_rsi_max: 70
+    entry_pullback_volume_ratio_min: 1.5
+    entry_deviation_max: 10.0
+    entry_require_bullish_candle: true
+    route_execution_policy: *route_execution_policy_v3
+    scale_in_enabled: true
+    scale_in_profit_threshold: 0.10
+    scale_in_step_position_pct: 0.075
+    scale_in_max_position_pct: 0.22
+    scale_in_max_adds: 2
+    scale_in_min_days_between: 5
+    scale_in_routes:
+      - short_continuation
+      - volume_breakout
+      - dragon_head
+      - trend_structure_watch
+      - pullback_to_ma20
+      - trend_cooling_off
+      - relative_strength_overheat
+    scale_in_markets:
+      - GREEN
+      - YELLOW
+      - RED
+    scale_in_actions:
+      - BUY
+      - WATCH
+      - TRIAL_BUY
+    scale_in_require_entry_signal: false
+    scale_in_score_min: 4.0
+    scale_in_reset_time_stop: true
+    scale_in_aggressive_max_position_pct: 0.30
+    scale_in_aggressive_step_position_pct: 0.08
+    scale_in_aggressive_markets:
+      - GREEN
+      - YELLOW
+    scale_in_aggressive_routes:
+      - short_continuation
+      - volume_breakout
+      - dragon_head
+      - trend_structure_watch
+    scale_in_aggressive_phases:
+      - extended_above_ma20_slope_up
+      - extended_above_ma20_slope_flat
+      - near_ma20_slope_up
+      - below_ma20_slope_up
+
+  攻_C_recovery_ma120_no_scale: &yellow_recovery_ma120_no_scale
+    <<: *production_route_scale_in
+    description: "生产候选（稳健）：YELLOW 恢复相位小仓，不加仓；全周期回撤优先"
+    momentum_trailing_stop: 0.15
+    scale_in_enabled: false
+    market_regime_overlays:
+      GREEN:
+        buy_threshold: 6.5
+        allow_trial_buy: true
+      YELLOW:
+        buy_threshold: 9.9
+        allow_trial_buy: false
+        disabled_trial_routes: [shrink_pullback]
+      RED:
+        buy_threshold: 7.0
+        allow_trial_buy: true
+        enabled_trial_routes: [pullback_to_ma20]
+      CLEAR:
+        buy_threshold: 7.0
+        allow_trial_buy: false
+        disabled_trial_routes: [shrink_pullback]
+    route_execution_policy:
+      <<: *route_execution_policy_v3
+      YELLOW:shrink_pullback:
+        actions: []
+      YELLOW:pullback_to_ma20:
+        actions: []
+      YELLOW:volume_breakout:
+        actions: []
+      YELLOW:relative_strength_overheat:
+        actions: [BUY]
+        score_min: 3.5
+        score_max: 5.0
+        position_pct: 0.075
+        priority: 72
+        require_entry_signal: false
+        require_above_ma120: true
+        min_index_ma120_slope_20d_pct: 0.0
+        min_data_quality_for_buy: degraded
+        max_missing_fields_for_buy: 6
+        phase_buckets:
+          - below_ma20_slope_flat
+          - below_ma20_slope_up
+          - near_ma20_slope_up
+      YELLOW:trend_cooling_off:
+        actions: [BUY]
+        score_min: 3.5
+        score_max: 5.0
+        position_pct: 0.075
+        priority: 62
+        require_entry_signal: false
+        require_above_ma120: true
+        min_index_ma120_slope_20d_pct: 0.0
+        min_data_quality_for_buy: degraded
+        max_missing_fields_for_buy: 6
+        phase_buckets:
+          - below_ma20_slope_up
+          - below_ma20_slope_flat
+          - near_ma20_slope_up
+          - extended_above_ma20_slope_flat
+
+  攻_C_recovery_ma120_green_scale04:
+    <<: *yellow_recovery_ma120_no_scale
+    description: "生产候选（进攻）：YELLOW 恢复相位小仓，GREEN 强路线 4% 趋势加仓"
+    momentum_trailing_stop: 0.16
+    scale_in_enabled: true
+    scale_in_profit_threshold: 0.10
+    scale_in_step_position_pct: 0.04
+    scale_in_max_position_pct: 0.22
+    scale_in_max_adds: 2
+    scale_in_min_days_between: 5
+    scale_in_routes:
+      - short_continuation
+      - volume_breakout
+      - dragon_head
+      - trend_structure_watch
+      - pullback_to_ma20
+    scale_in_markets:
+      - GREEN
+    scale_in_actions:
+      - BUY
+      - WATCH
+      - TRIAL_BUY
+    scale_in_require_entry_signal: false
+    scale_in_score_min: 4.0
+    scale_in_reset_time_stop: true
+    scale_in_aggressive_max_position_pct: 0.30
+    scale_in_aggressive_step_position_pct: 0.08
+    scale_in_aggressive_markets:
+      - GREEN
+    scale_in_aggressive_routes:
+      - short_continuation
+      - volume_breakout
+      - dragon_head
+      - trend_structure_watch
+      - pullback_to_ma20
+    scale_in_aggressive_phases:
+      - extended_above_ma20_slope_up
+      - extended_above_ma20_slope_flat
+      - near_ma20_slope_up
+
   攻_C_route_policy_v3_weekly5_trail20:
     description: "进攻对照：全区间表现接近trail18，用于稳定性复核"
     entry_mode: hybrid
@@ -558,6 +866,43 @@ auto_trade:
   sell_window:
     start: "09:35"
     end: "14:50"
+  # 盈利持仓趋势确认加仓：只作用于已持仓股票，不把观察/试买意向用于首次买入
+  scale_in:
+    enabled: true
+    profit_threshold: 0.10
+    step_position_pct: 0.04
+    max_position_pct: 0.22
+    max_adds: 2
+    min_days_between: 5
+    routes:
+      - short_continuation
+      - volume_breakout
+      - dragon_head
+      - trend_structure_watch
+      - pullback_to_ma20
+    markets:
+      - GREEN
+    actions:
+      - BUY
+      - WATCH
+      - TRIAL_BUY
+    require_entry_signal: false
+    score_min: 4.0
+    reset_time_stop: true
+    aggressive_max_position_pct: 0.30
+    aggressive_step_position_pct: 0.08
+    aggressive_markets:
+      - GREEN
+    aggressive_routes:
+      - short_continuation
+      - volume_breakout
+      - dragon_head
+      - trend_structure_watch
+      - pullback_to_ma20
+    aggressive_phases:
+      - extended_above_ma20_slope_up
+      - extended_above_ma20_slope_flat
+      - near_ma20_slope_up
 
 # ---------------------------------------------------------------------------
 # 舆情监控

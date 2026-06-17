@@ -104,6 +104,10 @@ def _provider_name(provider) -> str:
     return provider.__class__.__name__
 
 
+def _is_realtime_quote_provider(provider) -> bool:
+    return bool(getattr(provider, "realtime_quote", True))
+
+
 def _is_paid_l2_provider(provider) -> bool:
     return _provider_name(provider).startswith("Tushare")
 
@@ -865,7 +869,12 @@ class MarketService:
                     return quote
                 _logger.info("[quote] %s cached quote rejected by kline sanity check", code)
 
-        for provider in self._market:
+        realtime_providers = [provider for provider in self._market if _is_realtime_quote_provider(provider)]
+        daily_quote_fallbacks = [
+            provider for provider in self._market if not _is_realtime_quote_provider(provider)
+        ]
+
+        for provider in [*realtime_providers, *daily_quote_fallbacks]:
             try:
                 quotes = await provider.get_realtime([code])
                 quote = quotes.get(code) if isinstance(quotes, dict) else None

@@ -8,6 +8,7 @@ __pycache__/
 .mcp.json
 .mcp.*.json
 dist/
+build/
 .claude/
 .sc/
 .venv/

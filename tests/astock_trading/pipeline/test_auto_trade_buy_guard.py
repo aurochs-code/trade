@@ -10,6 +10,7 @@ from astock_trading.pipeline.auto_trade import (
     _check_and_sell,
     _get_buy_candidates,
     _get_highest_since_entry,
+    _route_execution_policy_for_candidate,
     _score_and_buy,
     build_auto_trade_readiness,
     run,
@@ -1545,6 +1546,249 @@ def test_score_and_buy_uses_route_policy_position_for_formal_buy(auto_trade_ctx,
     event_payload = auto_trade_ctx.event_store.appended[-1]["payload"]
     assert event_payload["primary_strategy_route"] == "volume_breakout"
     assert event_payload["primary_strategy_route_label"] == "放量突破"
+
+
+def test_score_and_buy_uses_score_banded_route_policy_position(auto_trade_ctx, monkeypatch):
+    from astock_trading.pipeline import auto_trade as auto_trade_module
+
+    auto_trade_ctx.cfg["scoring"]["route_execution_policy"] = {
+        "GREEN:short_continuation": [
+            {"score_min": 4.0, "score_max": 5.0, "priority": 55, "position_pct": 0.075},
+            {"score_min": 6.0, "priority": 70, "position_pct": 0.22},
+        ]
+    }
+    monkeypatch.setattr(auto_trade_module, "_buy_side_diagnostics", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        auto_trade_module,
+        "_get_buy_candidates",
+        lambda *args, **kwargs: [
+            {
+                "code": "600001",
+                "name": "低分接力",
+                "score": 4.8,
+                "price": 10.0,
+                "market_signal": "GREEN",
+                "primary_strategy_route": "short_continuation",
+                "source_event_id": "decision-route-band",
+                "source_score_event_id": "score-route-band",
+            }
+        ],
+    )
+
+    buys = _score_and_buy(
+        auto_trade_ctx,
+        FakePaperAccount(),
+        PaperBalance(total_asset=100_000, available_cash=100_000, market_value=0),
+        exposure_pct=0.0,
+        available_cash=100_000,
+        market_state=MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
+        run_id="run-route-band",
+        cfg=auto_trade_ctx.cfg["auto_trade"],
+        dry_run=True,
+        max_trades=1,
+    )
+
+    assert buys[0]["position_pct"] == 0.075
+    assert buys[0]["shares"] == 700
+
+
+def test_auto_trade_route_policy_lookup_selects_score_band_without_database():
+    ctx = SimpleNamespace(
+        cfg={
+            "scoring": {
+                "route_execution_policy": {
+                    "GREEN:short_continuation": [
+                        {"score_min": 4.0, "score_max": 5.0, "priority": 55, "position_pct": 0.075},
+                        {"score_min": 6.0, "priority": 70, "position_pct": 0.22},
+                    ]
+                }
+            }
+        }
+    )
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+
+    low_band = _route_execution_policy_for_candidate(
+        ctx,
+        {"score": 4.8, "market_signal": "GREEN", "primary_strategy_route": "short_continuation"},
+        market,
+    )
+    high_band = _route_execution_policy_for_candidate(
+        ctx,
+        {"score": 6.2, "market_signal": "GREEN", "primary_strategy_route": "short_continuation"},
+        market,
+    )
+
+    assert low_band["position_pct"] == 0.075
+    assert low_band["priority"] == 55
+    assert high_band["position_pct"] == 0.22
+    assert high_band["priority"] == 70
+
+
+def test_auto_trade_route_policy_lookup_honors_ma120_filter_without_database():
+    ctx = SimpleNamespace(
+        cfg={
+            "scoring": {
+                "route_execution_policy": {
+                    "YELLOW:relative_strength_overheat": {
+                        "score_min": 4.0,
+                        "position_pct": 0.075,
+                        "require_above_ma120": True,
+                        "min_index_ma120_slope_20d_pct": 0.0,
+                    }
+                }
+            }
+        }
+    )
+    candidate = {
+        "score": 4.8,
+        "market_signal": "YELLOW",
+        "primary_strategy_route": "relative_strength_overheat",
+    }
+
+    blocked = _route_execution_policy_for_candidate(
+        ctx,
+        candidate,
+        MarketState(
+            signal=MarketSignal.YELLOW,
+            multiplier=0.5,
+            detail={"above_ma120": False, "index_ma120_slope_20d_pct": 1.0},
+        ),
+    )
+    allowed = _route_execution_policy_for_candidate(
+        ctx,
+        candidate,
+        MarketState(
+            signal=MarketSignal.YELLOW,
+            multiplier=0.5,
+            detail={"above_ma120": True, "index_ma120_slope_20d_pct": 1.0},
+        ),
+    )
+
+    assert blocked == {}
+    assert allowed["position_pct"] == 0.075
+
+
+def test_run_scale_in_existing_position_on_trend_confirmation(monkeypatch):
+    from astock_trading.pipeline import auto_trade as auto_trade_module
+
+    class ScaleInPaperAccount(FakePaperAccount):
+        def get_positions(self):
+            return [
+                PaperPosition(
+                    code="002138",
+                    name="双环传动",
+                    shares=1000,
+                    avg_cost=10.0,
+                    current_price=12.0,
+                    market_value=12_000.0,
+                    pnl=2_000.0,
+                    pnl_pct=0.20,
+                )
+            ]
+
+        def get_balance(self):
+            return PaperBalance(total_asset=100_000, available_cash=80_000, market_value=12_000)
+
+        def get_exposure(self):
+            return 0.12, 80_000
+
+    paper = ScaleInPaperAccount()
+    trade_time = datetime(2026, 5, 22, 10, 0, tzinfo=MARKET_TZ)
+    now = trade_time.astimezone(timezone.utc)
+    event_store = FakeEventStore(
+        decision_events=[
+            {
+                "event_id": "decision-held-watch",
+                "event_type": "decision.suggested",
+                "occurred_at": now.isoformat(),
+                "payload": {
+                    "action": "WATCH",
+                    "code": "002138",
+                    "name": "双环传动",
+                    "score": 4.2,
+                    "market_signal": "GREEN",
+                    "primary_strategy_route": "trend_cooling_off",
+                    "primary_strategy_route_label": "趋势冷却",
+                    "entry_signal": False,
+                    "source_score_event_id": "score-held-watch",
+                },
+                "metadata": {},
+            }
+        ],
+        auto_trade_events=[
+            {
+                "event_type": "auto_trade.executed",
+                "occurred_at": (now - timedelta(days=10)).isoformat(),
+                "payload": {
+                    "side": "buy",
+                    "code": "002138",
+                    "shares": 1000,
+                    "status": "filled",
+                    "primary_strategy_route": "volume_breakout",
+                    "primary_strategy_route_label": "放量突破",
+                    "source_score_event_id": "score-old-buy",
+                },
+                "metadata": {"account": "paper"},
+            }
+        ],
+    )
+    ctx = SimpleNamespace(
+        conn=SimpleNamespace(),
+        event_store=event_store,
+        run_journal=FakeRunJournal(),
+        cfg={
+            "auto_trade": {
+                "enabled": True,
+                "dry_run": True,
+                "max_daily_trades": 1,
+                "buy_guard": {"max_age_hours": 24},
+                "buy_window": {"start": "09:45", "end": "14:30"},
+                "sell_window": {"start": "09:35", "end": "09:36"},
+                "scale_in": {
+                    "enabled": True,
+                    "profit_threshold": 0.10,
+                    "step_position_pct": 0.075,
+                    "max_position_pct": 0.22,
+                    "max_adds": 2,
+                    "min_days_between": 5,
+                    "routes": ["trend_cooling_off"],
+                    "markets": ["GREEN"],
+                    "actions": ["WATCH"],
+                    "require_entry_signal": False,
+                    "score_min": 4.0,
+                },
+            },
+            "risk": {"position": {"total_max": 0.67, "single_max": 0.22, "weekly_max": 5}},
+            "scoring": {"thresholds": {"buy": 6.5}},
+        },
+        market_svc=FakeMarketService(),
+        projector=SimpleNamespace(sync_market_state=lambda index_data: None),
+        obsidian=FakeObsidian(),
+    )
+    monkeypatch.setattr("astock_trading.pipeline.auto_trade.local_now", lambda: trade_time)
+    monkeypatch.setattr("astock_trading.pipeline.auto_trade.PaperAccount", lambda: paper)
+    monkeypatch.setattr(auto_trade_module, "_buy_side_diagnostics", lambda *args, **kwargs: [])
+    monkeypatch.setattr(auto_trade_module, "_get_buy_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "astock_trading.reporting.discord_sender.send_embed",
+        lambda *args, **kwargs: (True, ""),
+    )
+
+    result = run(ctx, "run-scale-in")
+
+    assert result["buys"][0]["code"] == "002138"
+    assert result["buys"][0]["reason"] == "scale_in_trend_confirmed"
+    assert result["buys"][0]["shares"] == 600
+    assert result["buys"][0]["position_pct"] == 0.195
+    event_payload = [
+        item["payload"]
+        for item in event_store.appended
+        if item["event_type"] == "auto_trade.executed"
+    ][0]
+    assert event_payload["side"] == "buy"
+    assert event_payload["reason"] == "scale_in_trend_confirmed"
+    assert event_payload["source_event_id"] == "decision-held-watch"
+    assert event_payload["source_score_event_id"] == "score-held-watch"
 
 
 def test_readiness_ignores_previous_day_buy_signal_even_within_max_age(auto_trade_ctx, monkeypatch):

@@ -7,13 +7,16 @@
 - 确定性生产任务用 `no_agent: true`，成功时尽量静默。
 - LLM 任务只做盘前、收盘、周复盘三类人读总结。
 - 盘中风控、止损/止盈、人工确认、pipeline 失败和核心数据源严重异常直接告警，不等待 LLM 汇总。
+- Hermes 不是唯一监控面；独立 launchd `ops-watchdog` 每 10 分钟运行外部监督脚本
+  `a_stock_ops_watchdog_supervise.py`，由它启动轻量 watchdog worker。该链路用于发现
+  Hermes 调度失败、候选池新鲜度过期、核心池为空、数据源阻断和模拟承接阻塞。
 
 ## 当前快照
 
-截至本次整理后，Hermes `trading` profile active job 共 `19` 个，其中 A 股相关 `19` 个：
+截至 2026-06-16 本机快照，Hermes `trading` profile active job 共 `23` 个，其中 A 股相关任务包括：
 
 - A 股确定性执行：`morning`、`noon`、`evening`、`scoring`、`weekly`、`auto_trade`、盘中轻量 `screener refresh`、收盘后 `screener refresh`、影子试运行记录复盘、`propose-plan`、`daily inspection`
-- A 股健康探针：只保留盘前 1 个；收盘后健康诊断已暂停
+- A 股健康探针：盘前 1 个 Hermes 探针；系统化异常感知由 launchd watchdog 独立承担
 - A 股盘中风控：合并为 1 个 Hermes cron，通过 `a_stock_intraday_monitor_window.sh` 判断交易时间窗
 - A 股舆情监控：合并为 1 个 Hermes cron，通过 `a_stock_sentiment_window.sh` 判断交易时间窗
 - A 股 LLM 摘要：盘前、收盘、周复盘 3 个任务
@@ -76,6 +79,8 @@
 清理 MX 自选里的非持仓旧票，并加入最新核心池、观察池和强势观察。同步只改 MX 自选，
 不提交模拟盘订单；如需临时关闭，可设置 `ASTOCK_WATCHLIST_SYNC_DISABLE=1`，测试时可设置
 `ASTOCK_WATCHLIST_SYNC_DRY_RUN=1`。
+逐票评分默认按 `strategy.screening.screener_scoring_chunk_size` 分块隔离执行；单个分块失败
+会写入 `scoring_chunks.failed` 遥测，成功分块仍可刷新候选池，不放宽买入线和入场路线门禁。
 
 建议在 `15:10` 候选池刷新后、`15:25` 核心池评分前补充一条 `15:18`
 机会变化提醒任务，执行 `atrade notify opportunity-watch --json`。它只对新强势观察、
@@ -131,7 +136,8 @@ MX 模拟盘委托，只会展示待确认命令，不会由 Hermes 自动执行
 
 ## 本次整理
 
-本次整理没有删除业务能力，只把重复的 Hermes 配置收敛：
+历史整理曾把重复的 Hermes 配置收敛；当前应以 `atrade diagnose schedule --json`
+和 Hermes `jobs.json` 为准，不再把本文件当作唯一机器事实来源：
 
 | 动作 | 整理前 | 整理后 | 说明 |
 | --- | --- | --- | --- |
@@ -140,11 +146,12 @@ MX 模拟盘委托，只会展示待确认命令，不会由 Hermes 自动执行
 | 合并舆情 cron | 2 个 | 1 个 | wrapper 内判断半点/整点和是否有内容 |
 | 保留 LLM 摘要 | 3 个 | 3 个 | 盘前、收盘、周复盘 |
 
-结果：
+当前运维边界：
 
-- A 股相关 active job 为 `19` 个。
-- `trading` profile 当前 active job 为 `19` 个。
-- 关键告警仍然直接投递，常规状态由 LLM 摘要统一入口展示。
+- Hermes `trading` profile active job 当前为 `23` 个。
+- 关键业务告警仍由 Hermes wrapper 直接投递。
+- 调度失败、候选池过期、核心池为空和模拟承接阻塞由独立 launchd
+  `ops-watchdog` 发现并推送，不等待下一次 Hermes 盘前或收盘摘要。
 
 ## 观察和回滚
 

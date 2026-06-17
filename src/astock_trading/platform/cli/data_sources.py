@@ -362,6 +362,90 @@ def data_sources_select_universe(
         conn.close()
 
 
+@data_sources_app.command("replay-discovery")
+def data_sources_replay_discovery(
+    start: str = typer.Argument(..., help="回放开始日期 YYYY-MM-DD"),
+    end: str = typer.Argument(..., help="回放结束日期 YYYY-MM-DD"),
+    source: str = typer.Option("tushare", "--source", help="已落库 K 线来源，如 tushare"),
+    adjustflag: str = typer.Option("3", "--adjustflag", help="复权口径；需与 market_price_bars 一致"),
+    lookback_days: int = typer.Option(60, "--lookback-days", min=1, help="滚动统计窗口，单位交易日"),
+    min_history_days: int = typer.Option(20, "--min-history-days", min=1, help="进入发现池所需最少历史交易日"),
+    min_avg_amount: float = typer.Option(200_000_000.0, "--min-avg-amount", min=0.0, help="滚动日均成交额下限，单位元"),
+    min_avg_amplitude: float = typer.Option(3.0, "--min-avg-amplitude", min=0.0, help="滚动日均振幅下限，单位百分比"),
+    min_price: float = typer.Option(5.0, "--min-price", min=0.0, help="最新收盘价下限"),
+    max_price: float = typer.Option(200.0, "--max-price", min=0.0, help="最新收盘价上限"),
+    limit: int = typer.Option(600, "--limit", min=1, help="每个交易日最多写入多少只发现候选"),
+    write: bool = typer.Option(False, "--write", help="实际写入 signal_history_snapshots；默认仅 dry-run"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """从已落库 K 线重建历史发现池，写入 pool-only 历史信号镜像。"""
+    from astock_trading.market.data_hydration import replay_historical_discovery_snapshots
+
+    conn = connect()
+    try:
+        result = replay_historical_discovery_snapshots(
+            conn,
+            source=source,
+            adjustflag=adjustflag,
+            start=start,
+            end=end,
+            lookback_days=lookback_days,
+            min_history_days=min_history_days,
+            min_avg_amount_yuan=min_avg_amount,
+            min_avg_amplitude_pct=min_avg_amplitude,
+            min_price=min_price,
+            max_price=max_price,
+            limit=limit,
+            write=write,
+        )
+        if as_json:
+            json_or_text(result, True)
+            return
+
+        mode = "写入" if write else "预演"
+        typer.echo(
+            f"历史发现回放{mode}: {result['status']} "
+            f"{result['start']}~{result['end']} dates={result['processed_date_count']} "
+            f"pool_items={result['pool_item_count']}"
+        )
+        for warning in result.get("warnings", []):
+            typer.echo(f"  - {warning}")
+    finally:
+        conn.close()
+
+
+@data_sources_app.command("index-discoveries")
+def data_sources_index_discoveries(
+    start: str = typer.Argument(..., help="索引开始日期 YYYY-MM-DD"),
+    end: str = typer.Argument(..., help="索引结束日期 YYYY-MM-DD"),
+    write: bool = typer.Option(False, "--write", help="实际写入 signal_history_discoveries；默认仅 dry-run"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """从历史信号镜像重建 code/date 发现索引，供回测可达性快速查询。"""
+    from astock_trading.platform.history_mirror import rebuild_signal_history_discovery_index
+
+    conn = connect()
+    try:
+        result = rebuild_signal_history_discovery_index(
+            conn,
+            start=start,
+            end=end,
+            write=write,
+        )
+        if as_json:
+            json_or_text(result, True)
+            return
+
+        mode = "写入" if write else "预演"
+        typer.echo(
+            f"历史发现索引{mode}: {result['status']} "
+            f"{result['start']}~{result['end']} groups={result['history_group_count']} "
+            f"rows={result['discovery_row_count']}"
+        )
+    finally:
+        conn.close()
+
+
 def register_check_data_sources(app: typer.Typer) -> None:
     @app.command("check-data-sources")
     def check_data_sources(

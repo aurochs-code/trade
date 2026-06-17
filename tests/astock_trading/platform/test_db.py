@@ -39,6 +39,7 @@ def test_backtest_persistence_tables_registered_in_mysql_metadata():
         "backtest_runs",
         "backtest_trades",
         "backtest_equity_curve",
+        "signal_history_discoveries",
     } <= set(metadata.tables)
 
     run_columns = set(metadata.tables["backtest_runs"].columns.keys())
@@ -74,3 +75,14 @@ def test_backtest_persistence_tables_registered_in_mysql_metadata():
         "positions",
         "payload_json",
     } <= equity_columns
+
+    discovery_columns = set(metadata.tables["signal_history_discoveries"].columns.keys())
+    assert {
+        "snapshot_date",
+        "history_group_id",
+        "code",
+        "source",
+        "run_id",
+        "phase",
+        "created_at",
+    } <= discovery_columns

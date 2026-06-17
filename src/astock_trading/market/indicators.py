@@ -13,6 +13,41 @@ import pandas as pd
 
 from astock_trading.market.models import StockQuote, TechnicalIndicators
 
+_PRICE_AXIS_ALIGN_MIN_DIVERGENCE_PCT = 15.0
+_PRICE_AXIS_ALIGN_MAX_DIVERGENCE_PCT = 80.0
+
+
+def _positive_float(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _align_price_axis_to_quote(df: pd.DataFrame, quote: Optional[StockQuote]) -> pd.DataFrame:
+    if quote is None or "close" not in df.columns or df.empty:
+        return df
+    quote_close = _positive_float(quote.close) or _positive_float(quote.price)
+    latest_close = _positive_float(df["close"].iloc[-1])
+    if quote_close is None or latest_close is None:
+        return df
+
+    divergence = abs(quote_close / latest_close - 1) * 100
+    if not (
+        _PRICE_AXIS_ALIGN_MIN_DIVERGENCE_PCT
+        <= divergence
+        <= _PRICE_AXIS_ALIGN_MAX_DIVERGENCE_PCT
+    ):
+        return df
+
+    factor = quote_close / latest_close
+    aligned = df.copy()
+    for col in ("open", "close", "high", "low"):
+        if col in aligned.columns:
+            aligned[col] = aligned[col] * factor
+    return aligned
+
 
 def compute_technical_indicators(kline: pd.DataFrame, quote: Optional[StockQuote] = None) -> TechnicalIndicators:
     """
@@ -54,6 +89,7 @@ def compute_technical_indicators(kline: pd.DataFrame, quote: Optional[StockQuote
     for col in ["open", "close", "high", "low", "volume", "amount", "涨跌幅"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = _align_price_axis_to_quote(df, quote)
 
     close = df["close"]
     volume = df["volume"]

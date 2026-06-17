@@ -1,5 +1,6 @@
 """Tests for platform/config.py — ConfigRegistry"""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -115,6 +116,49 @@ def test_snapshot_get_nested(conn):
 
     # nonexistent key returns default
     assert snapshot.get("nonexistent", "key", default=42) == 42
+
+
+def test_default_strategy_config_uses_recovery_ma120_runtime_policy(monkeypatch):
+    """默认运行配置应和最终可承接的恢复相位策略一致。"""
+    monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
+
+    data, errors = ConfigRegistry().load_and_validate()
+
+    assert errors == []
+    strategy = data["strategy"]
+    overlays = strategy["scoring"]["market_regime_overlays"]
+    route_policy = strategy["scoring"]["route_execution_policy"]
+    auto_trade = strategy["auto_trade"]
+
+    assert overlays["YELLOW"]["buy_threshold"] == 9.9
+    yellow_overheat = route_policy["YELLOW:relative_strength_overheat"]
+    assert yellow_overheat["require_above_ma120"] is True
+    assert yellow_overheat["min_index_ma120_slope_20d_pct"] == 0.0
+    assert yellow_overheat["min_data_quality_for_buy"] == "degraded"
+    assert yellow_overheat["max_missing_fields_for_buy"] == 6
+    assert route_policy["YELLOW:pullback_to_ma20"]["actions"] == []
+    assert strategy["risk"]["momentum"]["trailing_stop"] == 0.16
+    assert auto_trade["scale_in"]["markets"] == ["GREEN"]
+    assert auto_trade["scale_in"]["step_position_pct"] == 0.04
+    assert auto_trade["scale_in"]["aggressive_max_position_pct"] == 0.30
+
+
+def test_template_strategy_config_uses_same_runtime_policy(monkeypatch):
+    """安装模板的默认策略不能落后于源码配置。"""
+    monkeypatch.delenv("ASTOCK_CONFIG_PROFILE", raising=False)
+    repo_root = Path(__file__).resolve().parents[3]
+    template_dir = repo_root / "src" / "astock_trading" / "templates" / "config"
+
+    data, errors = ConfigRegistry(config_dir=template_dir).load_and_validate()
+
+    assert errors == []
+    strategy = data["strategy"]
+    route_policy = strategy["scoring"]["route_execution_policy"]
+    assert strategy["scoring"]["market_regime_overlays"]["YELLOW"]["buy_threshold"] == 9.9
+    assert route_policy["YELLOW:relative_strength_overheat"]["require_above_ma120"] is True
+    assert route_policy["YELLOW:pullback_to_ma20"]["actions"] == []
+    assert strategy["risk"]["momentum"]["trailing_stop"] == 0.16
+    assert strategy["auto_trade"]["scale_in"]["markets"] == ["GREEN"]
 
 
 def test_list_versions(conn):

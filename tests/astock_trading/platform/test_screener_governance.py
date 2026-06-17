@@ -904,6 +904,99 @@ def test_refresh_scoring_candidates_can_recall_recent_entry_signal():
     }
 
 
+def test_refresh_scoring_candidates_uses_lightweight_discovery_before_mx():
+    raw_candidates = [
+        {"code": "600100", "name": "粗筛一"},
+        {"code": "600101", "name": "粗筛二"},
+    ]
+    hot_candidates = [{"code": "300100", "name": "热榜一"}]
+    lightweight_candidates = [
+        {"code": "300475", "name": "香农芯创"},
+        {"code": "688498", "name": "源杰科技"},
+    ]
+    existing_candidates = [
+        {"code": "002384", "name": "东山精密"},
+        {"code": "688981", "name": "中芯国际"},
+    ]
+
+    result = _build_scoring_candidates(
+        raw_candidates,
+        hot_candidates,
+        [],
+        existing_candidates,
+        lightweight_candidates=lightweight_candidates,
+        score_limit=6,
+        refresh_pool=True,
+    )
+
+    assert [item["code"] for item in result["stock_list"]] == [
+        "002384",
+        "688981",
+        "300100",
+        "300475",
+        "688498",
+        "600100",
+    ]
+    assert result["source_counts"] == {
+        "existing_pool": 2,
+        "hot_stocks": 1,
+        "lightweight_discovery": 2,
+        "mx": 1,
+    }
+
+
+def test_screener_refresh_includes_lightweight_discovery_candidates(monkeypatch):
+    import astock_trading.platform.cli as cli_package
+
+    captured = {}
+
+    class FakeConn:
+        def close(self):
+            pass
+
+    def fake_score_stock_batch(ctx, stock_list, run_id):  # noqa: ARG001
+        captured["stock_list"] = list(stock_list)
+        raise RuntimeError("stop-before-live-scoring")
+
+    monkeypatch.setattr(
+        cli_package.screener,
+        "_search_screener_results",
+        lambda query, timeout_seconds: [{"code": "600100", "name": "粗筛一"}],
+    )
+    monkeypatch.setattr(cli_package.screener, "_hot_recall_candidates", lambda conn, *, limit: [])
+    monkeypatch.setattr(cli_package.screener, "_recent_signal_recall_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(cli_package.screener, "_candidate_rows", lambda conn, tier="all", limit=1000: [])
+    monkeypatch.setattr(
+        cli_package.screener,
+        "_lightweight_discovery_candidates",
+        lambda conn, cfg: [{"code": "300475", "name": "香农芯创"}],
+    )
+    monkeypatch.setattr(cli_package.screener, "_score_stock_batch", fake_score_stock_batch)
+    monkeypatch.setattr(
+        cli_package.screener,
+        "build_context",
+        lambda: SimpleNamespace(
+            cfg={
+                "screening": {
+                    "mx_query": "测试查询",
+                    "market_scan_limit": 300,
+                    "refresh_scan_limit": 3,
+                    "include_hot_recall": True,
+                    "include_recent_signal_recall": True,
+                    "include_lightweight_discovery": True,
+                },
+                "pool_management": {"watch_min_score": 5.0},
+            },
+            conn=FakeConn(),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="stop-before-live-scoring"):
+        _run_screener("", 3, None, True, refresh_pool=True)
+
+    assert [item["code"] for item in captured["stock_list"]] == ["300475", "600100"]
+
+
 def test_hot_recall_candidates_reads_recent_hot_stock_observations(mysql_conn):
     from astock_trading.market.store import MarketStore
 

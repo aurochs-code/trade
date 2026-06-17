@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext, redirect_stdout
+import sys
 from typing import Optional
 
 import typer
+
+DEFAULT_BACKTEST_PRESET = "攻_C_recovery_ma120_green_scale04"
 
 
 def _format_metric(value: object, fmt: str, fallback: str = "n/a") -> str:
@@ -46,13 +50,33 @@ def _decode_json_field(value: object, fallback: object):
         return fallback
 
 
+def _discover_replay_codes(start: str, end: str, *, limit: int) -> tuple[str, ...]:
+    from astock_trading.platform.db import connect
+
+    conn = connect()
+    try:
+        rows = conn.execute(
+            """SELECT code, MAX(snapshot_date) AS last_seen
+               FROM signal_history_discoveries
+               WHERE snapshot_date >= ?
+                 AND snapshot_date <= ?
+               GROUP BY code
+               ORDER BY last_seen DESC, code
+               LIMIT ?""",
+            (start, end, int(limit)),
+        ).fetchall()
+    finally:
+        conn.close()
+    return tuple(str(dict(getattr(row, "_mapping", row)).get("code") or "") for row in rows if str(dict(getattr(row, "_mapping", row)).get("code") or ""))
+
+
 def register_research_commands(app: typer.Typer) -> None:
     @app.command("backtest")
     def run_backtest_cmd(
         codes: str = typer.Argument(..., help="逗号分隔股票代码，如 600036,000001,000002"),
         start: str = typer.Argument(..., help="回测开始日期 YYYY-MM-DD"),
         end: str = typer.Argument(..., help="回测结束日期 YYYY-MM-DD"),
-        preset: str = typer.Option("保守验证C", help="策略 preset（对应 strategy.yaml）"),
+        preset: str = typer.Option(DEFAULT_BACKTEST_PRESET, help="策略 preset（对应 strategy.yaml）"),
         initial_cash: float = typer.Option(100000.0, help="初始资金（元）"),
         adjustflag: str = typer.Option("2", help="复权: 2=前复权 1=后复权 3=不复权"),
         use_history_mirror: bool = typer.Option(True, "--history-mirror/--no-history-mirror", help="优先读取历史信号镜像，缺失时回退代理回放"),
@@ -100,8 +124,15 @@ def register_research_commands(app: typer.Typer) -> None:
         scale_in_aggressive_markets: str = typer.Option("", "--scale-in-aggressive-markets", help="允许切换进攻加仓的市场制度，逗号分隔，如 GREEN,YELLOW"),
         scale_in_aggressive_routes: str = typer.Option("", "--scale-in-aggressive-routes", help="允许切换进攻加仓的路线，逗号分隔，如 short_continuation,volume_breakout"),
         scale_in_aggressive_phases: str = typer.Option("", "--scale-in-aggressive-phases", help="允许切换进攻加仓的市场相位，逗号分隔；留空表示不按相位过滤"),
+        commission_bps: Optional[float] = typer.Option(None, "--commission-bps", min=0.0, help="回测成本：佣金 bps，默认 2.5"),
+        min_commission: Optional[float] = typer.Option(None, "--min-commission", min=0.0, help="回测成本：单笔最低佣金，默认 5 元"),
+        stamp_tax_bps: Optional[float] = typer.Option(None, "--stamp-tax-bps", min=0.0, help="回测成本：卖出印花税 bps，默认 5"),
+        transfer_fee_bps: Optional[float] = typer.Option(None, "--transfer-fee-bps", min=0.0, help="回测成本：过户费 bps，默认 0.1"),
+        slippage_bps: Optional[float] = typer.Option(None, "--slippage-bps", min=0.0, help="回测成本：买卖滑点 bps，默认 5"),
         score_dimension_mode: str = typer.Option("full", "--score-dimensions", help="评分维度模式：full 或 tech_fundamental，用于验证资金流维度增量"),
         include_signal_alpha: bool = typer.Option(True, "--signal-alpha/--skip-signal-alpha", help="是否计算路线前瞻收益统计；组合 what-if 可跳过以加速"),
+        reachable_only: bool = typer.Option(False, "--reachable-only/--no-reachable-only", help="只允许历史候选池/评分候选/决策镜像中可发现的买入候选成交"),
+        reachable_lookback_days: int = typer.Option(5, "--reachable-lookback-days", min=0, help="可发现性闸门允许的最近发现窗口（自然日）"),
         trade_output_limit: int = typer.Option(50, "--trade-output-limit", help="JSON 中 trades 保留的最近交易数；0 不输出，负数输出全量；trade_log 始终为全量"),
         progress_log: bool = typer.Option(False, "--progress-log/--quiet-progress", help="向 stderr 输出回测阶段进度，JSON 仍只写 stdout"),
         record_run: bool = typer.Option(False, "--record-run", help="将本次回测运行、完整交易日志和权益曲线写入 MySQL"),
@@ -164,9 +195,16 @@ def register_research_commands(app: typer.Typer) -> None:
             scale_in_aggressive_market_signals=_parse_optional_str_csv(scale_in_aggressive_markets),
             scale_in_aggressive_routes=_parse_optional_str_csv(scale_in_aggressive_routes),
             scale_in_aggressive_phase_buckets=_parse_optional_str_csv(scale_in_aggressive_phases),
+            commission_bps=commission_bps,
+            min_commission=min_commission,
+            stamp_tax_bps=stamp_tax_bps,
+            transfer_fee_bps=transfer_fee_bps,
+            slippage_bps=slippage_bps,
             score_dimension_mode=score_dimension_mode,
             trade_record_limit=None if trade_output_limit < 0 else trade_output_limit,
             include_signal_alpha=include_signal_alpha,
+            reachable_only=reachable_only,
+            reachable_lookback_days=reachable_lookback_days,
             progress_log=progress_log,
             use_stored_data=use_stored_data,
             hydrate_data=hydrate_data,
@@ -245,7 +283,14 @@ def register_research_commands(app: typer.Typer) -> None:
                         "scale_in_aggressive_market_signals": _parse_optional_str_csv(scale_in_aggressive_markets),
                         "scale_in_aggressive_routes": _parse_optional_str_csv(scale_in_aggressive_routes),
                         "scale_in_aggressive_phase_buckets": _parse_optional_str_csv(scale_in_aggressive_phases),
+                        "commission_bps": commission_bps,
+                        "min_commission": min_commission,
+                        "stamp_tax_bps": stamp_tax_bps,
+                        "transfer_fee_bps": transfer_fee_bps,
+                        "slippage_bps": slippage_bps,
                         "score_dimension_mode": score_dimension_mode,
+                        "reachable_only": reachable_only,
+                        "reachable_lookback_days": reachable_lookback_days,
                         "trade_output_limit": trade_output_limit,
                     },
                 )
@@ -323,12 +368,108 @@ def register_research_commands(app: typer.Typer) -> None:
                 f"年化 {_format_metric(metrics.get('annual_return_pct'), '.2f')}%"
             )
 
+    @app.command("replay-production")
+    def replay_production_cmd(
+        start: str = typer.Argument(..., help="重放开始日期 YYYY-MM-DD"),
+        end: str = typer.Argument(..., help="重放结束日期 YYYY-MM-DD"),
+        codes: str = typer.Option("", "--codes", help="逗号分隔股票代码；留空则从历史发现索引读取"),
+        code_limit: int = typer.Option(500, "--code-limit", min=1, help="未显式给 codes 时最多读取的历史发现股票数"),
+        preset: str = typer.Option(DEFAULT_BACKTEST_PRESET, help="策略 preset（对应 strategy.yaml）"),
+        initial_cash: float = typer.Option(100000.0, help="初始资金（元）"),
+        reachable_lookback_days: int = typer.Option(5, "--reachable-lookback-days", min=0, help="可发现性闸门允许的最近发现窗口（自然日）"),
+        load_financials: bool = typer.Option(True, "--financials/--skip-financials", help="是否加载财务维度；正式重放应保持开启"),
+        signal_alpha: bool = typer.Option(True, "--signal-alpha/--no-signal-alpha", help="是否汇总信号前瞻收益；全量性能诊断可关闭"),
+        trade_output_limit: int = typer.Option(50, "--trade-output-limit", help="JSON 中 trades 保留的最近交易数；0 不输出，负数输出全量"),
+        progress_log: bool = typer.Option(False, "--progress-log/--quiet-progress", help="向 stderr 输出重放阶段进度，JSON 仍只写 stdout"),
+        as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+    ):
+        """生产级历史重放：历史镜像 + reachable-only + 已落库数据 + A 股撮合约束。"""
+        from astock_trading.backtest import engine as engine_module
+
+        selected_codes = _parse_str_csv(codes) if codes else _discover_replay_codes(start, end, limit=code_limit)
+        if not selected_codes:
+            payload = {
+                "status": "failed",
+                "error": "未找到可重放股票代码；请先运行 data-sources replay-discovery/index-discoveries，或显式传 --codes",
+                "start": start,
+                "end": end,
+            }
+            if as_json:
+                typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+                raise typer.Exit(1)
+            typer.echo(f"\u274c {payload['error']}", err=True)
+            raise typer.Exit(1)
+
+        output_guard = redirect_stdout(sys.stderr) if as_json else nullcontext()
+        with output_guard:
+            result = engine_module.run_backtest(
+                codes=",".join(selected_codes),
+                start=start,
+                end=end,
+                preset=preset,
+                initial_cash=initial_cash,
+                adjustflag="3",
+                pnl_adjustflag="3",
+                use_history_mirror=True,
+                load_financials=load_financials,
+                reachable_only=True,
+                reachable_lookback_days=reachable_lookback_days,
+                trade_record_limit=None if trade_output_limit < 0 else trade_output_limit,
+                include_signal_alpha=signal_alpha,
+                use_stored_data=True,
+                use_market_bars=True,
+                progress_log=progress_log,
+            )
+        if "error" in result:
+            if as_json:
+                typer.echo(json.dumps({"status": "failed", "error": result["error"], "backtest": result}, ensure_ascii=False, indent=2))
+                raise typer.Exit(1)
+            typer.echo(f"\u274c {result['error']}", err=True)
+            raise typer.Exit(1)
+
+        payload = {
+            "status": "ok",
+            "mode": "production_replay",
+            "start": start,
+            "end": end,
+            "codes": list(selected_codes),
+            "reachable_definition": {
+                "scope": "最近 K 个自然日内进入过历史发现池、评分候选或决策镜像",
+                "lookback_days": reachable_lookback_days,
+                "source": "signal_history_discoveries + signal_history_snapshots",
+            },
+            "point_in_time_contract": {
+                "history_mirror": True,
+                "reachable_only": True,
+                "adjustflag": "3",
+                "pnl_adjustflag": "3",
+                "use_stored_data": True,
+                "signal_alpha": bool(signal_alpha),
+                "notes": [
+                    "日线发现输入使用不复权口径，避免前复权引入未来价格信息。",
+                    "生产重放收益撮合也使用已落库不复权日线，不远程补后复权数据。",
+                    "财务维度由回测引擎按 available_date 选择已披露快照。",
+                    "交易撮合启用 T+1、锁板不可成交和真实成本模型。",
+                ],
+            },
+            "backtest": result,
+        }
+        if as_json:
+            typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+            return
+        typer.echo(f"生产重放 {start} ~ {end} 股票 {len(selected_codes)} 只")
+        typer.echo(
+            f"  净收益: {result.get('total_return_pct', 0):.2f}%  "
+            f"年化: {result.get('annual_return_pct', 0):.2f}%  "
+            f"回撤: {result.get('max_drawdown_pct', 0):.2f}%"
+        )
+
     @app.command("backtest-batch")
     def run_backtest_batch_cmd(
         codes: str = typer.Argument(..., help="逗号分隔股票代码，支持较大股票池"),
         start: str = typer.Argument(..., help="回测开始日期 YYYY-MM-DD"),
         end: str = typer.Argument(..., help="回测结束日期 YYYY-MM-DD"),
-        preset: str = typer.Option("保守验证C", help="策略 preset（对应 strategy.yaml）"),
+        preset: str = typer.Option(DEFAULT_BACKTEST_PRESET, help="策略 preset（对应 strategy.yaml）"),
         initial_cash: float = typer.Option(100000.0, help="每个批次的初始资金（元）"),
         adjustflag: str = typer.Option("2", help="复权: 2=前复权 1=后复权 3=不复权"),
         use_history_mirror: bool = typer.Option(True, "--history-mirror/--no-history-mirror", help="优先读取历史信号镜像，缺失时回退代理回放"),
@@ -357,7 +498,14 @@ def register_research_commands(app: typer.Typer) -> None:
         watch_trial_require_above_ma120_phases: str = typer.Option("", "--watch-trial-require-above-ma120-phases", help="观察路线升级试买要求指数站上 MA120 的市场相位，逗号分隔；仅用于研究"),
         watch_loss_cooldown_days: Optional[int] = typer.Option(None, "--watch-loss-cooldown-days", min=0, help="回测情景：亏损卖出后暂停观察/试买模拟成交的交易日数；仅用于研究"),
         watch_loss_cooldown_phases: str = typer.Option("", "--watch-loss-cooldown-phases", help="回测情景：观察层亏损冷却只在指定市场相位生效，逗号分隔；留空表示所有相位"),
+        commission_bps: Optional[float] = typer.Option(None, "--commission-bps", min=0.0, help="回测成本：佣金 bps，默认 2.5"),
+        min_commission: Optional[float] = typer.Option(None, "--min-commission", min=0.0, help="回测成本：单笔最低佣金，默认 5 元"),
+        stamp_tax_bps: Optional[float] = typer.Option(None, "--stamp-tax-bps", min=0.0, help="回测成本：卖出印花税 bps，默认 5"),
+        transfer_fee_bps: Optional[float] = typer.Option(None, "--transfer-fee-bps", min=0.0, help="回测成本：过户费 bps，默认 0.1"),
+        slippage_bps: Optional[float] = typer.Option(None, "--slippage-bps", min=0.0, help="回测成本：买卖滑点 bps，默认 5"),
         score_dimension_mode: str = typer.Option("full", "--score-dimensions", help="评分维度模式：full 或 tech_fundamental，用于验证资金流维度增量"),
+        reachable_only: bool = typer.Option(False, "--reachable-only/--no-reachable-only", help="只允许历史候选池/评分候选/决策镜像中可发现的买入候选成交"),
+        reachable_lookback_days: int = typer.Option(5, "--reachable-lookback-days", min=0, help="可发现性闸门允许的最近发现窗口（自然日）"),
         signal_output_limit: int = typer.Option(200, "--signal-output-limit", min=0, help="JSON 中保留的原始信号行数；0 表示不输出原始行，完整拆分可调大"),
         progress_log: bool = typer.Option(False, "--progress-log/--quiet-progress", help="向 stderr 输出批次和数据阶段进度，JSON 仍只写 stdout"),
         as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
@@ -407,7 +555,14 @@ def register_research_commands(app: typer.Typer) -> None:
                 ),
                 watch_loss_cooldown_days=watch_loss_cooldown_days,
                 watch_loss_cooldown_phases=_parse_optional_str_csv(watch_loss_cooldown_phases),
+                commission_bps=2.5 if commission_bps is None else commission_bps,
+                min_commission=5.0 if min_commission is None else min_commission,
+                stamp_tax_bps=5.0 if stamp_tax_bps is None else stamp_tax_bps,
+                transfer_fee_bps=0.1 if transfer_fee_bps is None else transfer_fee_bps,
+                slippage_bps=5.0 if slippage_bps is None else slippage_bps,
                 score_dimension_mode=score_dimension_mode,
+                reachable_only=reachable_only,
+                reachable_lookback_days=reachable_lookback_days,
                 progress_log=progress_log,
                 batch_size=batch_size,
                 batch_timeout_seconds=batch_timeout_seconds,

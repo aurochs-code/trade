@@ -35,6 +35,7 @@ from astock_trading.platform.pipeline_policy import new_trade_guard_decision
 from astock_trading.platform.time import MARKET_TZ, is_market_weekday, iso_to_local, local_date_bounds_utc, local_now
 from astock_trading.platform.time import local_now_str, local_today, local_today_str
 from astock_trading.strategy.models import MarketSignal, Style
+from astock_trading.strategy.route_policy import iter_route_policy_entries, route_policy_values
 from astock_trading.risk.rules import check_exit_signals, get_risk_params
 
 _logger = logging.getLogger(__name__)
@@ -1038,15 +1039,41 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
     if trade_count < max_daily_trades and window_state["buy_open"]:
         # 刷新资金（卖出后可能变化）
         if sells:
+            positions = paper.get_positions()
             balance = paper.get_balance()
             exposure_pct, available_cash = paper.get_exposure()
 
-        remaining_trades = max_daily_trades - trade_count
-        buys = _score_and_buy(
-            ctx, paper, balance, exposure_pct, available_cash,
-            market_state, run_id, cfg, dry_run, remaining_trades,
-            diagnostics=diagnostics,
-        )
+        buy_diagnostics = _buy_side_diagnostics(ctx, run_id, cfg)
+        if buy_diagnostics:
+            diagnostics.extend(buy_diagnostics)
+            _logger.warning(
+                "[auto_trade] 买入前置检查未通过: "
+                + ", ".join(d["reason"] for d in buy_diagnostics)
+            )
+        else:
+            remaining_trades = max_daily_trades - trade_count
+            scale_in_buys = _score_and_scale_in(
+                ctx, paper, positions, balance, exposure_pct, available_cash,
+                market_state, run_id, cfg, dry_run, remaining_trades,
+                diagnostics=diagnostics,
+                prechecked=True,
+            )
+            buys.extend(scale_in_buys)
+            trade_count += len(scale_in_buys)
+
+            if trade_count < max_daily_trades:
+                if scale_in_buys:
+                    positions = paper.get_positions()
+                    balance = paper.get_balance()
+                    exposure_pct, available_cash = paper.get_exposure()
+                remaining_trades = max_daily_trades - trade_count
+                new_buys = _score_and_buy(
+                    ctx, paper, balance, exposure_pct, available_cash,
+                    market_state, run_id, cfg, dry_run, remaining_trades,
+                    diagnostics=diagnostics,
+                    prechecked=True,
+                )
+                buys.extend(new_buys)
     elif trade_count < max_daily_trades:
         _logger.info("[auto_trade] 当前不在买入时间窗口，跳过自动买入")
 
@@ -1126,7 +1153,11 @@ def run(ctx: PipelineContext, run_id: str) -> dict:
             "name": b.get("name", ""), "code": b.get("code", ""),
             "shares": b.get("shares", 0), "price": b.get("price", 0),
             "amount": b.get("shares", 0) * b.get("price", 0),
-            "reason": f"[BUY_CORE_POOL] 评分 {b.get('score', 0):.1f}",
+            "reason": (
+                "[SCALE_IN] 趋势加仓"
+                if b.get("reason") == "scale_in_trend_confirmed"
+                else f"[BUY_CORE_POOL] 评分 {b.get('score', 0):.1f}"
+            ),
         })
     if trade_rows:
         ctx.obsidian.append_paper_trade_log(trade_rows)
@@ -1318,6 +1349,392 @@ def _execute_sell(
 # 买入逻辑
 # ======================================================================
 
+def _score_and_scale_in(
+    ctx: PipelineContext,
+    paper: PaperAccount,
+    positions: list[PaperPosition],
+    balance: PaperBalance,
+    exposure_pct: float,
+    available_cash: float,
+    market_state,
+    run_id: str,
+    cfg: dict,
+    dry_run: bool,
+    max_trades: int,
+    diagnostics: list[dict] | None = None,
+    prechecked: bool = False,
+) -> list[dict]:
+    """对已有盈利持仓做趋势确认加仓，不把观察/试买意向用于首次买入。"""
+    scale_cfg = cfg.get("scale_in") or {}
+    if not scale_cfg.get("enabled", False):
+        return []
+    if not positions or max_trades <= 0:
+        return []
+    if getattr(market_state, "signal", None) == MarketSignal.CLEAR:
+        _logger.info("[auto_trade] 大盘 CLEAR，跳过趋势加仓")
+        return []
+
+    buy_diagnostics = [] if prechecked else _buy_side_diagnostics(ctx, run_id, cfg)
+    if buy_diagnostics:
+        if diagnostics is not None:
+            diagnostics.extend(buy_diagnostics)
+        _logger.warning(
+            "[auto_trade] 加仓前置检查未通过: "
+            + ", ".join(d["reason"] for d in buy_diagnostics)
+        )
+        return []
+
+    pos_cfg = ctx.cfg.get("risk", {}).get("position", {})
+    total_max = float(pos_cfg.get("total_max", 0.60) or 0.0)
+    weekly_max = int(pos_cfg.get("weekly_max", 2) or 0)
+    weekly_buy_count = _weekly_paper_buy_count(ctx)
+    remaining = min(max_trades, max(0, weekly_max - weekly_buy_count))
+    if remaining <= 0:
+        _logger.info(f"[auto_trade] 本周已买 {weekly_buy_count}/{weekly_max}，跳过趋势加仓")
+        return []
+    if exposure_pct >= total_max:
+        _logger.info(f"[auto_trade] 仓位 {exposure_pct:.1%} >= {total_max:.0%}，跳过趋势加仓")
+        return []
+
+    current = local_now()
+    now = current.astimezone(timezone.utc) if current.tzinfo else current.replace(tzinfo=timezone.utc)
+    max_age_hours = _buy_guard_max_age_hours(ctx, cfg)
+    decisions_by_code = _fresh_scale_in_decisions(ctx, cfg, scale_cfg, now, max_age_hours)
+    if not decisions_by_code:
+        return []
+
+    position_by_code = {str(pos.code): pos for pos in positions if pos.shares > 0}
+    candidates: list[tuple[PaperPosition, dict]] = []
+    for code, pos in position_by_code.items():
+        event = decisions_by_code.get(code)
+        if not event:
+            continue
+        if _scale_in_execution_status(
+            ctx,
+            pos,
+            event,
+            market_state,
+            scale_cfg,
+            balance=balance,
+            now=now,
+        )["executable"]:
+            candidates.append((pos, event))
+
+    if not candidates:
+        return []
+
+    candidates.sort(
+        key=lambda item: _scale_in_sort_key(ctx, item[1], market_state),
+        reverse=True,
+    )
+
+    buys: list[dict] = []
+    total_asset = float(balance.total_asset or 0.0)
+    current_exposure = float(exposure_pct or 0.0)
+    cash = float(available_cash or 0.0)
+
+    for pos, event in candidates:
+        if remaining <= 0:
+            break
+        payload = event.get("payload", {}) or {}
+        target_pct = _scale_in_target_position_pct(
+            pos,
+            payload,
+            market_state,
+            scale_cfg,
+            balance=balance,
+        )
+        current_pct = _position_pct(pos, balance)
+        remaining_pct = max(0.0, total_max - current_exposure)
+        target_pct = min(target_pct, current_pct + remaining_pct)
+        if target_pct <= current_pct:
+            continue
+
+        add_value = max(0.0, target_pct * total_asset - float(pos.market_value or 0.0))
+        if cash > 0:
+            add_value = min(add_value, cash)
+        price = float(pos.current_price or 0.0)
+        shares = int(add_value / price / 100) * 100 if price > 0 else 0
+        if shares <= 0:
+            continue
+
+        buy_info = _execute_buy(
+            paper,
+            pos.code,
+            pos.name,
+            shares,
+            float(pos.current_price or 0.0),
+            run_id,
+            ctx,
+            dry_run,
+            source_event_id=event.get("event_id", ""),
+            source_score_event_id=payload.get("source_score_event_id", ""),
+            primary_strategy_route=payload.get("primary_strategy_route") or "",
+            primary_strategy_route_label=(
+                payload.get("primary_strategy_route_label")
+                or _route_label_for_key(payload.get("primary_strategy_route"))
+                or ""
+            ),
+            reason="scale_in_trend_confirmed",
+            position_pct=round(target_pct, 4),
+        )
+        if buy_info:
+            buy_info["score"] = payload.get("score", 0)
+            buy_info["position_pct"] = round(target_pct, 4)
+            buy_info["reason"] = "scale_in_trend_confirmed"
+            buys.append(buy_info)
+            remaining -= 1
+            cash -= shares * float(pos.current_price or 0.0)
+            current_exposure += max(0.0, target_pct - current_pct)
+
+    return buys
+
+
+def _fresh_scale_in_decisions(
+    ctx: PipelineContext,
+    cfg: dict,
+    scale_cfg: dict,
+    now: datetime,
+    max_age_hours: int,
+) -> dict[str, dict]:
+    allowed_actions = {str(item) for item in scale_cfg.get("actions", ("BUY", "WATCH")) if str(item)}
+    fresh = _fresh_decision_events(ctx, now, max_age_hours)
+    result: dict[str, dict] = {}
+    for event in fresh:
+        if not _buy_signal_matches_current_window(event, cfg, now):
+            continue
+        payload = event.get("payload", {}) or {}
+        action = str(payload.get("action") or "")
+        if allowed_actions and action not in allowed_actions:
+            continue
+        code = str(payload.get("code") or "")
+        if not code:
+            continue
+        previous = result.get(code)
+        if previous and str(previous.get("occurred_at", "")) >= str(event.get("occurred_at", "")):
+            continue
+        result[code] = event
+    return result
+
+
+def _scale_in_execution_status(
+    ctx: PipelineContext,
+    pos: PaperPosition,
+    event: dict,
+    market_state,
+    scale_cfg: dict,
+    *,
+    balance: PaperBalance,
+    now: datetime,
+) -> dict:
+    payload = event.get("payload", {}) or {}
+    signal = str(
+        payload.get("market_signal")
+        or getattr(getattr(market_state, "signal", None), "value", "")
+        or ""
+    )
+    allowed_markets = {str(item) for item in scale_cfg.get("markets", []) or [] if str(item)}
+    if allowed_markets and signal not in allowed_markets:
+        return {"executable": False, "reason": "scale_in_market_blocked"}
+
+    route = str(payload.get("primary_strategy_route") or "unknown")
+    allowed_routes = {str(item) for item in scale_cfg.get("routes", []) or [] if str(item)}
+    if allowed_routes and route not in allowed_routes:
+        return {"executable": False, "reason": "scale_in_route_blocked"}
+
+    if float(payload.get("score", 0.0) or 0.0) < float(scale_cfg.get("score_min", 0.0) or 0.0):
+        return {"executable": False, "reason": "scale_in_score_below_min"}
+    if bool(scale_cfg.get("require_entry_signal", True)) and not bool(payload.get("entry_signal", False)):
+        return {"executable": False, "reason": "scale_in_entry_signal_missing"}
+
+    if _paper_scale_in_count(ctx, pos.code) >= int(scale_cfg.get("max_adds", 0) or 0):
+        return {"executable": False, "reason": "scale_in_max_adds"}
+    latest_scale_in = _latest_paper_scale_in_at(ctx, pos.code)
+    if latest_scale_in:
+        min_days = int(scale_cfg.get("min_days_between", 0) or 0)
+        latest_local = latest_scale_in.astimezone(MARKET_TZ)
+        current_local = now.astimezone(MARKET_TZ)
+        if (current_local.date() - latest_local.date()).days < min_days:
+            return {"executable": False, "reason": "scale_in_too_soon"}
+
+    if float(pos.current_price or 0.0) <= 0 or float(pos.avg_cost or 0.0) <= 0:
+        return {"executable": False, "reason": "scale_in_missing_price"}
+    pnl_pct = _position_pnl_pct(pos)
+    if pnl_pct < float(scale_cfg.get("profit_threshold", 0.0) or 0.0):
+        return {"executable": False, "reason": "scale_in_profit_below_threshold"}
+
+    target_pct = _scale_in_target_position_pct(pos, payload, market_state, scale_cfg, balance=balance)
+    if target_pct <= _position_pct(pos, balance):
+        return {"executable": False, "reason": "scale_in_target_reached"}
+    return {"executable": True, "reason": "scale_in_trend_confirmed"}
+
+
+def _scale_in_target_position_pct(
+    pos: PaperPosition,
+    payload: dict,
+    market_state,
+    scale_cfg: dict,
+    *,
+    balance: PaperBalance,
+) -> float:
+    max_pct = scale_cfg.get("max_position_pct")
+    step_pct = scale_cfg.get("step_position_pct", 0.0)
+    if _scale_in_aggressive_context(payload, market_state, scale_cfg):
+        max_pct = scale_cfg.get("aggressive_max_position_pct", max_pct)
+        step_pct = scale_cfg.get("aggressive_step_position_pct", step_pct)
+    if max_pct is None:
+        max_pct = scale_cfg.get("max_position_pct", 0.0)
+    current_pct = _position_pct(pos, balance)
+    return round(min(float(max_pct or 0.0), current_pct + float(step_pct or 0.0)), 4)
+
+
+def _scale_in_aggressive_context(payload: dict, market_state, scale_cfg: dict) -> bool:
+    if scale_cfg.get("aggressive_max_position_pct") is None:
+        return False
+    signal = str(
+        payload.get("market_signal")
+        or getattr(getattr(market_state, "signal", None), "value", "")
+        or ""
+    )
+    allowed_markets = {str(item) for item in scale_cfg.get("aggressive_markets", []) or [] if str(item)}
+    if allowed_markets and signal not in allowed_markets:
+        return False
+    route = str(payload.get("primary_strategy_route") or "unknown")
+    allowed_routes = {str(item) for item in scale_cfg.get("aggressive_routes", []) or [] if str(item)}
+    if allowed_routes and route not in allowed_routes:
+        return False
+    allowed_phases = {str(item) for item in scale_cfg.get("aggressive_phases", []) or [] if str(item)}
+    if allowed_phases and _auto_trade_market_phase_bucket(getattr(market_state, "detail", {}) or {}) not in allowed_phases:
+        return False
+    return True
+
+
+def _scale_in_sort_key(ctx: PipelineContext, event: dict, market_state) -> tuple[float, float]:
+    payload = event.get("payload", {}) or {}
+    policy = _route_execution_policy_for_candidate(ctx, payload, market_state)
+    return (
+        float(policy.get("priority", 0.0) or 0.0),
+        float(payload.get("score", 0.0) or 0.0),
+    )
+
+
+def _weekly_paper_buy_count(ctx: PipelineContext) -> int:
+    today = local_now()
+    monday = today.date() - timedelta(days=today.weekday())
+    since, _ = local_date_bounds_utc(monday)
+    weekly_events = ctx.event_store.query(
+        event_type=AUTO_TRADE_EXECUTED,
+        since=since,
+    )
+    return sum(
+        1 for ev in weekly_events
+        if ev.get("payload", {}).get("side") == "buy"
+        and ev.get("payload", {}).get("status") in ("filled", "dry_run")
+        and ev.get("metadata", {}).get("account") == "paper"
+    )
+
+
+def _paper_scale_in_count(ctx: PipelineContext, code: str) -> int:
+    return sum(1 for event in _paper_scale_in_events(ctx, code))
+
+
+def _latest_paper_scale_in_at(ctx: PipelineContext, code: str) -> datetime | None:
+    latest: datetime | None = None
+    for event in _paper_scale_in_events(ctx, code):
+        occurred = _parse_iso(event.get("occurred_at", ""))
+        if occurred and (latest is None or occurred > latest):
+            latest = occurred
+    return latest
+
+
+def _paper_scale_in_events(ctx: PipelineContext, code: str) -> list[dict]:
+    events = ctx.event_store.query(
+        event_type=AUTO_TRADE_EXECUTED,
+        stream=f"paper:{code}",
+        limit=200,
+    )
+    result = []
+    for event in events:
+        if event.get("metadata", {}).get("account") != "paper":
+            continue
+        payload = event.get("payload", {}) or {}
+        if payload.get("side") != "buy":
+            continue
+        if payload.get("status") not in {"filled", "dry_run"}:
+            continue
+        if payload.get("code") != code:
+            continue
+        if payload.get("reason") == "scale_in_trend_confirmed":
+            result.append(event)
+    return result
+
+
+def _position_pnl_pct(pos: PaperPosition) -> float:
+    raw = float(getattr(pos, "pnl_pct", 0.0) or 0.0)
+    if abs(raw) > 2:
+        return raw / 100
+    if raw:
+        return raw
+    avg_cost = float(getattr(pos, "avg_cost", 0.0) or 0.0)
+    current_price = float(getattr(pos, "current_price", 0.0) or 0.0)
+    if avg_cost <= 0:
+        return 0.0
+    return (current_price - avg_cost) / avg_cost
+
+
+def _position_pct(pos: PaperPosition, balance: PaperBalance) -> float:
+    total_asset = float(getattr(balance, "total_asset", 0.0) or 0.0)
+    if total_asset <= 0:
+        return 0.0
+    market_value = float(getattr(pos, "market_value", 0.0) or 0.0)
+    if market_value <= 0:
+        market_value = float(pos.current_price or 0.0) * float(pos.shares or 0)
+    return market_value / total_asset
+
+
+def _auto_trade_market_phase_bucket(detail: dict) -> str:
+    if not isinstance(detail, dict):
+        return "unknown"
+    explicit = str(detail.get("market_phase_bucket") or "")
+    if explicit:
+        return explicit
+    deviation = _float_or_none(detail.get("index_ma20_deviation_pct"))
+    if deviation is None:
+        price = _float_or_none(detail.get("price") or detail.get("index_price"))
+        ma20 = _float_or_none(detail.get("ma20") or detail.get("index_ma20"))
+        if price is not None and ma20 and ma20 > 0:
+            deviation = (price / ma20 - 1) * 100
+    slope = _float_or_none(
+        detail.get("index_ma20_slope_5d_pct")
+        or detail.get("ma20_slope_5d_pct")
+        or detail.get("slope_5d_pct")
+    )
+    if deviation is None or slope is None:
+        return "unknown"
+    if deviation < -5:
+        distance = "deep_below_ma20"
+    elif deviation < 0:
+        distance = "below_ma20"
+    elif deviation <= 3:
+        distance = "near_ma20"
+    else:
+        distance = "extended_above_ma20"
+    if slope >= 0.5:
+        trend = "slope_up"
+    elif slope <= -0.5:
+        trend = "slope_down"
+    else:
+        trend = "slope_flat"
+    return f"{distance}_{trend}"
+
+
+def _float_or_none(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _score_and_buy(
     ctx: PipelineContext,
     paper: PaperAccount,
@@ -1330,11 +1747,18 @@ def _score_and_buy(
     dry_run: bool,
     max_trades: int,
     diagnostics: list[dict] | None = None,
+    prechecked: bool = False,
 ) -> list[dict]:
     """从公共池读取评分，决策后自动买入。"""
 
-    # 大盘 RED/CLEAR 禁止买入
-    if market_state.signal in (MarketSignal.RED, MarketSignal.CLEAR):
+    # 大盘 RED/CLEAR 默认禁止新开仓；RED 只有显式路线策略可小仓放行。
+    if (
+        market_state.signal == MarketSignal.CLEAR
+        or (
+            market_state.signal == MarketSignal.RED
+            and not _market_has_route_block_override(ctx, market_state)
+        )
+    ):
         _logger.info(f"[auto_trade] 大盘 {market_state.signal.value}，禁止买入")
         return []
 
@@ -1347,28 +1771,13 @@ def _score_and_buy(
         _logger.info(f"[auto_trade] 仓位 {exposure_pct:.1%} >= {total_max:.0%}，禁止买入")
         return []
 
-    # 本周模拟盘买入次数
-    from datetime import timedelta
-    today = local_now()
-    monday = today.date() - timedelta(days=today.weekday())
-    since, _ = local_date_bounds_utc(monday)
-    weekly_events = ctx.event_store.query(
-        event_type=AUTO_TRADE_EXECUTED,
-        since=since,
-    )
-    weekly_buy_count = sum(
-        1 for ev in weekly_events
-        if ev.get("payload", {}).get("side") == "buy"
-        and ev.get("payload", {}).get("status") in ("filled", "dry_run")
-        and ev.get("metadata", {}).get("account") == "paper"
-    )
-
+    weekly_buy_count = _weekly_paper_buy_count(ctx)
     weekly_max = pos_cfg.get("weekly_max", 2)
     if weekly_buy_count >= weekly_max:
         _logger.info(f"[auto_trade] 本周已买 {weekly_buy_count}/{weekly_max}，禁止买入")
         return []
 
-    buy_diagnostics = _buy_side_diagnostics(ctx, run_id, cfg)
+    buy_diagnostics = [] if prechecked else _buy_side_diagnostics(ctx, run_id, cfg)
     if buy_diagnostics:
         if diagnostics is not None:
             diagnostics.extend(buy_diagnostics)
@@ -1570,6 +1979,11 @@ def _buy_candidate_position_pct(
     remaining_pct: float,
 ) -> float:
     policy = _route_execution_policy_for_candidate(ctx, candidate, market_state)
+    signal = getattr(market_state, "signal", None)
+    if signal == MarketSignal.CLEAR:
+        return 0.0
+    if signal == MarketSignal.RED and not bool(policy.get("allow_market_blocked")):
+        return 0.0
     pct = None
     if policy.get("position_pct") is not None:
         pct = float(policy.get("position_pct") or 0.0)
@@ -1592,15 +2006,56 @@ def _route_execution_policy_for_candidate(ctx: PipelineContext, candidate: dict,
         or ""
     )
     route = str(candidate.get("primary_strategy_route") or candidate.get("source_route") or "unknown")
-    for key in (f"{signal}:{route}", f"*:{route}", route):
-        policy = policy_map.get(key)
-        if not isinstance(policy, dict):
+    for _key, policy in iter_route_policy_entries(policy_map, signal, route):
+        if not _route_execution_policy_allows_action(policy, "BUY"):
             continue
         score_min = policy.get("score_min")
         if score_min is not None and float(candidate.get("score", 0.0) or 0.0) < float(score_min or 0.0):
-            return {}
+            continue
+        score_max = policy.get("score_max")
+        if score_max is not None and float(candidate.get("score", 0.0) or 0.0) > float(score_max or 0.0):
+            continue
+        detail = getattr(market_state, "detail", {}) or {}
+        if policy.get("require_above_ma120") is not None:
+            if bool(detail.get("above_ma120")) is not bool(policy.get("require_above_ma120")):
+                continue
+        min_ma120_slope = policy.get("min_index_ma120_slope_20d_pct")
+        if min_ma120_slope is not None:
+            slope = _float_or_none(detail.get("index_ma120_slope_20d_pct"))
+            if slope is None or slope < float(min_ma120_slope):
+                continue
+        phases = {str(item) for item in policy.get("phase_buckets", []) or [] if str(item)}
+        if phases and _auto_trade_market_phase_bucket(detail) not in phases:
+            continue
         return policy
     return {}
+
+
+def _market_has_route_block_override(ctx: PipelineContext, market_state) -> bool:
+    if getattr(market_state, "signal", None) != MarketSignal.RED:
+        return False
+    policy_map = (
+        ctx.cfg.get("scoring", {}).get("route_execution_policy")
+        or ctx.cfg.get("auto_trade", {}).get("route_execution_policy")
+        or {}
+    )
+    if not isinstance(policy_map, dict):
+        return False
+    prefix = f"{MarketSignal.RED.value}:"
+    for key, value in policy_map.items():
+        if not str(key).startswith(prefix):
+            continue
+        for policy in route_policy_values({str(key): value}):
+            if bool(policy.get("allow_market_blocked")):
+                return True
+    return False
+
+
+def _route_execution_policy_allows_action(policy: dict, action: str) -> bool:
+    actions = policy.get("actions")
+    if actions is None:
+        return action == "BUY"
+    return action in {str(item) for item in actions or () if str(item)}
 
 
 def _recent_paper_buy_keys(ctx: PipelineContext, *, since: str) -> dict[str, set[str]]:
@@ -1642,6 +2097,8 @@ def _execute_buy(
     source_score_event_id: str = "",
     primary_strategy_route: str = "",
     primary_strategy_route_label: str = "",
+    reason: str = "",
+    position_pct: float | None = None,
 ) -> dict | None:
     """执行模拟盘买入。"""
     info = {
@@ -1655,6 +2112,10 @@ def _execute_buy(
         "source_event_id": source_event_id,
         "source_score_event_id": source_score_event_id,
     }
+    if reason:
+        info["reason"] = reason
+    if position_pct is not None:
+        info["position_pct"] = position_pct
     if primary_strategy_route:
         info["primary_strategy_route"] = primary_strategy_route
     if primary_strategy_route_label:

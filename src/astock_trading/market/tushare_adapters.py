@@ -355,6 +355,8 @@ def _dragon_tiger_stock(row: dict) -> dict:
 class TushareMarketAdapter:
     """A-share daily quote, K-line and index data from Tushare Pro."""
 
+    realtime_quote = False
+
     def __init__(self, client: TushareClient | None = None):
         self._client = _client_or_default(client)
 

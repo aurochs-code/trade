@@ -24,6 +24,7 @@ from astock_trading.platform.cli.manual_trades import manual_trades_app
 from astock_trading.platform.cli.market_intel import market_intel_app
 from astock_trading.platform.cli.market_data import register_market_data_commands
 from astock_trading.platform.cli.notifications import notify_app
+from astock_trading.platform.cli.ops import ops_app
 from astock_trading.platform.cli.paper import paper_app
 from astock_trading.platform.cli.pipelines import register_pipeline_commands
 from astock_trading.platform.cli.research import register_research_commands
@@ -53,6 +54,7 @@ app.add_typer(screener_app)
 app.add_typer(stock_app)
 app.add_typer(strategy_app)
 app.add_typer(notify_app)
+app.add_typer(ops_app)
 app.add_typer(market_intel_app)
 app.add_typer(history_app)
 app.add_typer(review_app)

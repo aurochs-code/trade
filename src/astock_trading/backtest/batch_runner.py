@@ -48,11 +48,18 @@ class BacktestBatchConfig:
     execute_watch_trial_require_above_ma60_phases: tuple[str, ...] | None = None
     execute_watch_trial_require_above_ma120_phases: tuple[str, ...] | None = None
     score_dimension_mode: str = "full"
+    reachable_only: bool = False
+    reachable_lookback_days: int = 5
     load_financials: bool = True
     use_stored_data: bool = False
     hydrate_data: bool = False
     use_market_bars: bool = False
     hydrate_market_bars: bool = False
+    commission_bps: float = 2.5
+    min_commission: float = 5.0
+    stamp_tax_bps: float = 5.0
+    transfer_fee_bps: float = 0.1
+    slippage_bps: float = 5.0
     batch_size: int = 8
     batch_timeout_seconds: float = 240.0
     split_on_timeout: bool = True
@@ -139,11 +146,18 @@ def run_batched_backtest(
                 cfg.execute_watch_trial_require_above_ma120_phases or ()
             ),
             "score_dimension_mode": cfg.score_dimension_mode,
+            "reachable_only": cfg.reachable_only,
+            "reachable_lookback_days": cfg.reachable_lookback_days,
             "load_financials": cfg.load_financials,
             "use_stored_data": cfg.use_stored_data,
             "hydrate_data": cfg.hydrate_data,
             "use_market_bars": cfg.use_market_bars,
             "hydrate_market_bars": cfg.hydrate_market_bars,
+            "commission_bps": cfg.commission_bps,
+            "min_commission": cfg.min_commission,
+            "stamp_tax_bps": cfg.stamp_tax_bps,
+            "transfer_fee_bps": cfg.transfer_fee_bps,
+            "slippage_bps": cfg.slippage_bps,
         },
         "coverage": {
             "requested_codes": len(normalized_codes),
@@ -154,6 +168,10 @@ def run_batched_backtest(
             "signal_sample_size": len(all_signals),
         },
         "execution_semantics": _execution_semantics(cfg),
+        "discovery_reachability": _aggregate_reachability(
+            [item["result"] for item in successful_batches],
+            cfg,
+        ),
         "portfolio_summary": _portfolio_summary([item["result"] for item in successful_batches]),
         "batch_reports": [
             _compact_batch_report(item["codes"], item["result"])
@@ -183,15 +201,23 @@ def _execution_semantics(cfg: BacktestBatchConfig) -> dict[str, Any]:
     loss_cooldown_enabled = bool(cfg.watch_loss_cooldown_days and cfg.watch_loss_cooldown_days > 0)
     research_enabled = bool(watch_trial_enabled or trial_buy_enabled or loss_cooldown_enabled)
     notes = [
-        "默认只执行正式 BUY；route_execution_policy 默认仅用于 BUY 排序和仓位覆盖。",
+        "默认只执行正式 BUY；route_execution_policy 可用于 BUY 排序、仓位覆盖和显式路线正式化。",
     ]
     if research_enabled:
         notes.append("本次批量回测包含显式研究 what-if：允许部分 WATCH/TRIAL_BUY 按规则模拟成交。")
     if loss_cooldown_enabled:
         notes.append("本次批量回测包含观察层亏损冷却：亏损卖出后暂停观察/试买模拟成交。")
+    if cfg.reachable_only:
+        notes.append("本次批量回测启用可发现性闸门：买入候选必须在历史候选池、评分候选或决策镜像中出现过。")
     return {
         "mode": "research_what_if" if research_enabled else "production_buy_only",
         "buy_only": not research_enabled,
+        "t_plus_one": True,
+        "signal_execution_lag": "next_trading_day_open",
+        "limit_price_model": "execution_price_near_limit_blocked",
+        "cost_model": "commission_stamp_transfer_slippage",
+        "reachable_only": bool(cfg.reachable_only),
+        "reachable_lookback_days": int(cfg.reachable_lookback_days or 0),
         "watch_trial_enabled": watch_trial_enabled,
         "trial_buy_enabled": trial_buy_enabled,
         "watch_loss_cooldown_days": int(cfg.watch_loss_cooldown_days or 0),
@@ -208,6 +234,33 @@ def _execution_semantics(cfg: BacktestBatchConfig) -> dict[str, Any]:
         ),
         "route_policy_default_actions": ["BUY"],
         "notes": notes,
+    }
+
+
+def _aggregate_reachability(results: list[dict[str, Any]], cfg: BacktestBatchConfig) -> dict[str, Any]:
+    totals: dict[str, Any] = {
+        "candidate_checks": 0,
+        "reachable_candidates": 0,
+        "blocked_candidates": 0,
+        "discovery_sources": {},
+        "blocked_reasons": {},
+        "blocked_codes": {},
+    }
+    for result in results:
+        item = result.get("discovery_reachability") or {}
+        totals["candidate_checks"] += int(item.get("candidate_checks") or 0)
+        totals["reachable_candidates"] += int(item.get("reachable_candidates") or 0)
+        totals["blocked_candidates"] += int(item.get("blocked_candidates") or 0)
+        for key in ("discovery_sources", "blocked_reasons", "blocked_codes"):
+            for name, count in (item.get(key) or {}).items():
+                totals[key][str(name)] = int(totals[key].get(str(name), 0)) + int(count or 0)
+    checks = int(totals["candidate_checks"] or 0)
+    reachable = int(totals["reachable_candidates"] or 0)
+    return {
+        "enabled": bool(cfg.reachable_only),
+        "lookback_days": int(cfg.reachable_lookback_days or 0),
+        **totals,
+        "reachable_buy_rate_pct": round(reachable / checks * 100, 2) if checks else 0.0,
     }
 
 
@@ -337,12 +390,19 @@ def _run_batch_in_process(
                 else list(config.execute_watch_trial_require_above_ma120_phases)
             ),
             "score_dimension_mode": config.score_dimension_mode,
+            "reachable_only": config.reachable_only,
+            "reachable_lookback_days": config.reachable_lookback_days,
             "load_financials": config.load_financials,
             "progress_log": config.progress_log,
             "use_stored_data": config.use_stored_data,
             "hydrate_data": config.hydrate_data,
             "use_market_bars": config.use_market_bars,
             "hydrate_market_bars": config.hydrate_market_bars,
+            "commission_bps": config.commission_bps,
+            "min_commission": config.min_commission,
+            "stamp_tax_bps": config.stamp_tax_bps,
+            "transfer_fee_bps": config.transfer_fee_bps,
+            "slippage_bps": config.slippage_bps,
             "result_path": result_path,
         }),
     )
@@ -420,6 +480,8 @@ def _run_backtest_child(queue: Any, payload: dict[str, Any]) -> None:
                     else tuple(payload.get("execute_watch_trial_require_above_ma120_phases") or ())
                 ),
                 score_dimension_mode=payload["score_dimension_mode"],
+                reachable_only=bool(payload.get("reachable_only", False)),
+                reachable_lookback_days=int(payload.get("reachable_lookback_days", 5) or 0),
                 signal_record_limit=None,
                 load_financials=payload["load_financials"],
                 progress_log=payload["progress_log"],
@@ -427,6 +489,11 @@ def _run_backtest_child(queue: Any, payload: dict[str, Any]) -> None:
                 hydrate_data=payload["hydrate_data"],
                 use_market_bars=payload["use_market_bars"],
                 hydrate_market_bars=payload["hydrate_market_bars"],
+                commission_bps=payload.get("commission_bps"),
+                min_commission=payload.get("min_commission"),
+                stamp_tax_bps=payload.get("stamp_tax_bps"),
+                transfer_fee_bps=payload.get("transfer_fee_bps"),
+                slippage_bps=payload.get("slippage_bps"),
             )
         with open(payload["result_path"], "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False)

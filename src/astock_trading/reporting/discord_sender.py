@@ -68,6 +68,8 @@ def _api_request(
 ) -> dict:
     """发送 Discord API 请求，带指数退避重试。"""
     url = f"{API_BASE}{endpoint}"
+    request_timeout = _env_float("ASTOCK_DISCORD_TIMEOUT_SECONDS", 15.0, minimum=1.0)
+    retry_count = _env_int("ASTOCK_DISCORD_MAX_RETRIES", max_retries, minimum=1)
     headers = {
         "Authorization": f"Bot {token}",
         "Content-Type": "application/json",
@@ -76,10 +78,10 @@ def _api_request(
     data = json.dumps(payload).encode("utf-8") if payload else None
 
     last_error: dict = {}
-    for attempt in range(max_retries):
+    for attempt in range(retry_count):
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=request_timeout) as resp:
                 body = resp.read().decode("utf-8")
                 return json.loads(body) if body else {}
         except urllib.error.HTTPError as e:
@@ -93,22 +95,44 @@ def _api_request(
                     retry_after = float(err_data.get("retry_after", retry_after))
                 except Exception:
                     pass
-                wait = max(retry_after, (2 ** attempt) * 0.5)
-                _logger.warning(f"Discord API {e.code}, retry {attempt+1}/{max_retries} in {wait:.1f}s")
-                time.sleep(wait)
-                continue
+                if attempt < retry_count - 1:
+                    wait = max(retry_after, (2 ** attempt) * 0.5)
+                    _logger.warning(f"Discord API {e.code}, retry {attempt+1}/{retry_count} in {wait:.1f}s")
+                    time.sleep(wait)
+                    continue
+                return last_error
             # 4xx 非 429 → 不重试
             _logger.error(f"Discord API error: {e.code} {body}")
             return last_error
         except Exception as e:
             last_error = {"error": str(e)}
-            if attempt < max_retries - 1:
+            if attempt < retry_count - 1:
                 time.sleep((2 ** attempt) * 0.5)
                 continue
             _logger.error(f"Discord request failed: {e}")
             return last_error
 
     return last_error
+
+
+def _env_int(name: str, default: int, *, minimum: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float, *, minimum: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(minimum, float(raw))
+    except ValueError:
+        return default
 
 
 def _get_dm_channel(token: str, user_id: str) -> Optional[str]:

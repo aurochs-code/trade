@@ -68,11 +68,19 @@ def _decode_json(value: Any) -> Any:
         return {}
 
 
-def candidate_pool_summary(conn: Any, *, now: datetime | None = None, max_age_days: int = 3) -> dict:
+def candidate_pool_summary(
+    conn: Any,
+    *,
+    now: datetime | None = None,
+    max_age_days: int = 3,
+    max_execution_age_hours: int = 24,
+) -> dict:
     """Return a small candidate-pool freshness summary."""
     now = now or utc_now()
     rows = conn.execute(
-        """SELECT pool_tier, COUNT(*) AS count, MAX(last_scored_at) AS last_scored_at
+        """SELECT pool_tier,
+                  COUNT(*) AS count,
+                  MAX(COALESCE(NULLIF(last_scored_at, ''), added_at)) AS last_scored_at
            FROM projection_candidate_pool
            GROUP BY pool_tier"""
     ).fetchall()
@@ -96,9 +104,15 @@ def candidate_pool_summary(conn: Any, *, now: datetime | None = None, max_age_da
         age_days = round((now - latest_scored_at).total_seconds() / 86400, 2)
         stale = age_days > max_age_days
 
+    execution_freshness = _candidate_pool_execution_freshness(
+        latest_scored_at=latest_scored_at,
+        raw_latest_scored_at=latest_scored_at.isoformat() if latest_scored_at else None,
+        now=now,
+        max_age_hours=max_execution_age_hours,
+    )
     core_count = tiers.get("core", {}).get("count", 0)
     radar_count = tiers.get("radar", {}).get("count", 0)
-    status = "warning" if total == 0 or core_count == 0 or stale else "ok"
+    status = "warning" if total == 0 or core_count == 0 or stale or not execution_freshness["fresh"] else "ok"
     return {
         "status": status,
         "total": total,
@@ -110,7 +124,50 @@ def candidate_pool_summary(conn: Any, *, now: datetime | None = None, max_age_da
         "age_days": age_days,
         "max_age_days": max_age_days,
         "stale": stale,
+        "execution_freshness": execution_freshness,
     }
+
+
+def _candidate_pool_execution_freshness(
+    *,
+    latest_scored_at: datetime | None,
+    raw_latest_scored_at: str | None,
+    now: datetime,
+    max_age_hours: int,
+) -> dict:
+    age_hours = (now - latest_scored_at).total_seconds() / 3600 if latest_scored_at else None
+    fresh = age_hours is not None and age_hours <= max_age_hours
+    blocker = {}
+    if not fresh:
+        blocker = {
+            "reason": "scoring_inputs_stale",
+            "label": "候选池评分已过期",
+        }
+    return {
+        "scope": "paper_auto_readiness",
+        "latest_scored_at": raw_latest_scored_at,
+        "age_hours": round(age_hours, 2) if age_hours is not None else None,
+        "max_age_hours": max_age_hours,
+        "fresh": fresh,
+        "freshness_status": "fresh" if fresh else "stale",
+        "blocker": blocker,
+    }
+
+
+def _candidate_pool_execution_max_age_hours(strategy: dict[str, Any] | None) -> int:
+    strategy = strategy or {}
+    auto_trade = strategy.get("auto_trade", {}) or {}
+    guard_cfg = auto_trade.get("buy_guard", {}) or {}
+    scoring_cfg = strategy.get("scoring", {}) or {}
+    for value in (
+        guard_cfg.get("max_age_hours"),
+        auto_trade.get("candidate_pool_max_age_hours"),
+        scoring_cfg.get("max_age_hours"),
+        scoring_cfg.get("freshness_max_age_hours"),
+    ):
+        if value:
+            return int(value)
+    return 24
 
 
 def diagnose_health(conn: Any) -> dict:
@@ -520,7 +577,10 @@ def diagnose_strategy(conn: Any) -> dict:
     continuation = strategy.get("continuation", {})
     backtest_presets = strategy.get("backtest_presets", {})
     auto_trade = strategy.get("auto_trade", {})
-    candidate_pool = candidate_pool_summary(conn)
+    candidate_pool = candidate_pool_summary(
+        conn,
+        max_execution_age_hours=_candidate_pool_execution_max_age_hours(strategy),
+    )
     candidate_flow = _strategy_candidate_flow(
         conn,
         thresholds=thresholds,
@@ -1596,6 +1656,8 @@ def _next_window_scheduled_steps(schedule: dict[str, Any]) -> list[dict[str, Any
             "next_run_at": next_run_local.isoformat() if next_run_local else job.get("next_run_at"),
             "last_run_at": job.get("last_run_at"),
             "last_status": job.get("last_status"),
+            "failure_diagnosis": job.get("failure_diagnosis") or {},
+            "last_error_summary": job.get("last_error_summary", ""),
             "pending_first_run": bool(job.get("pending_first_run")),
             "critical_for_intraday_simulation": bool(job.get("critical_for_intraday_simulation")),
         })
@@ -2062,6 +2124,7 @@ def _schedule_job_state(job: dict[str, Any], *, now: datetime) -> dict[str, Any]
     state = str(job.get("state") or "")
     missed_today = enabled and state != "paused" and bool(missed_times)
     pending_first_run = enabled and state != "paused" and last_run_local is None and not missed_today
+    failure_diagnosis = _schedule_failure_diagnosis(job)
     return {
         "name": job.get("name", ""),
         "script": job.get("script", ""),
@@ -2073,6 +2136,8 @@ def _schedule_job_state(job: dict[str, Any], *, now: datetime) -> dict[str, Any]
         "paused_at": job.get("paused_at"),
         "last_run_at": job.get("last_run_at"),
         "last_status": job.get("last_status"),
+        "failure_diagnosis": failure_diagnosis if _schedule_job_failed(job) else {},
+        "last_error_summary": failure_diagnosis.get("summary", ""),
         "next_run_at": job.get("next_run_at"),
         "expected_times_passed": [item.isoformat() for item in expected_passed],
         "missed_times": missed_times,
@@ -2085,6 +2150,124 @@ def _schedule_job_state(job: dict[str, Any], *, now: datetime) -> dict[str, Any]
 def _schedule_job_failed(job: dict[str, Any]) -> bool:
     status = str(job.get("last_status") or "").strip().lower()
     return status in {"error", "failed", "failure", "timeout", "cancelled"}
+
+
+def _schedule_failure_diagnosis(job: dict[str, Any]) -> dict[str, Any]:
+    raw_error = str(job.get("last_error") or "").strip()
+    script = str(job.get("script") or "")
+    name = str(job.get("name") or "")
+    status = str(job.get("last_status") or "").strip().lower()
+    summary = _schedule_error_summary(raw_error)
+    exit_code = _schedule_error_exit_code(raw_error)
+    log_path = _schedule_error_log_path(raw_error)
+    error_type = _schedule_error_type(raw_error, status=status)
+    return {
+        "status": status or "unknown",
+        "summary": summary,
+        "exit_code": exit_code,
+        "error_type": error_type,
+        "log_path": log_path,
+        "root_cause_hint": _schedule_error_root_cause_hint(
+            error_type=error_type,
+            script=script,
+            name=name,
+        ),
+        "recovery_action": _schedule_failure_recovery_action(script=script, name=name),
+    }
+
+
+def _schedule_error_summary(raw_error: str, *, max_length: int = 220) -> str:
+    if not raw_error:
+        return ""
+    lines = [
+        line.strip()
+        for line in raw_error.splitlines()
+        if line.strip()
+        and not line.strip().startswith("#")
+        and "resource_tracker:" not in line
+    ]
+    summary = " | ".join(lines[:3]) if lines else raw_error.strip()
+    return summary[:max_length].rstrip()
+
+
+def _schedule_error_exit_code(raw_error: str) -> int | None:
+    if not raw_error:
+        return None
+    match = re.search(r"\b(?:code|exit)=?\s*(\d{1,3})\b", raw_error, re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def _schedule_error_log_path(raw_error: str) -> str:
+    if not raw_error:
+        return ""
+    match = re.search(r"\blog=([^\s]+)", raw_error)
+    return match.group(1) if match else ""
+
+
+def _schedule_error_type(raw_error: str, *, status: str) -> str:
+    lowered = raw_error.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "libmini_racer",
+            "trace/bpt trap",
+            "address_pool_manager",
+            "check failed",
+        )
+    ):
+        return "native_runtime_crash"
+    if status == "timeout" or "timeout" in lowered or "timed out" in lowered:
+        return "timeout"
+    if "traceback" in lowered or "exception" in lowered:
+        return "python_exception"
+    if "script exited with code" in lowered or " exit=" in lowered:
+        return "script_failure"
+    return status or "unknown"
+
+
+def _schedule_error_root_cause_hint(*, error_type: str, script: str, name: str) -> str:
+    job_label = f"{script} {name}".lower()
+    if error_type == "native_runtime_crash":
+        if "screener_refresh" in job_label or "候选" in name:
+            return (
+                "候选池刷新进程在 libmini_racer 原生层崩溃，候选评分/投影可能没有完成写入；"
+                "先重跑候选池刷新并查看日志。"
+            )
+        return "调度脚本在 libmini_racer 原生层崩溃；先查看日志并隔离触发该原生依赖的步骤。"
+    if error_type == "timeout":
+        return "调度脚本超时，结果可能未完整写入；先缩小任务规模重跑，再复核下游证据是否刷新。"
+    if error_type == "python_exception":
+        return "调度脚本抛出 Python 异常；先查看日志中的 traceback，再复核对应数据写入是否完成。"
+    if error_type == "script_failure":
+        return "调度脚本非零退出；先查看日志和命令输出，确认候选、评分或承接证据是否写入。"
+    return "调度脚本失败原因未分类；先查看日志和 last_error，再判断是否需要重跑对应命令。"
+
+
+def _schedule_failure_recovery_action(*, script: str, name: str) -> dict[str, Any]:
+    job_label = f"{script} {name}".lower()
+    if "screener_refresh" in job_label or "候选" in name:
+        return {
+            "type": "refresh_candidates",
+            "label": "重新刷新候选和评分",
+            "command": "atrade screener refresh --json",
+            "safe_to_auto_apply": True,
+            **_action_contract("screener_refresh", writes_state=True, risk_level="state_write"),
+        }
+    if "auto_trade" in job_label or "模拟" in name:
+        return {
+            "type": "check_paper_auto_readiness",
+            "label": "复核模拟承接预检",
+            "command": "atrade paper auto-readiness --json",
+            "safe_to_auto_apply": True,
+            **_action_contract("paper_auto_readiness"),
+        }
+    return {
+        "type": "inspect_schedule",
+        "label": "复核调度失败",
+        "command": "atrade diagnose schedule --json",
+        "safe_to_auto_apply": True,
+        **_action_contract("diagnose_schedule"),
+    }
 
 
 def _schedule_display(job: dict[str, Any]) -> str:

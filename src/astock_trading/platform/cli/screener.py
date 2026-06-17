@@ -10,6 +10,8 @@ import os
 import signal
 import subprocess
 import sys
+import time
+import uuid
 from collections import Counter
 from datetime import timedelta
 from typing import Optional
@@ -31,6 +33,7 @@ screener_app = typer.Typer(name="screener", help="选股、评分和候选池管
 DEFAULT_SNAPSHOT_TIMEOUT_SECONDS = 20.0
 DEFAULT_SCREENER_QUERY_TIMEOUT_SECONDS = 30.0
 DEFAULT_SCREENER_SCORING_TIMEOUT_SECONDS = 90.0
+DEFAULT_SCREENER_SCORING_CHUNK_SIZE = 10
 
 
 class ScreenerSearchTimeout(Exception):
@@ -59,6 +62,24 @@ class ScreenerScoringTimeout(Exception):
         super().__init__(f"screener scoring timeout after {timeout_seconds:.1f}s: {query}")
         self.query = query
         self.timeout_seconds = timeout_seconds
+
+
+class ScreenerScoringFailed(Exception):
+    """逐票评分子进程失败。"""
+
+    def __init__(
+        self,
+        query: str,
+        *,
+        returncode: int,
+        stderr_tail: str,
+        stdout_tail: str,
+    ):
+        super().__init__(f"screener scoring failed with code {returncode}: {query}")
+        self.query = query
+        self.returncode = returncode
+        self.stderr_tail = stderr_tail
+        self.stdout_tail = stdout_tail
 
 
 def _split_codes(codes: str) -> list[str]:
@@ -263,6 +284,31 @@ def _screener_scoring_timeout(cfg: dict) -> float:
     )
 
 
+def _screener_scoring_chunk_size(cfg: dict) -> int:
+    raw = cfg.get("screener_scoring_chunk_size")
+    if raw is None:
+        return DEFAULT_SCREENER_SCORING_CHUNK_SIZE
+    return max(1, int(raw))
+
+
+def _new_screener_run_id(prefix: str = "screener") -> str:
+    return f"{prefix}_{local_now_str('%H%M%S_%f')}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+
+
+def _truthy_config(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return bool(value)
+
+
+def _score_stock_batch_worker_enabled(ctx) -> bool:
+    cfg = ctx.cfg.get("screening", {}) if hasattr(ctx, "cfg") else {}
+    configured = cfg.get("isolate_scoring_worker")
+    if configured is not None:
+        return _truthy_config(configured)
+    return "PYTEST_CURRENT_TEST" not in os.environ
+
+
 def _score_stock_batch_with_timeout(
     ctx,
     stock_list: list[dict],
@@ -271,6 +317,15 @@ def _score_stock_batch_with_timeout(
     query: str,
     timeout_seconds: float,
 ) -> dict:
+    if _score_stock_batch_worker_enabled(ctx):
+        cfg = ctx.cfg.get("screening", {}) if hasattr(ctx, "cfg") else {}
+        return _score_stock_batch_in_worker_chunks(
+            stock_list,
+            run_id,
+            query=query,
+            timeout_seconds=timeout_seconds,
+            chunk_size=_screener_scoring_chunk_size(cfg),
+        )
     if timeout_seconds <= 0:
         return _score_stock_batch(ctx, stock_list, run_id)
 
@@ -287,6 +342,237 @@ def _score_stock_batch_with_timeout(
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
+
+
+def _score_stock_batch_in_worker(
+    stock_list: list[dict],
+    run_id: str,
+    *,
+    query: str,
+    timeout_seconds: float,
+) -> dict:
+    timeout = max(float(timeout_seconds), 0.1) if timeout_seconds > 0 else None
+    request = json.dumps(
+        {
+            "stock_list": stock_list,
+            "run_id": run_id,
+        },
+        ensure_ascii=False,
+    )
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "astock_trading.platform.cli.screener_scoring_worker",
+            ],
+            input=request,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ScreenerScoringTimeout(query, timeout_seconds) from exc
+    if result.returncode != 0:
+        raise ScreenerScoringFailed(
+            query,
+            returncode=result.returncode,
+            stderr_tail=(result.stderr or "")[-1600:],
+            stdout_tail=(result.stdout or "")[-800:],
+        )
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise ScreenerScoringFailed(
+            query,
+            returncode=result.returncode,
+            stderr_tail=(result.stderr or "")[-1600:],
+            stdout_tail=f"评分子进程返回非 JSON 输出: {(result.stdout or '')[-800:]}",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ScreenerScoringFailed(
+            query,
+            returncode=result.returncode,
+            stderr_tail=(result.stderr or "")[-1600:],
+            stdout_tail=f"评分子进程返回非对象 JSON: {(result.stdout or '')[-800:]}",
+        )
+    return payload
+
+
+def _score_stock_batch_in_worker_chunks(
+    stock_list: list[dict],
+    run_id: str,
+    *,
+    query: str,
+    timeout_seconds: float,
+    chunk_size: int,
+) -> dict:
+    chunks = [
+        stock_list[index : index + chunk_size]
+        for index in range(0, len(stock_list), chunk_size)
+    ]
+    if len(chunks) <= 1:
+        payload = _score_stock_batch_in_worker(
+            stock_list,
+            run_id,
+            query=query,
+            timeout_seconds=timeout_seconds,
+        )
+        payload["scoring_chunks"] = {
+            "total": 1 if stock_list else 0,
+            "succeeded": 1 if stock_list else 0,
+            "failed": [],
+            "chunk_size": chunk_size,
+        }
+        return payload
+
+    started_at = time.monotonic()
+    scores: list[dict] = []
+    snapshots: list = []
+    source_quality_parts: list[dict] = []
+    failures: list[dict] = []
+    first_failure: ScreenerScoringFailed | None = None
+
+    for chunk_index, chunk in enumerate(chunks, start=1):
+        chunk_timeout = _remaining_chunk_timeout(
+            timeout_seconds,
+            started_at=started_at,
+            total_chunks=len(chunks),
+        )
+        if chunk_timeout is not None and chunk_timeout <= 0:
+            raise ScreenerScoringTimeout(query, timeout_seconds)
+        try:
+            payload = _score_stock_batch_in_worker(
+                chunk,
+                run_id,
+                query=query,
+                timeout_seconds=chunk_timeout or 0,
+            )
+        except ScreenerScoringTimeout:
+            failures.append({
+                "chunk": chunk_index,
+                "size": len(chunk),
+                "reason": "screener_scoring_timeout",
+            })
+            continue
+        except ScreenerScoringFailed as exc:
+            if first_failure is None:
+                first_failure = exc
+            failures.append({
+                "chunk": chunk_index,
+                "size": len(chunk),
+                "reason": "screener_scoring_failed",
+                "returncode": exc.returncode,
+                "stderr_tail": exc.stderr_tail,
+                "stdout_tail": exc.stdout_tail,
+            })
+            continue
+
+        scores.extend(payload.get("scores") or [])
+        snapshots.extend(payload.get("snapshots") or [])
+        source_quality = payload.get("source_quality")
+        if isinstance(source_quality, dict):
+            source_quality_parts.append(source_quality)
+
+    if not scores and first_failure is not None:
+        raise first_failure
+    if not scores:
+        raise ScreenerScoringTimeout(query, timeout_seconds)
+
+    return {
+        "scores": scores,
+        "snapshots": snapshots,
+        "source_quality": _merge_source_quality_summaries(
+            source_quality_parts,
+            failed_chunks=failures,
+        ),
+        "scoring_chunks": {
+            "total": len(chunks),
+            "succeeded": len(chunks) - len(failures),
+            "failed": failures,
+            "chunk_size": chunk_size,
+        },
+    }
+
+
+def _remaining_chunk_timeout(
+    timeout_seconds: float,
+    *,
+    started_at: float,
+    total_chunks: int,
+) -> float | None:
+    if timeout_seconds <= 0:
+        return None
+    remaining = float(timeout_seconds) - (time.monotonic() - started_at)
+    if remaining <= 0:
+        return 0.0
+    target = max(15.0, float(timeout_seconds) / max(total_chunks, 1) * 1.5)
+    return min(remaining, target)
+
+
+def _merge_source_quality_summaries(parts: list[dict], *, failed_chunks: list[dict]) -> dict:
+    coverage: dict[str, dict] = {}
+    quality_counter: Counter = Counter()
+    missing_counter: Counter = Counter()
+    warnings: list[str] = []
+    statuses: list[str] = []
+    sample_size = 0
+    score_count = 0
+
+    for part in parts:
+        statuses.append(str(part.get("status") or "ok"))
+        sample_size += int(part.get("sample_size") or part.get("total") or 0)
+        score_count += int(part.get("score_count") or 0)
+        quality_counter.update(part.get("score_quality_counts") or {})
+        for item in part.get("missing_fields") or []:
+            if isinstance(item, dict):
+                missing_counter[str(item.get("field") or "")] += int(item.get("count") or 0)
+        warnings.extend(str(item) for item in (part.get("warnings") or []) if item)
+        for key, row in (part.get("coverage") or {}).items():
+            target = coverage.setdefault(
+                key,
+                {
+                    "label": row.get("label") or key,
+                    "layer": row.get("layer") or "",
+                    "available": 0,
+                    "missing": 0,
+                    "total": 0,
+                    "rate": 0.0,
+                },
+            )
+            target["available"] += int(row.get("available") or 0)
+            target["missing"] += int(row.get("missing") or 0)
+            target["total"] += int(row.get("total") or 0)
+
+    for row in coverage.values():
+        total = int(row.get("total") or 0)
+        row["rate"] = _coverage_rate(int(row.get("available") or 0), total)
+
+    if failed_chunks:
+        warnings.append(
+            f"逐票评分分块失败 {len(failed_chunks)} 个；已使用成功分块继续刷新，失败分块不会进入买入候选。"
+        )
+
+    status = "ok"
+    if "failed" in statuses:
+        status = "failed"
+    if failed_chunks or "warning" in statuses or warnings:
+        status = "warning" if status != "failed" else status
+
+    return {
+        "status": status,
+        "sample_size": sample_size,
+        "score_count": score_count,
+        "coverage": coverage,
+        "score_quality_counts": dict(sorted(quality_counter.items())),
+        "missing_fields": [
+            {"field": key, "count": count}
+            for key, count in sorted(missing_counter.items(), key=lambda item: (-item[1], item[0]))
+            if key
+        ],
+        "warnings": warnings,
+    }
 
 
 def _exit_after_scoring_timeout(status_code: int) -> None:
@@ -408,6 +694,35 @@ def _screener_scoring_timeout_payload(
     }
 
 
+def _screener_scoring_failed_payload(
+    *,
+    command: str,
+    query: str,
+    exc: ScreenerScoringFailed,
+) -> dict:
+    return {
+        "command": command,
+        "status": "failed",
+        "reason": "screener_scoring_failed",
+        "query": query,
+        "execution_allowed": False,
+        "candidate_pool_refreshed": False,
+        "may_have_partial_score_events": True,
+        "summary": "逐票评分子进程失败，候选池未刷新；先诊断数据源或调小 --limit 后重跑。",
+        "diagnostic": {
+            "returncode": exc.returncode,
+            "stderr_tail": exc.stderr_tail,
+            "stdout_tail": exc.stdout_tail,
+        },
+        "next_action": {
+            "type": "diagnose_data_sources",
+            "label": "诊断数据源",
+            "command": "atrade data-sources diagnose --json",
+            "safe_to_auto_apply": True,
+        },
+    }
+
+
 HOT_RECALL_KINDS = (
     "cross_platform_hot_stocks",
     "xueqiu_hot_stocks",
@@ -517,6 +832,36 @@ def _recent_signal_recall_candidates(
     return candidates
 
 
+def _lightweight_discovery_candidates(conn, cfg: dict) -> list[dict]:
+    """从全市场 K 线轻量发现池召回候选，供真实 refresh 和历史回放共享口径。"""
+    if not cfg.get("include_lightweight_discovery", False):
+        return []
+    from astock_trading.market.data_hydration import select_latest_lightweight_discovery_candidates
+
+    result = select_latest_lightweight_discovery_candidates(
+        conn,
+        source=str(cfg.get("lightweight_discovery_source") or "tushare"),
+        adjustflag=str(cfg.get("lightweight_discovery_adjustflag") or "3"),
+        lookback_days=int(cfg.get("lightweight_discovery_lookback_days") or 60),
+        min_history_days=int(cfg.get("lightweight_discovery_min_history_days") or 20),
+        min_avg_amount_yuan=float(cfg.get("lightweight_discovery_min_avg_amount") or 200_000_000.0),
+        min_avg_amplitude_pct=float(cfg.get("lightweight_discovery_min_avg_amplitude") or 3.0),
+        min_price=float(cfg.get("lightweight_discovery_min_price") or 5.0),
+        max_price=float(cfg.get("lightweight_discovery_max_price") or 200.0),
+        limit=int(cfg.get("lightweight_discovery_limit") or 600),
+    )
+    return [
+        {
+            "code": item.get("code", ""),
+            "name": item.get("name") or item.get("code") or "",
+            "recall_source": "lightweight_discovery",
+            "score": item.get("score", 0.0),
+        }
+        for item in result.get("candidates", [])
+        if item.get("code")
+    ]
+
+
 def _hot_recall_items(payload: object) -> list[dict]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
@@ -573,9 +918,16 @@ def _refresh_source_budgets(
     hot_count: int,
     recent_signal_count: int = 0,
     existing_count: int,
+    lightweight_count: int = 0,
 ) -> dict[str, int]:
     if score_limit <= 0:
-        return {"mx": 0, "hot_stocks": 0, "recent_signals": 0, "existing_pool": 0}
+        return {
+            "mx": 0,
+            "hot_stocks": 0,
+            "recent_signals": 0,
+            "existing_pool": 0,
+            "lightweight_discovery": 0,
+        }
 
     existing_budget = 0
     if existing_count:
@@ -589,12 +941,17 @@ def _refresh_source_budgets(
     if hot_count and score_limit >= 3:
         hot_budget = min(hot_count, max(1, score_limit // 5))
 
-    reserved = min(score_limit, recent_signal_budget + hot_budget + existing_budget)
+    lightweight_budget = 0
+    if lightweight_count and score_limit >= 3:
+        lightweight_budget = min(lightweight_count, max(1, score_limit // 3))
+
+    reserved = min(score_limit, recent_signal_budget + hot_budget + existing_budget + lightweight_budget)
     return {
         "mx": max(score_limit - reserved, 0),
         "hot_stocks": hot_budget,
         "recent_signals": recent_signal_budget,
         "existing_pool": existing_budget,
+        "lightweight_discovery": lightweight_budget,
     }
 
 
@@ -604,6 +961,7 @@ def _build_scoring_candidates(
     recent_signal_candidates: list[dict],
     existing_candidates: list[dict],
     *,
+    lightweight_candidates: list[dict] | None = None,
     score_limit: int,
     refresh_pool: bool,
 ) -> dict:
@@ -628,14 +986,16 @@ def _build_scoring_candidates(
         "hot_stocks": hot_candidates,
         "recent_signals": recent_signal_candidates,
         "existing_pool": existing_candidates,
+        "lightweight_discovery": lightweight_candidates or [],
     }
     budgets = _refresh_source_budgets(
         score_limit,
         hot_count=len(hot_candidates),
         recent_signal_count=len(recent_signal_candidates),
         existing_count=len(existing_candidates),
+        lightweight_count=len(lightweight_candidates or []),
     )
-    source_order = ("existing_pool", "recent_signals", "hot_stocks", "mx")
+    source_order = ("existing_pool", "recent_signals", "hot_stocks", "lightweight_discovery", "mx")
     for source in source_order:
         for candidate in buckets[source]:
             if source_counts[source] >= budgets[source]:
@@ -1692,6 +2052,9 @@ def _run_screener(
                     or DEFAULT_RECENT_SIGNAL_RECALL_EVENT_LIMIT
                 ),
             )
+        lightweight_discovery = []
+        if refresh_pool and cfg.get("include_lightweight_discovery", False):
+            lightweight_discovery = _lightweight_discovery_candidates(ctx.conn, cfg)
         existing_candidates = []
         if refresh_pool:
             existing_candidates = [
@@ -1703,6 +2066,7 @@ def _run_screener(
             hot_recall,
             recent_signal_recall,
             existing_candidates,
+            lightweight_candidates=lightweight_discovery,
             score_limit=score_limit,
             refresh_pool=refresh_pool,
         )
@@ -1721,6 +2085,7 @@ def _run_screener(
                 "recall_candidates": {
                     "hot_stocks": len(hot_recall),
                     "recent_signals": len(recent_signal_recall),
+                    "lightweight_discovery": len(lightweight_discovery),
                 },
                 "candidate_source_counts": candidate_source_counts,
                 "source_quality": _build_source_quality_summary([], []),
@@ -1728,7 +2093,7 @@ def _run_screener(
             json_or_text(payload, as_json)
             return
 
-        run_id = f"screener_{local_now_str('%H%M%S')}"
+        run_id = _new_screener_run_id()
 
         try:
             score_batch = _score_stock_batch_with_timeout(
@@ -1748,9 +2113,18 @@ def _run_screener(
             ctx.conn.close()
             _exit_after_scoring_timeout(1)
             raise typer.Exit(1)
+        except ScreenerScoringFailed as exc:
+            payload = _screener_scoring_failed_payload(
+                command=command_name,
+                query=q,
+                exc=exc,
+            )
+            json_or_text(payload, as_json)
+            raise typer.Exit(1)
         scores = score_batch["scores"]
-        snapshots = score_batch["snapshots"]
-        source_quality = _build_source_quality_summary(snapshots, scores)
+        snapshots = score_batch.get("snapshots", [])
+        source_quality = score_batch.get("source_quality") or _build_source_quality_summary(snapshots, scores)
+        scoring_chunks = score_batch.get("scoring_chunks")
         threshold = _watch_threshold(ctx, watch_threshold)
         report_thresholds = _screening_report_thresholds(ctx, threshold)
         if dry_run:
@@ -1769,10 +2143,13 @@ def _run_screener(
                 "recall_candidates": {
                     "hot_stocks": len(hot_recall),
                     "recent_signals": len(recent_signal_recall),
+                    "lightweight_discovery": len(lightweight_discovery),
                 },
                 "candidate_source_counts": candidate_source_counts,
                 "source_quality": source_quality,
             }
+            if scoring_chunks:
+                payload["scoring_chunks"] = scoring_chunks
             json_or_text(payload, as_json)
             return
         if refresh_pool:
@@ -1816,10 +2193,13 @@ def _run_screener(
             "recall_candidates": {
                 "hot_stocks": len(hot_recall),
                 "recent_signals": len(recent_signal_recall),
+                "lightweight_discovery": len(lightweight_discovery),
             },
             "candidate_source_counts": candidate_source_counts,
             "source_quality": source_quality,
         }
+        if scoring_chunks:
+            payload["scoring_chunks"] = scoring_chunks
         if pool_changes:
             payload["pool_changes"] = pool_changes
         json_or_text(payload, as_json)
@@ -1852,6 +2232,7 @@ def screener_refresh(
     query: str = typer.Option("", "--query", "-q", help="选股条件；空值使用配置默认条件"),
     limit: Optional[int] = typer.Option(None, "--limit", help="最多评分数量；默认读取 strategy.screening.refresh_scan_limit"),
     watch_threshold: Optional[float] = typer.Option(None, "--watch-threshold", help="自动加入观察池的最低分；默认读取配置"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只演练刷新评分链路，不写候选池、报告或历史归档"),
     scoring_timeout_seconds: Optional[float] = typer.Option(None, "--scoring-timeout-seconds", help="逐票评分超时秒数；默认读取配置，0 表示不启用 CLI 超时"),
     as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
 ):
@@ -1861,6 +2242,7 @@ def screener_refresh(
         limit,
         watch_threshold,
         as_json,
+        dry_run=dry_run,
         refresh_pool=True,
         scoring_timeout_seconds=scoring_timeout_seconds,
     )
@@ -1963,7 +2345,7 @@ def screener_iterate(
             current_candidates=_candidate_rows(ctx.conn, limit=200),
         )
         payload = _build_screener_iteration_plan(explanation, record=record)
-        iteration_run_id = f"screener_iterate_{local_now_str('%H%M%S')}"
+        iteration_run_id = _new_screener_run_id("screener_iterate")
         if record:
             payload["event_id"] = _record_screener_iteration(
                 ctx,
@@ -1987,7 +2369,7 @@ def screener_score(
 
     ctx = build_context()
     try:
-        run_id = f"screener_score_{local_now_str('%H%M%S')}"
+        run_id = _new_screener_run_id("screener_score")
         score_batch = _score_stock_batch(ctx, stock_list, run_id)
         scores = score_batch["scores"]
         ctx.obsidian.write_scoring_report(run_id, scores)

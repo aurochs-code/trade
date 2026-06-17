@@ -17,6 +17,7 @@ from astock_trading.reporting.discord import (
     format_opportunity_embed,
     format_opportunity_watch_embed,
     format_llm_summary_embed,
+    format_ops_watchdog_embed,
 )
 from astock_trading.reporting.obsidian import ObsidianProjector
 from astock_trading.reporting.projectors import ProjectionUpdater
@@ -660,6 +661,56 @@ def test_format_opportunity_watch_embed_highlights_new_candidates():
     assert "atrade paper trial-review --min-age-days 0 --record --json" in values
     assert "禁止自动执行" in values
     assert "atrade opportunity --json" in values
+
+
+def test_format_ops_watchdog_embed_highlights_incidents_and_recovery_command():
+    embed = format_ops_watchdog_embed({
+        "status": "changed",
+        "summary": "发现 1 个关键运维断点：调度失败。",
+        "change_types": ["new_ops_incident"],
+        "current_status": "critical",
+        "report": {
+            "status": "critical",
+            "summary": "发现 1 个关键运维断点：调度失败。",
+            "incidents": [
+                {
+                    "severity": "critical",
+                    "component": "schedule",
+                    "reason": "scheduled_job_failed",
+                    "label": "调度失败",
+                    "summary": "A股候选池刷新 最近运行失败。",
+                    "evidence": {
+                        "name": "A股候选池刷新",
+                        "error_type": "native_runtime_crash",
+                        "log_path": "/tmp/screener_refresh.log",
+                    },
+                    "next_action": {
+                        "label": "重新刷新候选和评分",
+                        "command": "atrade screener refresh --json",
+                        "writes_state": True,
+                        "writes_order": False,
+                    },
+                }
+            ],
+            "next_actions": [
+                {
+                    "label": "重新刷新候选和评分",
+                    "command": "atrade screener refresh --json",
+                    "writes_state": True,
+                    "writes_order": False,
+                }
+            ],
+        },
+    })
+
+    assert "运维 watchdog" in embed["title"]
+    assert embed["color"]
+    values = "\n".join(field["value"] for field in embed["fields"])
+    assert "调度失败" in values
+    assert "A股候选池刷新" in values
+    assert "atrade screener refresh --json" in values
+    assert "不会下单" in values
+    assert "观察" in values
 
 
 class TestProjectionUpdater:

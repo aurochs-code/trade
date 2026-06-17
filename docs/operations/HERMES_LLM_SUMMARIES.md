@@ -197,7 +197,7 @@ if [[ ! -s "$tmp_summary" ]]; then
   fail "empty-summary" 1
 fi
 
-notify_args=(notify llm-summary-card --mode "$mode" --payload "$tmp_summary" --json)
+notify_args=(notify llm-summary-card --mode "$mode" --payload "$tmp_summary" --fill-missing-evidence --json)
 if [[ "${ASTOCK_LLM_CARD_DRY_RUN:-}" == "1" ]]; then
   notify_args+=(--dry-run)
 fi

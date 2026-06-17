@@ -76,7 +76,12 @@ def load_runtime_env() -> Path | None:
     for env_file in _candidate_env_files():
         if not env_file.exists():
             continue
-        for key, value in parse_env_file(env_file).items():
+        values = parse_env_file(env_file)
+        for key, value in values.items():
             os.environ.setdefault(key, value)
+        if "ASTOCK_CONFIG_DIR" not in os.environ:
+            env_config_dir = env_file.parent
+            if (env_config_dir / "strategy.yaml").exists():
+                os.environ["ASTOCK_CONFIG_DIR"] = str(env_config_dir)
         return env_file
     return None

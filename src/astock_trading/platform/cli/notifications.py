@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import signal
 from typing import Any
 
 import typer
@@ -17,11 +18,20 @@ from astock_trading.platform.hermes_commands import (
     build_opportunity_watch,
     write_opportunity_watch_state,
 )
+from astock_trading.platform.ops_watchdog import (
+    build_ops_watchdog,
+    build_ops_watchdog_monitor,
+    build_ops_watchdog_context,
+    read_ops_watchdog_snapshot,
+    resolve_ops_watchdog_state_file,
+    write_ops_watchdog_snapshot,
+)
 from astock_trading.reporting.discord import (
     format_daily_inspection_embed,
     format_llm_summary_embed,
     format_manual_confirmation_embed,
     format_manual_followup_embed,
+    format_ops_watchdog_embed,
     format_opportunity_embed,
     format_opportunity_watch_embed,
     format_propose_plan_embed,
@@ -30,6 +40,7 @@ from astock_trading.reporting.discord_sender import send_embed
 
 
 notify_app = typer.Typer(name="notify", help="Discord 通知")
+build_context = build_ops_watchdog_context
 
 _EVIDENCE_ID_RE = re.compile(
     r"(?:\bevidence_ids?\s*[:：]\s*|证据编号\s*[:：]\s*)([-A-Za-z0-9_.,:; ]+)"
@@ -68,6 +79,10 @@ def _send_or_dry_run(embed: dict, content: str, dry_run: bool) -> tuple[bool, st
     return send_embed(embed, content=content)
 
 
+def _ops_watchdog_timeout_handler(signum, frame):
+    raise TimeoutError("ops-watchdog 通知超过最大运行时限")
+
+
 def validate_llm_summary_evidence(summary: str) -> dict:
     """校验 LLM 最终摘要是否按章节附带 evidence_id。"""
     evidence_ids = _extract_evidence_ids(summary)
@@ -102,6 +117,35 @@ def validate_llm_summary_evidence(summary: str) -> dict:
     }
 
 
+def normalize_llm_summary_evidence(summary: str) -> tuple[str, list[str]]:
+    """把缺少合法证据编号的判断章节显式标为暂无可用数据。"""
+    matches = list(_SECTION_RE.finditer(summary))
+    if not matches:
+        return summary, []
+
+    parts: list[str] = []
+    pos = 0
+    autofilled_sections: list[str] = []
+    for idx, match in enumerate(matches):
+        body_start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(summary)
+        title = match.group(1).strip()
+        parts.append(summary[pos:body_start])
+        body = summary[body_start:end]
+        if (
+            _section_has_claim(body)
+            and not _EVIDENCE_ID_RE.search(body)
+            and not _UNAVAILABLE_EVIDENCE_RE.search(body)
+        ):
+            sep = "" if body.endswith("\n") else "\n"
+            body = f"{body}{sep}- 证据编号：暂无可用数据\n"
+            autofilled_sections.append(title)
+        parts.append(body)
+        pos = end
+    parts.append(summary[pos:])
+    return "".join(parts), autofilled_sections
+
+
 def _extract_evidence_ids(summary: str) -> list[str]:
     ids: list[str] = []
     seen: set[str] = set()
@@ -118,7 +162,7 @@ def _extract_evidence_ids(summary: str) -> list[str]:
 def _section_has_claim(body: str) -> bool:
     for line in body.splitlines():
         text = line.strip()
-        if not text.startswith("-"):
+        if not text.startswith(("-", "•")):
             continue
         if "暂无可用数据" in text and not _EVIDENCE_ID_RE.search(text):
             continue
@@ -376,6 +420,86 @@ def notify_opportunity_watch(
         raise typer.Exit(1)
 
 
+@notify_app.command("ops-watchdog")
+def notify_ops_watchdog(
+    include_account: bool = typer.Option(False, "--include-account", help="读取 MX 模拟盘账户；默认只查本地证据"),
+    jobs_path: Path | None = typer.Option(None, "--jobs-path", help="Hermes jobs.json 路径"),
+    env_file: Path | None = typer.Option(None, "--env-file", help="atrade 运行 .env 路径"),
+    state_file: Path | None = typer.Option(None, "--state-file", help="watchdog 状态文件"),
+    reset_state: bool = typer.Option(False, "--reset-state", help="忽略旧状态并重建当前基线"),
+    max_runtime_seconds: int = typer.Option(45, "--max-runtime-seconds", min=5, help="watchdog 总运行时限，避免通知卡住"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只生成卡片，不发送 Discord，也不更新状态"),
+    as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """运维 watchdog 状态变化时推送 Discord；无变化时静默。"""
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _ops_watchdog_timeout_handler)
+    signal.alarm(max_runtime_seconds)
+    try:
+        resolved_state_file = resolve_ops_watchdog_state_file(state_file)
+        ctx = build_context()
+        try:
+            report = build_ops_watchdog(
+                ctx,
+                include_account=include_account,
+                jobs_path=jobs_path,
+                env_file=env_file,
+            )
+        finally:
+            ctx.conn.close()
+
+        previous = None if reset_state else read_ops_watchdog_snapshot(resolved_state_file)
+        monitor = build_ops_watchdog_monitor(report, previous_snapshot=previous)
+        monitor["state_file"] = str(resolved_state_file)
+        should_notify = bool(monitor.get("should_notify"))
+        embed = format_ops_watchdog_embed(monitor) if should_notify else {}
+        if should_notify:
+            ok, error = _send_or_dry_run(embed, "A股运维 watchdog", dry_run)
+        else:
+            ok, error = True, ""
+
+        if not dry_run and (ok or not should_notify):
+            write_ops_watchdog_snapshot(monitor, resolved_state_file)
+            monitor["state_updated"] = True
+        else:
+            monitor["state_updated"] = False
+
+        status = "dry_run" if dry_run else ("sent" if should_notify and ok else ("failed" if should_notify else "silent"))
+        result = {
+            "status": status,
+            "notification": {
+                "target": "discord",
+                "ok": ok,
+                "error": error,
+                "skipped": not should_notify,
+                "reason": "" if should_notify else monitor.get("summary", ""),
+            },
+            "embed": embed,
+            "monitor": monitor,
+        }
+        json_or_text(result, as_json)
+        if not dry_run and should_notify and not ok:
+            raise typer.Exit(1)
+    except TimeoutError as exc:
+        result = {
+            "status": "failed",
+            "notification": {
+                "target": "discord",
+                "ok": False,
+                "error": str(exc),
+                "skipped": False,
+                "reason": "ops-watchdog 通知超时",
+            },
+            "embed": {},
+            "monitor": {"state_updated": False},
+        }
+        json_or_text(result, as_json)
+        raise typer.Exit(1) from exc
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
 @notify_app.command("daily-inspection")
 def notify_daily_inspection(
     payload_file: Path = typer.Option(..., "--payload", help="每日巡检 JSON payload 文件"),
@@ -406,12 +530,17 @@ def notify_llm_summary_card(
     mode: str = typer.Option(..., "--mode", help="morning / close / weekly"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只生成卡片，不发送 Discord"),
     allow_missing_evidence: bool = typer.Option(False, "--allow-missing-evidence", help="应急放行缺少 evidence_id 的摘要"),
+    fill_missing_evidence: bool = typer.Option(False, "--fill-missing-evidence", help="将缺少合法证据编号的判断章节标为暂无可用数据"),
     as_json: bool = typer.Option(False, "--json", help="JSON 输出"),
 ):
     """从 Hermes LLM Markdown 摘要生成 Discord Rich Embed。"""
     if mode not in {"morning", "close", "weekly"}:
         raise typer.BadParameter("--mode must be morning, close, or weekly")
     summary = payload_file.read_text(encoding="utf-8")
+    evidence_normalization = {"enabled": fill_missing_evidence, "autofilled_sections": []}
+    if fill_missing_evidence:
+        summary, autofilled_sections = normalize_llm_summary_evidence(summary)
+        evidence_normalization["autofilled_sections"] = autofilled_sections
     evidence_validation = validate_llm_summary_evidence(summary)
     if not allow_missing_evidence and not evidence_validation["ok"]:
         payload = {
@@ -420,6 +549,8 @@ def notify_llm_summary_card(
             "error": "LLM 摘要缺少 evidence_id，已拒绝发送。",
             "evidence_validation": evidence_validation,
         }
+        if fill_missing_evidence:
+            payload["evidence_normalization"] = evidence_normalization
         json_or_text(payload, as_json)
         raise typer.Exit(1)
     embed = format_llm_summary_embed(mode, summary)
@@ -434,7 +565,11 @@ def notify_llm_summary_card(
         dry_run=dry_run,
         ok=ok,
         error=error,
-        extra={"mode": mode, "evidence_validation": evidence_validation},
+        extra={
+            "mode": mode,
+            "evidence_validation": evidence_validation,
+            **({"evidence_normalization": evidence_normalization} if fill_missing_evidence else {}),
+        },
     )
     json_or_text(result, as_json)
     if not dry_run and not ok:

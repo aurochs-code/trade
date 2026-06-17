@@ -18,6 +18,89 @@ class FakeTushareClient:
         return self.responses.get(api_name, [])
 
 
+def test_select_historical_discovery_pools_uses_rolling_liquidity_and_volatility():
+    from astock_trading.market.data_hydration import select_historical_discovery_pools
+
+    rows = [
+        {"symbol": "300001", "bar_date": "2026-06-10", "high_cents": 1100, "low_cents": 900, "close_cents": 1000, "amount_cents": 260_000_000_00},
+        {"symbol": "300001", "bar_date": "2026-06-11", "high_cents": 1080, "low_cents": 940, "close_cents": 1020, "amount_cents": 280_000_000_00},
+        {"symbol": "300001", "bar_date": "2026-06-12", "high_cents": 1120, "low_cents": 980, "close_cents": 1080, "amount_cents": 300_000_000_00},
+        {"symbol": "600001", "bar_date": "2026-06-10", "high_cents": 2020, "low_cents": 1990, "close_cents": 2000, "amount_cents": 500_000_000_00},
+        {"symbol": "600001", "bar_date": "2026-06-11", "high_cents": 2010, "low_cents": 1980, "close_cents": 2000, "amount_cents": 520_000_000_00},
+        {"symbol": "600001", "bar_date": "2026-06-12", "high_cents": 2020, "low_cents": 1990, "close_cents": 2000, "amount_cents": 510_000_000_00},
+    ]
+
+    result = select_historical_discovery_pools(
+        rows,
+        start="2026-06-10",
+        end="2026-06-12",
+        lookback_days=2,
+        min_history_days=2,
+        min_avg_amount_yuan=200_000_000,
+        min_avg_amplitude_pct=5.0,
+        min_price=5.0,
+        max_price=200.0,
+        limit=1,
+    )
+
+    assert [item["snapshot_date"] for item in result] == ["2026-06-11", "2026-06-12"]
+    assert result[0]["pool"][0]["code"] == "300001"
+    assert result[0]["pool"][0]["pool_tier"] == "historical_discovery"
+    assert result[0]["pool"][0]["discovery_metrics"]["history_days"] == 2
+    assert result[0]["pool"][0]["discovery_metrics"]["avg_amount_yuan"] == 270_000_000.0
+    assert result[1]["pool"][0]["code"] == "300001"
+
+
+def test_select_latest_lightweight_discovery_candidates_reuses_historical_selector():
+    from astock_trading.market.data_hydration import select_latest_lightweight_discovery_candidates
+
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+        def fetchall(self):
+            return self._rows
+
+    class FakeConn:
+        def __init__(self):
+            self.queries = []
+
+        def execute(self, query, params=()):
+            self.queries.append((query, params))
+            if "MAX(bar_date)" in query:
+                return FakeResult([{"latest_date": "2026-06-12"}])
+            return FakeResult([
+                {"symbol": "300001", "bar_date": "2026-06-10", "high_cents": 1100, "low_cents": 900, "close_cents": 1000, "amount_cents": 260_000_000_00},
+                {"symbol": "300001", "bar_date": "2026-06-11", "high_cents": 1080, "low_cents": 940, "close_cents": 1020, "amount_cents": 280_000_000_00},
+                {"symbol": "300001", "bar_date": "2026-06-12", "high_cents": 1120, "low_cents": 980, "close_cents": 1080, "amount_cents": 300_000_000_00},
+                {"symbol": "600001", "bar_date": "2026-06-10", "high_cents": 2020, "low_cents": 1990, "close_cents": 2000, "amount_cents": 500_000_000_00},
+                {"symbol": "600001", "bar_date": "2026-06-11", "high_cents": 2010, "low_cents": 1980, "close_cents": 2000, "amount_cents": 520_000_000_00},
+                {"symbol": "600001", "bar_date": "2026-06-12", "high_cents": 2020, "low_cents": 1990, "close_cents": 2000, "amount_cents": 510_000_000_00},
+            ])
+
+    result = select_latest_lightweight_discovery_candidates(
+        FakeConn(),
+        source="tushare",
+        adjustflag="3",
+        as_of_date="2026-06-12",
+        lookback_days=2,
+        min_history_days=2,
+        min_avg_amount_yuan=200_000_000,
+        min_avg_amplitude_pct=5.0,
+        limit=1,
+    )
+
+    assert result["status"] == "ok"
+    assert result["snapshot_date"] == "2026-06-12"
+    assert result["selected_count"] == 1
+    assert result["candidates"] == [{"code": "300001", "name": "300001", "score": result["candidates"][0]["score"]}]
+    assert result["source"] == "tushare"
+    assert result["adjustflag"] == "3"
+
+
 def test_hydrate_tushare_daily_market_bars_writes_raw_daily_rows(mysql_conn):
     from astock_trading.market.data_hydration import (
         hydrate_tushare_daily_market_bars,
@@ -187,5 +270,61 @@ def test_select_backtest_universe_filters_for_liquid_volatile_codes(mysql_conn):
             "atrade backtest-batch 300001 2026-06-10 2026-06-12"
         )
         assert result["warnings"][0].startswith("当前选择基于 market_price_bars")
+    finally:
+        conn.close()
+
+
+def test_replay_historical_discovery_snapshots_writes_pool_only_signal_history(mysql_conn):
+    from astock_trading.market.data_hydration import replay_historical_discovery_snapshots
+    from astock_trading.market.store import MarketStore
+
+    conn = mysql_conn
+    store = MarketStore(conn)
+    try:
+        rows = [
+            {"symbol": "300001", "date": "2026-06-10", "open": 10, "high": 11, "low": 9, "close": 10, "amount": 260_000_000, "volume": 1000},
+            {"symbol": "300001", "date": "2026-06-11", "open": 10, "high": 10.8, "low": 9.4, "close": 10.2, "amount": 280_000_000, "volume": 1000},
+            {"symbol": "300001", "date": "2026-06-12", "open": 10.2, "high": 11.2, "low": 9.8, "close": 10.8, "amount": 300_000_000, "volume": 1000},
+            {"symbol": "600001", "date": "2026-06-10", "open": 20, "high": 20.2, "low": 19.9, "close": 20, "amount": 500_000_000, "volume": 1000},
+            {"symbol": "600001", "date": "2026-06-11", "open": 20, "high": 20.1, "low": 19.8, "close": 20, "amount": 520_000_000, "volume": 1000},
+            {"symbol": "600001", "date": "2026-06-12", "open": 20, "high": 20.2, "low": 19.9, "close": 20, "amount": 510_000_000, "volume": 1000},
+        ]
+        store.save_price_bar_records(rows, source="tushare", adjustflag="3")
+
+        result = replay_historical_discovery_snapshots(
+            conn,
+            source="tushare",
+            adjustflag="3",
+            start="2026-06-10",
+            end="2026-06-12",
+            lookback_days=2,
+            min_history_days=2,
+            min_avg_amount_yuan=200_000_000,
+            min_avg_amplitude_pct=5.0,
+            limit=1,
+            write=True,
+        )
+
+        assert result["status"] == "ok"
+        assert result["processed_date_count"] == 2
+        assert result["snapshot_count"] == 2
+        assert result["pool_item_count"] == 2
+        assert result["dates"][0]["snapshot_date"] == "2026-06-11"
+        assert result["dates"][0]["selected_count"] == 1
+        assert result["dates"][0]["top_codes"] == ["300001"]
+
+        sections = conn.execute(
+            """SELECT snapshot_type, payload_json, phase
+               FROM signal_history_snapshots
+               WHERE snapshot_date = ? AND history_group_id = ?
+               ORDER BY snapshot_type""",
+            ("2026-06-12", "hist_discovery_20260612_tushare_3"),
+        ).fetchall()
+        payload_by_type = {row["snapshot_type"]: row["payload_json"] for row in sections}
+        assert {row["phase"] for row in sections} == {"historical_discovery"}
+        assert payload_by_type["candidates"] == []
+        assert payload_by_type["decision"] == []
+        assert payload_by_type["pool"][0]["code"] == "300001"
+        assert payload_by_type["pool"][0]["pool_tier"] == "historical_discovery"
     finally:
         conn.close()

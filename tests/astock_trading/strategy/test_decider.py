@@ -168,6 +168,70 @@ def test_route_policy_can_promote_valid_entry_route_to_buy_below_regime_line():
     assert "路线 short_continuation 买入线 6.0" in " ".join(d.notes)
 
 
+def test_route_policy_can_select_score_band_for_same_market_route():
+    decider = Decider(
+        buy_threshold=6.5,
+        watch_threshold=5.0,
+        single_max_pct=0.22,
+        require_entry_signal_for_buy=True,
+        min_data_quality_for_buy="ok",
+        max_missing_fields_for_buy=0,
+        route_execution_policy={
+            "GREEN:short_continuation": [
+                {
+                    "score_min": 4.0,
+                    "score_max": 5.0,
+                    "position_pct": 0.075,
+                    "priority": 55,
+                },
+                {
+                    "score_min": 6.0,
+                    "position_pct": 0.22,
+                    "priority": 70,
+                },
+            ]
+        },
+    )
+    route = StrategyRouteEvidence(
+        route="short_continuation",
+        display_name="短续接力",
+        family="short_continuation",
+        confidence=0.9,
+        entry_signal=True,
+    )
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+
+    low_band = decider.decide(
+        _make_score(
+            4.8,
+            entry_signal=True,
+            data_quality=DataQuality.OK,
+            data_missing_fields=[],
+            primary_strategy_route="short_continuation",
+            strategy_routes=[route],
+        ),
+        market,
+    )
+    high_band = decider.decide(
+        _make_score(
+            6.2,
+            entry_signal=True,
+            data_quality=DataQuality.OK,
+            data_missing_fields=[],
+            primary_strategy_route="short_continuation",
+            strategy_routes=[route],
+        ),
+        market,
+    )
+
+    assert low_band.action == Action.BUY
+    assert low_band.position_pct == 0.075
+    assert "路线 short_continuation 买入线 4.0" in " ".join(low_band.notes)
+    assert high_band.action == Action.BUY
+    assert high_band.position_pct == 0.22
+    assert "路线 short_continuation 买入线 6.0" in " ".join(high_band.notes)
+
+
 def test_route_policy_does_not_promote_red_market_to_auto_buy():
     decider = Decider(
         buy_threshold=6.5,
@@ -205,6 +269,201 @@ def test_route_policy_does_not_promote_red_market_to_auto_buy():
     assert d.action == Action.TRIAL_BUY
     assert d.position_pct == 0.0
     assert "禁止新开仓" in " ".join(d.notes)
+
+
+def test_route_policy_can_formalize_watch_route_without_trial_buy_semantics():
+    decider = Decider(
+        buy_threshold=6.5,
+        watch_threshold=5.0,
+        single_max_pct=0.22,
+        require_entry_signal_for_buy=True,
+        min_data_quality_for_buy="ok",
+        max_missing_fields_for_buy=0,
+        route_execution_policy={
+            "GREEN:trend_cooling_off": {
+                "actions": ["BUY"],
+                "score_min": 4.0,
+                "score_max": 4.5,
+                "position_pct": 0.075,
+                "priority": 45,
+                "require_entry_signal": False,
+                "phase_buckets": ["extended_above_ma20_slope_up"],
+            }
+        },
+    )
+    score = _make_score(
+        4.2,
+        entry_signal=False,
+        data_quality=DataQuality.OK,
+        data_missing_fields=[],
+        primary_strategy_route="trend_cooling_off",
+        strategy_routes=[
+            StrategyRouteEvidence(
+                route="trend_cooling_off",
+                display_name="趋势冷却",
+                family="trend_swing",
+                confidence=0.62,
+                entry_signal=False,
+            )
+        ],
+    )
+    market = MarketState(
+        signal=MarketSignal.GREEN,
+        multiplier=1.0,
+        detail={
+            "price": 3300,
+            "ma20": 3200,
+            "index_ma20_slope_5d_pct": 1.2,
+            "above_ma20_days": 8,
+        },
+    )
+
+    d = decider.decide(score, market)
+
+    assert d.action == Action.BUY
+    assert d.position_pct == 0.075
+    assert "路线 trend_cooling_off 买入线 4.0" in " ".join(d.notes)
+    assert "入场信号未触发" not in " ".join(d.notes)
+
+
+def test_route_policy_can_explicitly_allow_red_formal_buy_without_general_red_unlock():
+    decider = Decider(
+        buy_threshold=6.5,
+        watch_threshold=5.0,
+        single_max_pct=0.22,
+        require_entry_signal_for_buy=True,
+        min_data_quality_for_buy="ok",
+        max_missing_fields_for_buy=0,
+        route_execution_policy={
+            "RED:relative_strength_overheat": {
+                "actions": ["BUY"],
+                "score_min": 4.0,
+                "score_max": 4.5,
+                "position_pct": 0.066,
+                "priority": 35,
+                "require_entry_signal": False,
+                "allow_market_blocked": True,
+            }
+        },
+    )
+    score = _make_score(
+        4.1,
+        entry_signal=False,
+        data_quality=DataQuality.OK,
+        data_missing_fields=[],
+        primary_strategy_route="relative_strength_overheat",
+        strategy_routes=[
+            StrategyRouteEvidence(
+                route="relative_strength_overheat",
+                display_name="相对强势过热",
+                family="trend_swing",
+                confidence=0.58,
+                entry_signal=False,
+            )
+        ],
+    )
+
+    d = decider.decide(score, MarketState(signal=MarketSignal.RED, multiplier=0.0))
+
+    assert d.action == Action.BUY
+    assert d.position_pct == 0.066
+    assert "显式路线策略允许 RED 小仓正式买入" in " ".join(d.notes)
+
+
+def test_route_policy_can_relax_data_quality_for_technical_route_only():
+    decider = Decider(
+        buy_threshold=6.5,
+        watch_threshold=5.0,
+        single_max_pct=0.22,
+        require_entry_signal_for_buy=True,
+        min_data_quality_for_buy="ok",
+        max_missing_fields_for_buy=0,
+        route_execution_policy={
+            "YELLOW:relative_strength_overheat": {
+                "actions": ["BUY"],
+                "score_min": 4.0,
+                "score_max": 5.0,
+                "position_pct": 0.075,
+                "require_entry_signal": False,
+                "min_data_quality_for_buy": "degraded",
+                "max_missing_fields_for_buy": 6,
+            }
+        },
+    )
+    score = _make_score(
+        4.6,
+        entry_signal=False,
+        data_quality=DataQuality.DEGRADED,
+        data_missing_fields=["fundamental.roe", "flow.main_net_inflow"],
+        primary_strategy_route="relative_strength_overheat",
+        strategy_routes=[
+            StrategyRouteEvidence(
+                route="relative_strength_overheat",
+                display_name="相对强势过热",
+                family="trend_swing",
+                confidence=0.58,
+                entry_signal=False,
+            )
+        ],
+    )
+
+    d = decider.decide(score, MarketState(signal=MarketSignal.YELLOW, multiplier=0.5))
+
+    assert d.action == Action.BUY
+    assert d.position_pct == 0.075
+    assert "数据质量" not in " ".join(d.notes)
+    assert "关键数据缺失过多" not in " ".join(d.notes)
+
+
+def test_route_policy_can_require_index_above_ma120():
+    decider = Decider(
+        buy_threshold=6.5,
+        watch_threshold=5.0,
+        require_entry_signal_for_buy=True,
+        route_execution_policy={
+            "YELLOW:relative_strength_overheat": {
+                "actions": ["BUY"],
+                "score_min": 4.0,
+                "position_pct": 0.075,
+                "require_entry_signal": False,
+                "require_above_ma120": True,
+            }
+        },
+    )
+    score = _make_score(
+        4.6,
+        entry_signal=False,
+        primary_strategy_route="relative_strength_overheat",
+        strategy_routes=[
+            StrategyRouteEvidence(
+                route="relative_strength_overheat",
+                display_name="相对强势过热",
+                family="trend_swing",
+                confidence=0.58,
+                entry_signal=False,
+            )
+        ],
+    )
+
+    blocked = decider.decide(
+        score,
+        MarketState(
+            signal=MarketSignal.YELLOW,
+            multiplier=0.5,
+            detail={"above_ma120": False, "index_ma120_slope_20d_pct": 1.0},
+        ),
+    )
+    allowed = decider.decide(
+        score,
+        MarketState(
+            signal=MarketSignal.YELLOW,
+            multiplier=0.5,
+            detail={"above_ma120": True, "index_ma120_slope_20d_pct": 1.0},
+        ),
+    )
+
+    assert blocked.action == Action.CLEAR
+    assert allowed.action == Action.BUY
 
 
 def test_build_decider_from_config_reads_route_execution_policy_for_buy_decisions():

@@ -16,7 +16,12 @@ from types import SimpleNamespace
 from typing import Any
 
 from astock_trading.execution.service import ExecutionService
-from astock_trading.platform.agent_diagnostics import diagnose_flow, diagnose_health, propose_agent_trade_plan
+from astock_trading.platform.agent_diagnostics import (
+    diagnose_flow,
+    diagnose_health,
+    diagnose_schedule,
+    propose_agent_trade_plan,
+)
 from astock_trading.platform.config import ConfigRegistry
 from astock_trading.platform.events import EventStore
 from astock_trading.platform.runs import RunJournal
@@ -41,6 +46,7 @@ SECTION_CN = {
     "events": "事件记录",
     "reports": "报告片段",
     "market_intel": "热点与新闻",
+    "automation_schedule": "自动调度",
     "close_review": "收盘复盘诊断",
 }
 
@@ -468,10 +474,12 @@ def _summary_guardrails(mode: str) -> list[str]:
     ]
     if mode == "morning":
         guardrails.append("盘前摘要要说明热点数据来自盘前流水还是最新缓存。")
+        guardrails.append("候选池新鲜度降级时，必须查看自动调度段，说明最近候选刷新是否失败及恢复命令。")
     elif mode == "close":
         guardrails.append("收盘复盘要对比盘前与收盘热点变化，用于评估早盘判断质量。")
         guardrails.append("收盘复盘必须写清楚候选漏斗：评分数、入场信号、观察池、核心池、买入意向和主要否决原因。")
         guardrails.append("收盘复盘如发现热点未入池，只能写成召回线索或明日复核项，不得写成买入依据。")
+        guardrails.append("候选池或模拟承接异常时，必须引用自动调度段里的失败任务、日志路径和恢复命令。")
     elif mode == "weekly":
         guardrails.append("周复盘只提炼仍有解释价值的运行质量、交易质量和信号质量问题。")
     return guardrails
@@ -1349,6 +1357,9 @@ def _simulation_flow_context(conn: Any) -> dict:
                     "role": item.get("role", ""),
                     "next_run_at": item.get("next_run_at", ""),
                     "last_status": item.get("last_status"),
+                    "failure_diagnosis": _compact_schedule_failure_diagnosis(
+                        item.get("failure_diagnosis")
+                    ),
                     "pending_first_run": bool(item.get("pending_first_run", False)),
                     "critical_for_intraday_simulation": bool(
                         item.get("critical_for_intraday_simulation", False)
@@ -1399,6 +1410,11 @@ def _automation_schedule_context(schedule: dict) -> dict:
             "message": runtime_profile.get("message", ""),
         },
         "runtime_contract": _compact_schedule_runtime_contract(runtime_contract),
+        "failed_jobs": [
+            _compact_schedule_failed_job(item)
+            for item in (schedule.get("failed_jobs", []) or [])[:5]
+            if isinstance(item, dict)
+        ],
         "intraday_simulation": {
             "status": intraday.get("status", ""),
             "summary": intraday.get("summary", ""),
@@ -1416,6 +1432,9 @@ def _automation_schedule_context(schedule: dict) -> dict:
                     "role": item.get("role", ""),
                     "next_run_at": item.get("next_run_at", ""),
                     "last_status": item.get("last_status"),
+                    "failure_diagnosis": _compact_schedule_failure_diagnosis(
+                        item.get("failure_diagnosis")
+                    ),
                     "pending_first_run": bool(item.get("pending_first_run", False)),
                     "critical_for_intraday_simulation": bool(
                         item.get("critical_for_intraday_simulation", False)
@@ -1431,6 +1450,34 @@ def _automation_schedule_context(schedule: dict) -> dict:
         },
         "next_action": _compact_action(schedule.get("next_action")),
         "guardrails": schedule.get("guardrails", {}) or {},
+    }
+
+
+def _compact_schedule_failed_job(job: dict) -> dict:
+    return {
+        "name": job.get("name", ""),
+        "script": job.get("script", ""),
+        "schedule": job.get("schedule", ""),
+        "last_run_at": job.get("last_run_at", ""),
+        "last_status": job.get("last_status", ""),
+        "last_error_summary": job.get("last_error_summary", ""),
+        "failure_diagnosis": _compact_schedule_failure_diagnosis(
+            job.get("failure_diagnosis")
+        ),
+    }
+
+
+def _compact_schedule_failure_diagnosis(diagnosis: dict | None) -> dict:
+    if not isinstance(diagnosis, dict) or not diagnosis:
+        return {}
+    return {
+        "status": diagnosis.get("status", ""),
+        "summary": diagnosis.get("summary", ""),
+        "exit_code": diagnosis.get("exit_code"),
+        "error_type": diagnosis.get("error_type", ""),
+        "log_path": diagnosis.get("log_path", ""),
+        "root_cause_hint": diagnosis.get("root_cause_hint", ""),
+        "recovery_action": _compact_action(diagnosis.get("recovery_action")),
     }
 
 
@@ -1867,10 +1914,15 @@ def build_llm_context(conn: Any, *, mode: str) -> dict:
 
     diagnostics_section = _safe_section("diagnostics", lambda: diagnose_health(conn))
     trade_plan_section = _safe_section("trade_plan", lambda: propose_agent_trade_plan(conn))
+    automation_schedule_section = _safe_section(
+        "automation_schedule",
+        lambda: _automation_schedule_context(diagnose_schedule(conn)),
+    )
     market_intel_section = _safe_section("market_intel", lambda: _market_intel_context(conn, mode=mode))
     sections = {
         "diagnostics": diagnostics_section,
         "trade_plan": trade_plan_section,
+        "automation_schedule": automation_schedule_section,
         "market_intel": market_intel_section,
         "portfolio": _safe_section(
             "portfolio",

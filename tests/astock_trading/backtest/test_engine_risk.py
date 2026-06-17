@@ -10,6 +10,7 @@ import astock_trading.backtest.engine as backtest_engine_module
 from astock_trading.backtest.engine import (
     BacktestConfig,
     BacktestEngine,
+    PendingBuyOrder,
     Position,
     _date_ranges,
     _financial_periods,
@@ -36,13 +37,17 @@ def test_risk_check_triggers_trailing_stop_from_high_watermark():
             time_stop_days=30,
         )
     )
-    dates = ["2026-01-02", "2026-01-05", "2026-01-06"]
+    dates = ["2026-01-02", "2026-01-05", "2026-01-06", "2026-01-07"]
     engine._sorted_dates = dates
     engine._cash = 90000.0
     engine._bars = {
         "002138": pd.DataFrame({
             "日期": dates,
-            "收盘": [10.0, 12.0, 10.5],
+            "开盘": [10.0, 12.0, 10.8, 10.4],
+            "最高": [10.1, 12.2, 10.9, 10.5],
+            "最低": [9.9, 11.8, 10.4, 10.2],
+            "收盘": [10.0, 12.0, 10.5, 10.3],
+            "成交量": [1000000, 1000000, 1000000, 1000000],
         })
     }
     engine._positions = {
@@ -57,9 +62,637 @@ def test_risk_check_triggers_trailing_stop_from_high_watermark():
 
     engine._risk_check(dates[2], 2)
 
+    assert "002138" in engine._positions
+    assert engine._positions["002138"].pending_exit_reason == "追踪止损"
+    assert engine._trades == []
+
+    engine._risk_check(dates[3], 3)
+
     assert "002138" not in engine._positions
     assert engine._trades[-1]["reason"] == "追踪止损"
-    assert engine._trades[-1]["return_pct"] == 5.0
+    assert engine._trades[-1]["trigger_date"] == dates[2]
+    assert engine._trades[-1]["execution_date"] == dates[3]
+    assert engine._trades[-1]["trade_cost"]["total_cost"] > 0
+
+
+def test_load_data_uses_single_bulk_market_bar_query_when_cache_only():
+    def frame(rows):
+        return pd.DataFrame(rows)
+
+    class FakeStore:
+        def __init__(self):
+            self.calls = []
+
+        def get_price_bars_bulk(self, symbols, **kwargs):
+            self.calls.append((list(symbols), dict(kwargs)))
+            rows = {
+                "000001": frame([
+                    {"日期": "2026-01-01", "开盘": 10, "最高": 10.5, "最低": 9.8, "收盘": 10.1, "成交量": 100, "成交额": 1000, "涨跌幅": 0.0},
+                    {"日期": "2026-01-02", "开盘": 10.1, "最高": 10.6, "最低": 10.0, "收盘": 10.4, "成交量": 100, "成交额": 1000, "涨跌幅": 2.97},
+                    {"日期": "2026-01-05", "开盘": 10.4, "最高": 10.7, "最低": 10.2, "收盘": 10.6, "成交量": 100, "成交额": 1000, "涨跌幅": 1.92},
+                ]),
+                "600036": frame([
+                    {"日期": "2026-01-01", "开盘": 35, "最高": 36, "最低": 34.5, "收盘": 35.2, "成交量": 200, "成交额": 2000, "涨跌幅": 0.0},
+                    {"日期": "2026-01-02", "开盘": 35.2, "最高": 36.5, "最低": 35.0, "收盘": 36.0, "成交量": 200, "成交额": 2000, "涨跌幅": 2.27},
+                    {"日期": "2026-01-05", "开盘": 36.0, "最高": 36.8, "最低": 35.8, "收盘": 36.4, "成交量": 200, "成交额": 2000, "涨跌幅": 1.11},
+                ]),
+            }
+            return {symbol: rows.get(symbol, pd.DataFrame()) for symbol in symbols}
+
+    engine = BacktestEngine(
+        BacktestConfig(use_market_bars=True, load_financials=False),
+    )
+    fake_store = FakeStore()
+    engine._market_store = fake_store
+
+    result = engine.load_data(["600036"], "2026-01-02", "2026-01-05", "2026-01-01")
+
+    assert result == {"loaded": 1, "trading_days": 2}
+    assert len(fake_store.calls) == 1
+    assert sorted(fake_store.calls[0][0]) == ["000001", "600036"]
+    assert fake_store.calls[0][1]["adjustflag"] == "2"
+    assert engine._bars["600036"]["名称"].tolist() == ["600036", "600036", "600036"]
+
+
+def test_load_data_accepts_partial_market_cache_without_remote_fetch(monkeypatch):
+    class FailingAdapter:
+        async def get_kline(self, *args, **kwargs):
+            raise AssertionError("cache-only 模式不应回退远程 K 线")
+
+    class FakeStore:
+        def get_price_bars_bulk(self, symbols, **kwargs):
+            return {
+                "000001": pd.DataFrame([
+                    {"日期": "2026-01-01", "开盘": 10, "最高": 10.5, "最低": 9.8, "收盘": 10.1, "成交量": 100, "成交额": 1000, "涨跌幅": 0.0},
+                    {"日期": "2026-01-02", "开盘": 10.1, "最高": 10.6, "最低": 10.0, "收盘": 10.4, "成交量": 100, "成交额": 1000, "涨跌幅": 2.97},
+                    {"日期": "2026-01-05", "开盘": 10.4, "最高": 10.7, "最低": 10.2, "收盘": 10.6, "成交量": 100, "成交额": 1000, "涨跌幅": 1.92},
+                ]),
+                "600036": pd.DataFrame([
+                    {"日期": "2026-01-01", "开盘": 35, "最高": 36, "最低": 34.5, "收盘": 35.2, "成交量": 200, "成交额": 2000, "涨跌幅": 0.0},
+                    {"日期": "2026-01-02", "开盘": 35.2, "最高": 36.5, "最低": 35.0, "收盘": 36.0, "成交量": 200, "成交额": 2000, "涨跌幅": 2.27},
+                ]),
+            }
+
+    monkeypatch.setattr(market_adapters, "BaoStockMarketAdapter", FailingAdapter)
+    engine = BacktestEngine(
+        BacktestConfig(use_market_bars=True, hydrate_market_bars=False, load_financials=False),
+    )
+    engine._market_store = FakeStore()
+
+    result = engine.load_data(["600036"], "2026-01-02", "2026-01-05", "2026-01-01")
+
+    assert result == {"loaded": 1, "trading_days": 2}
+    assert engine._bars["600036"]["日期"].tolist() == ["2026-01-01", "2026-01-02"]
+
+
+def test_candidate_codes_for_date_uses_recent_discovery_window():
+    engine = BacktestEngine(
+        BacktestConfig(require_reachable_candidate_for_buy=True, reachable_lookback_days=5),
+    )
+    engine._bars = {
+        "600036": pd.DataFrame(),
+        "300750": pd.DataFrame(),
+        "002594": pd.DataFrame(),
+    }
+    engine._recent_discoveries = {
+        "600036": {"last_seen_date": "2026-06-10", "sources": ["pool"]},
+        "300750": {"last_seen_date": "2026-06-01", "sources": ["pool"]},
+        "999999": {"last_seen_date": "2026-06-10", "sources": ["pool"]},
+    }
+
+    assert engine._candidate_codes_for_date("2026-06-15") == ["600036"]
+
+
+def test_risk_check_defers_entry_day_exit_until_next_trading_day():
+    engine = BacktestEngine(
+        BacktestConfig(
+            initial_cash=100000.0,
+            stop_loss=0.08,
+            trailing_stop=0.50,
+            time_stop_days=30,
+        )
+    )
+    dates = ["2026-01-02", "2026-01-05", "2026-01-06"]
+    engine._sorted_dates = dates
+    engine._cash = 90000.0
+    engine._bars = {
+            "002138": pd.DataFrame({
+                "日期": dates,
+                "开盘": [10.0, 8.9, 8.7],
+                "最高": [10.1, 9.0, 8.9],
+                "最低": [9.0, 8.8, 8.6],
+                "收盘": [9.0, 8.8, 8.7],
+                "涨跌幅": [-10.0, -2.22, -1.14],
+                "成交量": [1000000, 1000000, 1000000],
+            })
+        }
+    engine._positions = {
+        "002138": Position(
+            code="002138",
+            shares=1000,
+            entry_price=10.0,
+            entry_date=dates[0],
+            high_water=10.0,
+        )
+    }
+
+    engine._risk_check(dates[0], 0)
+
+    assert "002138" in engine._positions
+    assert engine._trades == []
+    assert engine._positions["002138"].pending_exit_reason == "止损"
+    assert engine._execution_constraints["sell_orders_pending"] == 1
+
+    engine._risk_check(dates[1], 1)
+
+    assert "002138" not in engine._positions
+    assert engine._trades[-1]["date"] == dates[1]
+    assert engine._trades[-1]["trigger_date"] == dates[0]
+    assert engine._trades[-1]["execution_date"] == dates[1]
+    assert engine._trades[-1]["reason"] == "止损"
+
+
+def test_risk_check_keeps_position_when_exit_hits_locked_limit_down():
+    engine = BacktestEngine(
+        BacktestConfig(
+            initial_cash=100000.0,
+            stop_loss=0.08,
+            trailing_stop=0.50,
+            time_stop_days=30,
+        )
+    )
+    dates = ["2026-01-02", "2026-01-05", "2026-01-06"]
+    engine._sorted_dates = dates
+    engine._cash = 90000.0
+    engine._bars = {
+            "600036": pd.DataFrame({
+                "日期": dates,
+                "开盘": [10.0, 9.5, 8.1],
+                "最高": [10.0, 9.6, 8.2],
+                "最低": [10.0, 9.0, 8.1],
+                "收盘": [10.0, 9.0, 8.1],
+                "涨跌幅": [0.0, -10.0, -10.0],
+                "成交量": [1000000, 1000000, 1000000],
+            })
+        }
+    engine._positions = {
+        "600036": Position(
+            code="600036",
+            shares=1000,
+            entry_price=10.0,
+            entry_date=dates[0],
+            high_water=10.0,
+        )
+    }
+
+    engine._risk_check(dates[1], 1)
+    assert engine._positions["600036"].pending_exit_reason == "止损"
+
+    engine._risk_check(dates[2], 2)
+
+    assert "600036" in engine._positions
+    assert engine._trades == []
+    assert engine._execution_constraints["sell_untradable"] == 1
+    assert engine._execution_constraints["untradable_reasons"]["limit_down_locked"] == 1
+
+
+def test_backtest_tradeability_blocks_locked_limit_up_buy():
+    engine = BacktestEngine(BacktestConfig())
+    df = pd.DataFrame({
+        "日期": ["2026-01-02", "2026-01-05"],
+        "开盘": [10.0, 11.0],
+        "最高": [10.0, 11.0],
+        "最低": [10.0, 11.0],
+        "收盘": [10.0, 11.0],
+        "涨跌幅": [0.0, 10.0],
+        "成交量": [1000000, 1000000],
+    })
+
+    status = engine._tradeability_status(df, "2026-01-05", side="buy", code="600036")
+
+    assert status == {"tradable": False, "reason": "limit_up_locked"}
+
+
+def test_backtest_pending_buy_executes_next_trading_day_open():
+    engine = BacktestEngine(BacktestConfig(initial_cash=100000.0, single_max_pct=0.20, total_max_pct=0.60))
+    dates = ["2026-01-02", "2026-01-05"]
+    engine._sorted_dates = dates
+    engine._bars = {
+        "002138": pd.DataFrame({
+            "日期": dates,
+            "开盘": [10.0, 10.8],
+            "最高": [10.2, 11.0],
+            "最低": [9.9, 10.6],
+            "收盘": [10.0, 10.9],
+            "成交量": [1000000, 1000000],
+        })
+    }
+    score = ScoreResult(
+        code="002138",
+        name="双环传动",
+        total=7.0,
+        entry_signal=True,
+        primary_strategy_route="pullback_to_ma20",
+    )
+    intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.BUY,
+        confidence=7.0,
+        score=7.0,
+        position_pct=0.20,
+        market_signal=MarketSignal.GREEN,
+    )
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+    engine._pending_buy_orders.append(PendingBuyOrder(
+        signal_date=dates[0],
+        execution_date=dates[1],
+        score=score,
+        intent=intent,
+        market=market,
+        position_pct=0.20,
+    ))
+
+    engine._execute_pending_buy_orders(dates[0])
+
+    assert "002138" not in engine._positions
+
+    engine._execute_pending_buy_orders(dates[1])
+
+    assert "002138" in engine._positions
+    trade = engine._trades[-1]
+    assert trade["side"] == "buy"
+    assert trade["signal_date"] == dates[0]
+    assert trade["execution_date"] == dates[1]
+    assert trade["signal_price"] == 10.8
+    assert trade["price"] > 10.8
+
+
+def test_backtest_pnl_track_prevents_raw_ex_rights_false_stop():
+    engine = BacktestEngine(BacktestConfig(adjustflag="3", stop_loss=0.08, trailing_stop=0.20, time_stop_days=30))
+    dates = ["2026-01-02", "2026-01-05"]
+    engine._sorted_dates = dates
+    engine._bars = {
+        "002138": pd.DataFrame({
+            "日期": dates,
+            "开盘": [10.0, 5.1],
+            "最高": [10.2, 5.2],
+            "最低": [9.9, 5.0],
+            "收盘": [10.0, 5.1],
+            "成交量": [1000000, 1000000],
+        })
+    }
+    engine._pnl_bars = {
+        "002138": pd.DataFrame({
+            "日期": dates,
+            "开盘": [10.0, 10.2],
+            "最高": [10.2, 10.4],
+            "最低": [9.9, 10.0],
+            "收盘": [10.0, 10.2],
+            "成交量": [1000000, 1000000],
+        })
+    }
+    engine._positions = {
+        "002138": Position(
+            code="002138",
+            shares=1000,
+            entry_price=10.0,
+            entry_date=dates[0],
+            high_water=10.0,
+            pnl_units=1000.0,
+            pnl_entry_price=10.0,
+            pnl_high_water=10.0,
+        )
+    }
+
+    engine._risk_check(dates[1], 1)
+
+    assert "002138" in engine._positions
+    assert engine._positions["002138"].pending_exit_reason == ""
+    assert engine._trades == []
+
+
+def test_backtest_risk_check_skips_when_required_pnl_price_missing():
+    engine = BacktestEngine(
+        BacktestConfig(
+            adjustflag="3",
+            pnl_adjustflag="1",
+            stop_loss=0.08,
+            trailing_stop=0.20,
+            time_stop_days=30,
+        )
+    )
+    dates = ["2026-01-02", "2026-01-05"]
+    engine._sorted_dates = dates
+    engine._bars = {
+        "002138": pd.DataFrame({
+            "日期": dates,
+            "开盘": [10.0, 5.1],
+            "最高": [10.2, 5.2],
+            "最低": [9.9, 5.0],
+            "收盘": [10.0, 5.1],
+            "成交量": [1000000, 1000000],
+        })
+    }
+    engine._pnl_bars = {
+        "002138": pd.DataFrame({
+            "日期": [dates[0]],
+            "开盘": [10.0],
+            "最高": [10.2],
+            "最低": [9.9],
+            "收盘": [10.0],
+            "成交量": [1000000],
+        })
+    }
+    engine._positions = {
+        "002138": Position(
+            code="002138",
+            shares=1000,
+            entry_price=10.0,
+            entry_date=dates[0],
+            high_water=10.0,
+            pnl_units=1000.0,
+            pnl_entry_price=10.0,
+            pnl_high_water=10.0,
+        )
+    }
+
+    engine._risk_check(dates[1], 1)
+
+    assert engine._positions["002138"].pending_exit_reason == ""
+    assert engine._execution_constraints["pnl_price_missing_risk_skips"] == 1
+    assert engine._trades == []
+
+
+def test_backtest_close_position_uses_cash_price_not_adjusted_pnl_value():
+    engine = BacktestEngine(
+        BacktestConfig(
+            adjustflag="3",
+            pnl_adjustflag="1",
+            commission_bps=0,
+            min_commission=0,
+            stamp_tax_bps=0,
+            transfer_fee_bps=0,
+            slippage_bps=0,
+        )
+    )
+    dates = ["2026-01-02", "2026-06-01"]
+    engine._sorted_dates = dates
+    engine._bars = {
+        "002138": pd.DataFrame({
+            "日期": dates,
+            "开盘": [10.0, 10.0],
+            "收盘": [10.0, 10.0],
+        })
+    }
+    engine._pnl_bars = {
+        "002138": pd.DataFrame({
+            "日期": dates,
+            "开盘": [12.0, 13.2],
+            "收盘": [12.0, 13.2],
+        })
+    }
+    engine._cash = 0.0
+    engine._positions = {
+        "002138": Position(
+            code="002138",
+            shares=1000,
+            entry_price=10.0,
+            entry_date=dates[0],
+            high_water=10.0,
+            pnl_units=10000.0 / 12.0,
+            pnl_entry_price=12.0,
+            pnl_high_water=12.0,
+            cost_basis=10000.0,
+        )
+    }
+
+    trade = engine._close_position(
+        trade_date=dates[1],
+        code="002138",
+        price=10.0,
+        shares=1000,
+        reason="到期",
+        score=0.0,
+    )
+
+    assert trade["gross_proceeds"] == 10000.0
+    assert trade["cost_basis"] == 10000.0
+    assert trade["pnl"] == 0.0
+    assert trade["return_pct"] == 0.0
+    assert engine._cash == 10000.0
+
+
+def test_backtest_pending_buy_keeps_pnl_units_equal_real_shares():
+    engine = BacktestEngine(
+        BacktestConfig(
+            initial_cash=100000.0,
+            single_max_pct=0.10,
+            total_max_pct=0.60,
+            adjustflag="3",
+            pnl_adjustflag="1",
+            commission_bps=0,
+            min_commission=0,
+            stamp_tax_bps=0,
+            transfer_fee_bps=0,
+            slippage_bps=0,
+        )
+    )
+    dates = ["2026-01-02", "2026-01-05"]
+    engine._sorted_dates = dates
+    engine._bars = {
+        "002138": pd.DataFrame({
+            "日期": dates,
+            "开盘": [10.0, 10.0],
+            "最高": [10.0, 10.0],
+            "最低": [10.0, 10.0],
+            "收盘": [10.0, 10.0],
+            "成交量": [1000000, 1000000],
+        })
+    }
+    engine._pnl_bars = {
+        "002138": pd.DataFrame({
+            "日期": dates,
+            "开盘": [12.0, 12.0],
+            "收盘": [12.0, 12.0],
+        })
+    }
+    score = ScoreResult(code="002138", name="双环传动", total=7.0, entry_signal=True)
+    intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.BUY,
+        confidence=7.0,
+        score=7.0,
+        market_signal=MarketSignal.GREEN,
+    )
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+    engine._pending_buy_orders.append(PendingBuyOrder(
+        signal_date=dates[0],
+        execution_date=dates[1],
+        score=score,
+        intent=intent,
+        market=market,
+        position_pct=0.10,
+    ))
+
+    engine._execute_pending_buy_orders(dates[1])
+
+    position = engine._positions["002138"]
+    assert position.shares == 1000
+    assert position.pnl_units == 1000.0
+    assert position.pnl_entry_price == 12.0
+    assert position.cost_basis == 10000.0
+
+
+def test_backtest_forward_returns_use_pnl_track_not_raw_ex_rights():
+    engine = BacktestEngine(BacktestConfig(adjustflag="3"))
+    dates = ["2026-01-02", "2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09"]
+    engine._bars = {
+        "002138": pd.DataFrame({
+            "日期": dates,
+            "收盘": [10.0, 5.0, 5.0, 5.0, 5.0, 5.0],
+        })
+    }
+    engine._pnl_bars = {
+        "002138": pd.DataFrame({
+            "日期": dates,
+            "收盘": [10.0, 10.2, 10.4, 10.6, 10.8, 11.0],
+        })
+    }
+
+    assert engine._forward_returns("002138", dates[0], horizons=(5,)) == {"5d": 0.1}
+
+
+def test_backtest_pending_buy_orders_count_toward_queue_capacity():
+    engine = BacktestEngine(BacktestConfig(daily_max_buys=2, weekly_max=2))
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+    score = ScoreResult(code="002138", name="双环传动", total=7.0)
+    intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.BUY,
+        confidence=7.0,
+        score=7.0,
+        market_signal=MarketSignal.GREEN,
+    )
+    engine._pending_buy_orders.append(PendingBuyOrder(
+        signal_date="2026-01-02",
+        execution_date="2026-01-05",
+        score=score,
+        intent=intent,
+        market=market,
+        position_pct=0.2,
+    ))
+
+    assert engine._pending_buy_order_count(execution_date="2026-01-05", include_scale_in=False) == 1
+    assert (
+        engine._weekly_max_for_market(market)
+        - engine._weekly_buy_count
+        - engine._pending_buy_order_count(include_scale_in=False)
+    ) == 1
+
+
+def test_backtest_trade_cost_model_calculates_fees_by_side():
+    engine = BacktestEngine(
+        BacktestConfig(
+            commission_bps=2.5,
+            min_commission=0.0,
+            stamp_tax_bps=5.0,
+            transfer_fee_bps=0.1,
+            slippage_bps=0.0,
+        )
+    )
+
+    buy = engine._trade_costs_for_order(side="buy", price=10.0, shares=100)
+    sell = engine._trade_costs_for_order(side="sell", price=10.0, shares=100)
+
+    assert buy == {
+        "notional": 1000.0,
+        "commission": 0.25,
+        "stamp_tax": 0.0,
+        "transfer_fee": 0.01,
+        "slippage_cost": 0.0,
+        "fee_total": 0.26,
+        "total_cost": 0.26,
+        "cash_effect": 1000.26,
+        "execution_price": 10.0,
+    }
+    assert sell == {
+        "notional": 1000.0,
+        "commission": 0.25,
+        "stamp_tax": 0.5,
+        "transfer_fee": 0.01,
+        "slippage_cost": 0.0,
+        "fee_total": 0.76,
+        "total_cost": 0.76,
+        "cash_effect": 999.24,
+        "execution_price": 10.0,
+    }
+
+
+def test_backtest_trade_cost_model_does_not_double_count_slippage_cash_effect():
+    engine = BacktestEngine(
+        BacktestConfig(
+            commission_bps=0.0,
+            min_commission=0.0,
+            stamp_tax_bps=0.0,
+            transfer_fee_bps=0.0,
+            slippage_bps=10.0,
+        )
+    )
+
+    buy = engine._trade_costs_for_order(side="buy", price=10.0, shares=100)
+    sell = engine._trade_costs_for_order(side="sell", price=10.0, shares=100)
+
+    assert buy["execution_price"] == 10.01
+    assert buy["notional"] == 1001.0
+    assert buy["slippage_cost"] == 1.0
+    assert buy["total_cost"] == 1.0
+    assert buy["cash_effect"] == 1001.0
+    assert sell["execution_price"] == 9.99
+    assert sell["notional"] == 999.0
+    assert sell["slippage_cost"] == 1.0
+    assert sell["total_cost"] == 1.0
+    assert sell["cash_effect"] == 999.0
+
+
+def test_backtest_report_exposes_realistic_execution_constraints_and_costs():
+    engine = BacktestEngine(BacktestConfig(include_signal_alpha=False))
+
+    report = engine._build_report()
+
+    assert report["execution_semantics"]["t_plus_one"] is True
+    assert report["execution_semantics"]["signal_execution_lag"] == "next_trading_day_open"
+    assert report["execution_semantics"]["limit_price_model"] == "execution_price_near_limit_blocked"
+    assert report["cost_model"]["commission_bps"] == 2.5
+    assert report["cost_model"]["stamp_tax_bps"] == 5.0
+    assert report["execution_constraints"]["t_plus_one_blocked_sells"] == 0
+
+
+def test_backtest_report_exposes_pnl_bar_coverage_gaps():
+    engine = BacktestEngine(BacktestConfig(adjustflag="3", pnl_adjustflag="1", include_signal_alpha=False))
+    engine._bars = {
+        "002138": pd.DataFrame({
+            "日期": ["2026-01-02", "2026-01-05"],
+            "收盘": [10.0, 5.1],
+        })
+    }
+    engine._pnl_bars = {
+        "002138": pd.DataFrame({
+            "日期": ["2026-01-02"],
+            "收盘": [10.0],
+        })
+    }
+
+    coverage = engine._build_report()["data_coverage"]["pnl_bar_coverage"]
+
+    assert coverage["enabled"] is True
+    assert coverage["checked_codes"] == 1
+    assert coverage["pnl_loaded_codes"] == 1
+    assert coverage["missing_code_count"] == 1
+    assert coverage["missing_date_count"] == 1
+    assert coverage["sample_codes"]["002138"]["sample_dates"] == ["2026-01-05"]
 
 
 def test_market_reduction_depends_on_signal_not_multiplier():
@@ -72,6 +705,30 @@ def test_backtest_can_disable_market_reduce_sell_for_research():
     engine = BacktestEngine(BacktestConfig(disable_market_reduce_sell=True))
 
     assert engine._should_market_reduce_position(MarketState(signal=MarketSignal.RED, multiplier=0.3)) is False
+
+
+def test_backtest_market_reduce_respects_route_policy_exemption():
+    engine = BacktestEngine(BacktestConfig())
+    market = MarketState(signal=MarketSignal.RED, multiplier=0.3)
+
+    normal = Position(
+        code="002138",
+        shares=100,
+        entry_price=10.0,
+        entry_date="2026-01-01",
+        high_water=10.0,
+    )
+    exempt = Position(
+        code="002139",
+        shares=100,
+        entry_price=10.0,
+        entry_date="2026-01-01",
+        high_water=10.0,
+        market_reduce_exempt=True,
+    )
+
+    assert engine._should_reduce_position_for_market(normal, market) is True
+    assert engine._should_reduce_position_for_market(exempt, market) is False
 
 
 def test_backtest_watch_loss_cooldown_blocks_watch_but_not_buy():
@@ -363,11 +1020,11 @@ def test_runtime_base_config_matches_final_route_candidate_risk_profile():
         "src/astock_trading/templates/config/strategy.yaml",
     ):
         cfg = _strategy_config(config_path)
-        final_candidate = cfg["backtest_presets"]["攻_C_route_policy_v3_weekly5_trail18"]
+        final_candidate = cfg["backtest_presets"]["攻_C_recovery_ma120_green_scale04"]
         momentum = cfg["risk"]["momentum"]
         position = cfg["risk"]["position"]
 
-        assert momentum["trailing_stop"] == final_candidate["momentum_trailing_stop"] == 0.18
+        assert momentum["trailing_stop"] == final_candidate["momentum_trailing_stop"] == 0.16
         assert momentum["time_stop_days"] == final_candidate["momentum_time_stop_days"] == 30
         assert position["single_max"] == final_candidate["single_max_pct"] == 0.22
         assert position["total_max"] == final_candidate["total_max_pct"] == 0.67
@@ -454,7 +1111,7 @@ def test_backtest_final_candidate_preset_carries_phase_limited_loss_cooldown():
     )
 
 
-def test_backtest_execution_semantics_reports_scale_in_research_mode():
+def test_backtest_execution_semantics_keeps_scale_in_production_mode():
     engine = BacktestEngine(
         BacktestConfig(
             scale_in_enabled=True,
@@ -476,8 +1133,8 @@ def test_backtest_execution_semantics_reports_scale_in_research_mode():
 
     semantics = engine._execution_semantics()
 
-    assert semantics["mode"] == "research_what_if"
-    assert semantics["buy_only"] is False
+    assert semantics["mode"] == "production_buy_only"
+    assert semantics["buy_only"] is True
     assert semantics["scale_in_enabled"] is True
     assert semantics["scale_in_routes"] == ["trend_cooling_off"]
     assert semantics["scale_in_actions"] == ["WATCH", "TRIAL_BUY"]
@@ -487,6 +1144,26 @@ def test_backtest_execution_semantics_reports_scale_in_research_mode():
     assert semantics["scale_in_aggressive_markets"] == ["GREEN", "YELLOW"]
     assert semantics["scale_in_aggressive_routes"] == ["short_continuation"]
     assert semantics["scale_in_aggressive_phases"] == ["extended_above_ma20_slope_up"]
+
+
+def test_backtest_config_loads_production_route_scale_in_preset_without_research_what_if():
+    cfg = load_config("攻_C_production_route_scale_in")
+
+    assert cfg.scale_in_enabled is True
+    assert cfg.scale_in_aggressive_max_position_pct == 0.30
+    assert cfg.route_execution_policy["GREEN:trend_cooling_off"]["actions"] == ["BUY"]
+    assert cfg.route_execution_policy["RED:relative_strength_overheat"]["allow_market_blocked"] is True
+    assert cfg.execute_watch_trial_pairs == ()
+    assert cfg.execute_watch_trial_routes == ()
+    assert cfg.execute_watch_trial_market_signals == ()
+    assert cfg.watch_loss_cooldown_days == 0
+
+    engine = BacktestEngine(cfg)
+    semantics = engine._execution_semantics()
+
+    assert semantics["mode"] == "production_buy_only"
+    assert semantics["watch_trial_enabled"] is False
+    assert semantics["scale_in_enabled"] is True
 
 
 def test_backtest_buy_uses_decision_position_pct():
@@ -555,13 +1232,14 @@ def test_backtest_scale_in_adds_to_profitable_trend_position():
             scale_in_score_min=5.0,
         )
     )
-    dates = ["2026-01-02", "2026-01-05"]
+    dates = ["2026-01-02", "2026-01-05", "2026-01-06"]
     engine._sorted_dates = dates
     engine._cash = 95000.0
     engine._bars = {
         "002138": pd.DataFrame({
             "日期": dates,
-            "收盘": [10.0, 12.0],
+            "开盘": [10.0, 12.0, 12.0],
+            "收盘": [10.0, 12.0, 12.0],
         })
     }
     engine._positions = {
@@ -598,15 +1276,23 @@ def test_backtest_scale_in_adds_to_profitable_trend_position():
         market=MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
     )
 
+    assert len(engine._pending_buy_orders) == 1
+    assert engine._pending_buy_orders[0].signal_date == dates[1]
+    assert engine._pending_buy_orders[0].execution_date == dates[2]
+
+    engine._execute_pending_buy_orders(dates[2])
+
     pos = engine._positions["002138"]
     assert pos.shares == 1200
-    assert round(pos.entry_price, 4) == 11.1667
+    assert round(pos.entry_price, 4) == 11.1702
     assert pos.position_pct == 0.15
     assert pos.add_count == 1
-    assert pos.last_add_date == dates[1]
+    assert pos.last_add_date == dates[2]
     assert engine._trades[-1]["source_action"] == "SCALE_IN"
     assert engine._trades[-1]["reason"] == "趋势加仓"
     assert engine._trades[-1]["position_pct"] == 0.15
+    assert engine._trades[-1]["signal_date"] == dates[1]
+    assert engine._trades[-1]["execution_date"] == dates[2]
 
 
 def test_backtest_scale_in_rejects_weak_or_disallowed_confirmation():
@@ -664,13 +1350,14 @@ def test_backtest_scale_in_can_use_trial_buy_confirmation_without_new_entry_sign
             scale_in_score_min=5.0,
         )
     )
-    dates = ["2026-01-02", "2026-01-05"]
+    dates = ["2026-01-02", "2026-01-05", "2026-01-06"]
     engine._sorted_dates = dates
     engine._cash = 95000.0
     engine._bars = {
         "002138": pd.DataFrame({
             "日期": dates,
-            "收盘": [10.0, 12.0],
+            "开盘": [10.0, 12.0, 12.0],
+            "收盘": [10.0, 12.0, 12.0],
         })
     }
     engine._positions = {
@@ -706,6 +1393,9 @@ def test_backtest_scale_in_can_use_trial_buy_confirmation_without_new_entry_sign
         intents=[(score, intent)],
         market=MarketState(signal=MarketSignal.GREEN, multiplier=1.0),
     )
+
+    assert len(engine._pending_buy_orders) == 1
+    engine._execute_pending_buy_orders(dates[2])
 
     assert engine._positions["002138"].add_count == 1
     assert engine._trades[-1]["source_action"] == "SCALE_IN"
@@ -1162,9 +1852,31 @@ def test_backtest_config_loads_strategy_overlays_and_score_adjustments():
     cfg = load_config("aggressive_score_capture")
 
     assert cfg.market_regime_overlays["YELLOW"]["allow_trial_buy"] is False
-    assert cfg.market_regime_overlays["YELLOW"]["buy_threshold"] == 6.5
+    assert cfg.market_regime_overlays["YELLOW"]["buy_threshold"] == 9.9
     assert cfg.market_regime_overlays["RED"]["allow_trial_buy"] is True
     assert cfg.score_adjustments["tech_flow_correlation"]["enabled"] is True
+
+
+def test_backtest_config_allows_preset_market_regime_overlay_override():
+    cfg = load_config("攻_C_recovery_ma120_no_scale")
+
+    assert cfg.market_regime_overlays["YELLOW"]["buy_threshold"] == 9.9
+    assert cfg.market_regime_overlays["YELLOW"]["allow_trial_buy"] is False
+    assert cfg.market_regime_overlays["RED"]["buy_threshold"] == 7.0
+
+
+def test_backtest_config_loads_recovery_ma120_green_scale04_candidate():
+    cfg = load_config("攻_C_recovery_ma120_green_scale04")
+
+    assert cfg.market_regime_overlays["YELLOW"]["buy_threshold"] == 9.9
+    assert cfg.route_execution_policy["YELLOW:relative_strength_overheat"]["require_above_ma120"] is True
+    assert cfg.trailing_stop == 0.16
+    assert cfg.scale_in_enabled is True
+    assert cfg.scale_in_step_position_pct == 0.04
+    assert cfg.scale_in_market_signals == ("GREEN",)
+    assert cfg.scale_in_aggressive_max_position_pct == 0.30
+    assert cfg.scale_in_aggressive_step_position_pct == 0.08
+    assert "relative_strength_overheat" not in cfg.scale_in_routes
 
 
 def test_backtest_config_loads_position_limits_from_preset():
@@ -1199,7 +1911,10 @@ def test_backtest_config_loads_route_execution_policy_v3_from_preset():
     assert cfg.route_execution_policy["YELLOW:pullback_to_ma20"]["position_pct"] == 0.11
     assert cfg.route_execution_policy["YELLOW:volume_breakout"]["priority"] == 80
     assert cfg.route_execution_policy["RED:volume_breakout"]["position_pct"] == 0.066
-    assert "RED:relative_strength_overheat" not in cfg.route_execution_policy
+    red_overheat = cfg.route_execution_policy["RED:relative_strength_overheat"]
+    assert red_overheat["position_pct"] == 0.066
+    assert red_overheat["score_max"] == 4.5
+    assert red_overheat["allow_market_blocked"] is True
 
 
 def test_backtest_config_loads_route_policy_v3_weekly5_trail18_from_preset():
@@ -1526,6 +2241,63 @@ def test_backtest_route_policy_priority_can_outrank_raw_score():
     )
 
 
+def test_backtest_route_policy_selects_score_band_for_position_and_priority():
+    engine = BacktestEngine(
+        BacktestConfig(
+            single_max_pct=0.22,
+            route_execution_policy={
+                "GREEN:short_continuation": [
+                    {"score_min": 4.0, "score_max": 5.0, "position_pct": 0.075, "priority": 55},
+                    {"score_min": 6.0, "position_pct": 0.22, "priority": 70},
+                ]
+            },
+        )
+    )
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+    low_band_intent = DecisionIntent(
+        code="002138",
+        name="双环传动",
+        action=Action.BUY,
+        confidence=4.8,
+        score=4.8,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+        market_multiplier=1.0,
+    )
+    high_band_intent = DecisionIntent(
+        code="300475",
+        name="香农芯创",
+        action=Action.BUY,
+        confidence=6.2,
+        score=6.2,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+        market_multiplier=1.0,
+    )
+
+    assert engine._execution_position_pct(
+        low_band_intent,
+        market,
+        route="short_continuation",
+    ) == 0.075
+    assert engine._execution_position_pct(
+        high_band_intent,
+        market,
+        route="short_continuation",
+    ) == 0.22
+    assert engine._buy_candidate_sort_key(
+        high_band_intent,
+        "short_continuation",
+        market,
+        score_total=6.2,
+    ) > engine._buy_candidate_sort_key(
+        low_band_intent,
+        "short_continuation",
+        market,
+        score_total=4.8,
+    )
+
+
 def test_backtest_execution_funnel_reports_zero_position_skip_by_market_route():
     engine = BacktestEngine(BacktestConfig())
     market = MarketState(signal=MarketSignal.RED, multiplier=0.0)
@@ -1627,6 +2399,37 @@ def test_backtest_execution_funnel_reports_entry_and_veto_reason_counts():
     route_bucket = report["execution_funnel"]["by_market_route"]["GREEN:volume_breakout"]
     assert route_bucket["entry_signal_total"] == 1
     assert route_bucket["veto_reasons"]["below_ma20"] == 1
+
+
+def test_backtest_signal_validation_records_decision_and_veto_reasons():
+    engine = BacktestEngine(BacktestConfig())
+    market = MarketState(signal=MarketSignal.GREEN, multiplier=1.0)
+    score = ScoreResult(
+        code="300475",
+        name="香农芯创",
+        total=6.7,
+        entry_signal=True,
+        primary_strategy_route="volume_breakout",
+        veto_triggered=True,
+        hard_veto=["below_ma20"],
+    )
+    intent = DecisionIntent(
+        code="300475",
+        name="香农芯创",
+        action=Action.CLEAR,
+        confidence=0.0,
+        score=0.0,
+        position_pct=0.0,
+        market_signal=MarketSignal.GREEN,
+        market_multiplier=1.0,
+        notes=["一票否决", "大盘禁止新开仓"],
+    )
+
+    engine._record_signal_validation_rows("2026-01-02", [(score, intent)], market)
+
+    row = engine._signal_records[0]
+    assert row["decision_reasons"] == ["veto", "market_blocks_new_positions"]
+    assert row["veto_reasons"] == ["below_ma20"]
 
 
 def test_backtest_execution_funnel_labels_missing_route_as_no_entry_route():
@@ -1731,6 +2534,58 @@ def test_backtest_report_can_skip_signal_alpha_summary_for_fast_execution_checks
     assert report["signal_alpha"] == {"skipped": True, "sample_size": 1}
     assert report["signal_validation"]["sample_size"] == 1
     assert "execution_funnel" in report
+
+
+def test_backtest_report_groups_realized_trade_performance_by_market_route():
+    engine = BacktestEngine(BacktestConfig(include_signal_alpha=False))
+    engine._trades = [
+        {
+            "side": "buy",
+            "source_route": "short_continuation",
+            "market_signal": "GREEN",
+            "trade_cost": {"total_cost": 8.0},
+        },
+        {
+            "side": "scale_in",
+            "source_route": "short_continuation",
+            "market_signal": "GREEN",
+            "trade_cost": {"total_cost": 3.0},
+        },
+        {
+            "side": "sell",
+            "source_route": "short_continuation",
+            "market_signal": "GREEN",
+            "pnl": 1200.0,
+            "return_pct": 12.0,
+            "trade_cost": {"total_cost": 10.0},
+        },
+        {
+            "side": "sell",
+            "source_route": "relative_strength_overheat",
+            "market_signal": "YELLOW",
+            "pnl": -300.0,
+            "return_pct": -3.0,
+            "trade_cost": {"total_cost": 7.0},
+        },
+    ]
+
+    report = engine._build_report()
+
+    perf = report["trade_performance"]["by_market_route"]
+    green_short = perf["GREEN:short_continuation"]
+    assert green_short["buy_trades"] == 1
+    assert green_short["scale_in_trades"] == 1
+    assert green_short["sell_trades"] == 1
+    assert green_short["win_rate_pct"] == 100.0
+    assert green_short["avg_return_pct"] == 12.0
+    assert green_short["pnl"] == 1200.0
+    assert green_short["trade_cost"] == 21.0
+
+    yellow_overheat = perf["YELLOW:relative_strength_overheat"]
+    assert yellow_overheat["sell_trades"] == 1
+    assert yellow_overheat["win_rate_pct"] == 0.0
+    assert report["trade_performance"]["by_route"]["short_continuation"]["pnl"] == 1200.0
+    assert report["trade_performance"]["by_market_signal"]["GREEN"]["sell_trades"] == 1
 
 
 def test_backtest_report_keeps_full_trade_log_for_persistence():
@@ -2053,5 +2908,94 @@ def test_backtest_load_financials_uses_cached_snapshot(mysql_conn):
         fin = engine._financial_for_date("600036", "2026-05-01")
         assert fin["roe"] == 12.3
         assert fin["roe_3y_ago"] == 6.1
+    finally:
+        conn.close()
+
+
+def test_backtest_load_financials_cache_only_uses_bulk_store_without_db():
+    class FakeStore:
+        def __init__(self):
+            self.calls = []
+
+        def get_financial_snapshots_bulk(self, symbols, **kwargs):
+            self.calls.append((list(symbols), dict(kwargs)))
+            return {
+                "600036": [
+                    {
+                        "symbol": "600036",
+                        "report_year": 2025,
+                        "report_quarter": 4,
+                        "report_date": "2025-12-31",
+                        "available_date": "2026-04-30",
+                        "roe": 12.3,
+                        "roe_3y_ago": 6.1,
+                        "revenue_growth": 8.8,
+                        "net_profit_growth": 8.8,
+                        "operating_cash_flow": 0.2,
+                    }
+                ],
+                "300750": [],
+            }
+
+    engine = BacktestEngine(
+        BacktestConfig(use_financial_cache=True, hydrate_financial_cache=False),
+    )
+    fake_store = FakeStore()
+    engine._market_store = fake_store
+
+    engine._load_financials(["600036", "300750"], "2025-01-01", "2026-06-01")
+
+    assert fake_store.calls == [
+        (
+            ["600036", "300750"],
+            {"end_available": "2026-06-01", "source": "baostock"},
+        )
+    ]
+    assert engine._financial_for_date("600036", "2026-05-01")["roe"] == 12.3
+    assert engine._financial_cache["300750"] == []
+
+
+def test_backtest_load_financials_uses_single_bulk_cache_query(mysql_conn):
+    conn = mysql_conn
+    try:
+        store = MarketStore(conn)
+        store.save_financial_snapshot(
+            "600036",
+            report_year=2025,
+            report_quarter=4,
+            report_date="2025-12-31",
+            available_date="2026-04-30",
+            payload={"roe": 12.3},
+            source="baostock",
+        )
+        store.save_financial_snapshot(
+            "300750",
+            report_year=2025,
+            report_quarter=4,
+            report_date="2025-12-31",
+            available_date="2026-04-29",
+            payload={"roe": 10.1},
+            source="baostock",
+        )
+        engine = BacktestEngine(
+            BacktestConfig(use_financial_cache=True, hydrate_financial_cache=False),
+            market_conn=conn,
+        )
+        calls = []
+        original_bulk = engine._market_store.get_financial_snapshots_bulk
+
+        def wrapped_bulk(symbols, **kwargs):
+            calls.append((list(symbols), dict(kwargs)))
+            return original_bulk(symbols, **kwargs)
+
+        engine._market_store.get_financial_snapshots_bulk = wrapped_bulk
+
+        engine._load_financials(["600036", "300750"], "2025-01-01", "2026-06-01")
+
+        assert len(calls) == 1
+        assert calls[0][0] == ["600036", "300750"]
+        assert calls[0][1]["end_available"] == "2026-06-01"
+        assert engine._financial_for_date("600036", "2026-05-01")["roe"] == 12.3
+        assert engine._financial_for_date("300750", "2026-05-01")["roe"] == 10.1
     finally:
         conn.close()

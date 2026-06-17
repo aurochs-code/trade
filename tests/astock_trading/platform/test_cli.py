@@ -303,6 +303,99 @@ def test_screener_run_dry_run_scores_without_state_writes(monkeypatch):
     assert payload["source_quality"]["sample_size"] == 1
 
 
+def test_screener_refresh_dry_run_scores_without_state_writes(monkeypatch):
+    from astock_trading.platform.cli import app
+    import astock_trading.platform.cli.screener as screener_cli
+    from astock_trading.market.models import StockQuote, StockSnapshot, TechnicalIndicators
+
+    class FakeConn:
+        def close(self):
+            pass
+
+    class FakeObsidian:
+        def write_screening_result(self, *args, **kwargs):
+            raise AssertionError("refresh dry-run 不应写筛选报告")
+
+    def fake_score_stock_batch(ctx, stock_list, run_id):
+        quote = StockQuote(
+            code="002138",
+            name="双环传动",
+            price=35.0,
+            open=34.0,
+            high=36.0,
+            low=33.0,
+            close=35.0,
+            volume=100000,
+            amount=3500000.0,
+            change_pct=2.1,
+        )
+        return {
+            "scores": [
+                {
+                    "code": "002138",
+                    "name": "双环传动",
+                    "total_score": 5.8,
+                    "entry_signal": False,
+                    "data_quality": "ok",
+                }
+            ],
+            "snapshots": [
+                StockSnapshot(
+                    code="002138",
+                    name="双环传动",
+                    quote=quote,
+                    technical=TechnicalIndicators(above_ma20=True),
+                )
+            ],
+        }
+
+    ctx = SimpleNamespace(
+        cfg={
+            "screening": {
+                "refresh_scan_limit": 1,
+                "mx_query": "强势股",
+                "include_hot_recall": False,
+                "include_recent_signal_recall": False,
+            },
+            "pool_management": {"watch_min_score": 5.0},
+            "scoring": {"thresholds": {"buy": 6.5, "watch": 5.0, "reject": 4.0}},
+        },
+        conn=FakeConn(),
+        obsidian=FakeObsidian(),
+    )
+    monkeypatch.setattr(screener_cli, "build_context", lambda: ctx)
+    monkeypatch.setattr(
+        screener_cli,
+        "_search_screener_results",
+        lambda query, timeout_seconds: [{"code": "002138", "name": "双环传动"}],
+    )
+    monkeypatch.setattr(screener_cli, "_score_stock_batch", fake_score_stock_batch)
+    monkeypatch.setattr(screener_cli, "_candidate_rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        screener_cli,
+        "_apply_candidate_pool_refresh",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("refresh dry-run 不应刷新候选池")),
+    )
+    monkeypatch.setattr(
+        screener_cli,
+        "archive_from_runtime_state",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("refresh dry-run 不应归档历史快照")),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["screener", "refresh", "--dry-run", "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["mode"] == "dry_run"
+    assert payload["writes_state"] is False
+    assert payload["candidate_pool_refreshed"] is False
+    assert payload["scored"][0]["code"] == "002138"
+    assert "history_group_id" not in payload
+
+
 def test_screener_run_scoring_timeout_option_overrides_config(monkeypatch):
     from astock_trading.platform.cli import app
     import astock_trading.platform.cli.screener as screener_cli
@@ -551,6 +644,164 @@ def test_screener_refresh_json_returns_timeout_payload_when_scoring_hangs(monkey
             "safe_to_auto_apply": True,
         },
     }
+
+
+def test_screener_scoring_timeout_uses_worker_when_enabled(monkeypatch):
+    import astock_trading.platform.cli.screener as screener_cli
+
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({
+                "scores": [{"code": "002138", "total_score": 6.2}],
+                "source_quality": {"total": 1},
+            }),
+            stderr="",
+        )
+
+    monkeypatch.setattr(screener_cli.subprocess, "run", fake_run)
+    ctx = SimpleNamespace(cfg={"screening": {"isolate_scoring_worker": True}})
+
+    result = screener_cli._score_stock_batch_with_timeout(
+        ctx,
+        [{"code": "002138", "name": "双环传动"}],
+        "run-worker",
+        query="强势股",
+        timeout_seconds=30,
+    )
+
+    assert captured["args"][1:4] == ["-m", "astock_trading.platform.cli.screener_scoring_worker"]
+    assert json.loads(captured["kwargs"]["input"]) == {
+        "stock_list": [{"code": "002138", "name": "双环传动"}],
+        "run_id": "run-worker",
+    }
+    assert result["scores"] == [{"code": "002138", "total_score": 6.2}]
+    assert result["source_quality"] == {"total": 1}
+
+
+def test_screener_run_id_is_unique_within_same_second(monkeypatch):
+    import astock_trading.platform.cli.screener as screener_cli
+
+    monkeypatch.setattr(screener_cli, "local_now_str", lambda fmt: "121500_000000")
+
+    first = screener_cli._new_screener_run_id()
+    second = screener_cli._new_screener_run_id()
+
+    assert first.startswith("screener_121500_000000_")
+    assert second.startswith("screener_121500_000000_")
+    assert first != second
+
+
+def test_screener_scoring_worker_chunks_continue_after_failed_chunk(monkeypatch):
+    import astock_trading.platform.cli.screener as screener_cli
+
+    calls: list[list[str]] = []
+
+    def fake_worker(stock_list, run_id, *, query, timeout_seconds):  # noqa: ARG001
+        codes = [item["code"] for item in stock_list]
+        calls.append(codes)
+        if "000003" in codes:
+            raise screener_cli.ScreenerScoringFailed(
+                query,
+                returncode=1,
+                stderr_tail="provider failed",
+                stdout_tail="",
+            )
+        return {
+            "scores": [{"code": code, "total_score": 5.5} for code in codes],
+            "snapshots": [],
+            "source_quality": {
+                "status": "ok",
+                "sample_size": len(codes),
+                "score_count": len(codes),
+                "coverage": {
+                    "quote": {
+                        "label": "行情",
+                        "layer": "L1",
+                        "available": len(codes),
+                        "missing": 0,
+                        "total": len(codes),
+                        "rate": 1.0,
+                    }
+                },
+                "score_quality_counts": {"ok": len(codes)},
+                "missing_fields": [],
+                "warnings": [],
+            },
+        }
+
+    monkeypatch.setattr(screener_cli, "_score_stock_batch_in_worker", fake_worker)
+
+    result = screener_cli._score_stock_batch_in_worker_chunks(
+        [
+            {"code": "000001"},
+            {"code": "000002"},
+            {"code": "000003"},
+            {"code": "000004"},
+            {"code": "000005"},
+        ],
+        "screener_test",
+        query="强势股",
+        timeout_seconds=120,
+        chunk_size=2,
+    )
+
+    assert calls == [["000001", "000002"], ["000003", "000004"], ["000005"]]
+    assert [item["code"] for item in result["scores"]] == ["000001", "000002", "000005"]
+    assert result["scoring_chunks"]["total"] == 3
+    assert result["scoring_chunks"]["succeeded"] == 2
+    assert result["scoring_chunks"]["failed"][0]["returncode"] == 1
+    assert result["source_quality"]["status"] == "warning"
+    assert result["source_quality"]["sample_size"] == 3
+    assert "逐票评分分块失败 1 个" in result["source_quality"]["warnings"][-1]
+
+
+def test_screener_refresh_json_returns_failed_payload_when_scoring_worker_crashes(monkeypatch):
+    from astock_trading.platform.cli import app
+    import astock_trading.platform.cli.screener as screener_cli
+
+    class FakeConn:
+        def close(self):
+            pass
+
+    class FakeContext:
+        cfg = {"screening": {"mx_query": "强势股"}}
+        conn = FakeConn()
+
+    def fake_search(query, timeout_seconds):
+        return [{"code": "002138", "name": "双环传动"}]
+
+    def failed_score_batch(ctx, stock_list, run_id, *, query, timeout_seconds):
+        raise screener_cli.ScreenerScoringFailed(
+            query,
+            returncode=133,
+            stderr_tail="libmini_racer fatal",
+            stdout_tail="",
+        )
+
+    monkeypatch.setattr(screener_cli, "build_context", lambda: FakeContext())
+    monkeypatch.setattr(screener_cli, "_search_screener_results", fake_search)
+    monkeypatch.setattr(screener_cli, "_hot_recall_candidates", lambda conn, *, limit: [])
+    monkeypatch.setattr(screener_cli, "_candidate_rows", lambda conn, tier="all", limit=1000: [])
+    monkeypatch.setattr(screener_cli, "_score_stock_batch_with_timeout", failed_score_batch)
+
+    result = CliRunner().invoke(app, ["screener", "refresh", "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "screener refresh"
+    assert payload["status"] == "failed"
+    assert payload["reason"] == "screener_scoring_failed"
+    assert payload["query"] == "强势股"
+    assert payload["execution_allowed"] is False
+    assert payload["candidate_pool_refreshed"] is False
+    assert payload["diagnostic"]["returncode"] == 133
+    assert payload["diagnostic"]["stderr_tail"] == "libmini_racer fatal"
+    assert payload["next_action"]["command"] == "atrade data-sources diagnose --json"
 
 
 def test_doctor_json_via_bin_trade(tmp_path, mysql_runtime):
@@ -843,6 +1094,79 @@ def test_notify_opportunity_watch_dry_run_json_via_bin_trade(tmp_path, mysql_run
     assert "禁止自动执行" in values
 
 
+def test_notify_ops_watchdog_dry_run_does_not_update_state(monkeypatch, tmp_path):
+    from astock_trading.platform.cli import app
+    import astock_trading.platform.cli.notifications as notify_cli
+
+    calls = {}
+    state_file = tmp_path / "ops-watchdog-state.json"
+
+    class FakeConn:
+        def close(self):
+            calls["closed"] = True
+
+    class FakeContext:
+        conn = FakeConn()
+
+    def fake_watchdog(ctx, *, include_account, jobs_path, env_file):
+        calls["include_account"] = include_account
+        calls["jobs_path"] = jobs_path
+        calls["env_file"] = env_file
+        return {
+            "status": "critical",
+            "summary": "发现 1 个关键运维断点：调度失败。",
+            "incidents": [
+                {
+                    "severity": "critical",
+                    "component": "schedule",
+                    "reason": "scheduled_job_failed",
+                    "label": "调度失败",
+                    "summary": "A股候选池刷新 最近运行失败。",
+                    "evidence": {"name": "A股候选池刷新", "error_type": "native_runtime_crash"},
+                    "next_action": {
+                        "command": "atrade screener refresh --json",
+                        "writes_state": True,
+                        "writes_order": False,
+                    },
+                }
+            ],
+            "next_actions": [
+                {
+                    "command": "atrade screener refresh --json",
+                    "writes_state": True,
+                    "writes_order": False,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(notify_cli, "build_context", lambda: FakeContext())
+    monkeypatch.setattr(notify_cli, "build_ops_watchdog", fake_watchdog)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "notify",
+            "ops-watchdog",
+            "--state-file",
+            str(state_file),
+            "--dry-run",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["status"] == "dry_run"
+    assert payload["notification"]["skipped"] is False
+    assert payload["monitor"]["should_notify"] is True
+    assert "运维 watchdog" in payload["embed"]["title"]
+    assert calls["include_account"] is False
+    assert calls["jobs_path"] is None
+    assert calls["env_file"] is None
+    assert calls["closed"] is True
+    assert not state_file.exists()
+
+
 def test_doctor_json_fails_without_database_url():
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
@@ -913,6 +1237,8 @@ def test_backtest_help_includes_history_mirror_via_bin_trade():
     assert "--history-mirror" in result.stdout
     assert "--no-history-mirror" in result.stdout
     assert "--use-stored-data" in result.stdout
+    assert "--reachable-only" in result.stdout
+    assert "--reachable-lookback-days" in result.stdout
     assert "--hydrate-data" in result.stdout
     assert "--trailing-stop" in result.stdout
     assert "--watch-trial" in result.stdout
@@ -1449,6 +1775,86 @@ def test_data_sources_diagnose_json_via_bin_trade(tmp_path, mysql_runtime):
     assert "latest_screener_source_quality" in payload
 
 
+def test_ops_watchdog_help_via_bin_trade():
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "ops", "watchdog", "--help"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "系统化运维 watchdog" in result.stdout
+    assert "--include-account" in result.stdout
+    assert "--json" in result.stdout
+
+
+def test_ops_watchdog_json_uses_local_evidence_by_default(monkeypatch):
+    from astock_trading.platform.cli import app
+    import astock_trading.platform.cli.ops as ops_cli
+
+    calls = {}
+
+    class FakeConn:
+        def close(self):
+            calls["closed"] = True
+
+    class FakeContext:
+        conn = FakeConn()
+
+    def fake_watchdog(ctx, *, include_account, jobs_path, env_file):
+        calls["ctx"] = ctx
+        calls["include_account"] = include_account
+        calls["jobs_path"] = jobs_path
+        calls["env_file"] = env_file
+        return {
+            "command": "ops watchdog",
+            "diagnostic": "ops_watchdog",
+            "status": "ok",
+            "summary": "运维 watchdog 未发现流程断层。",
+            "incidents": [],
+            "guardrails": {"read_only": True, "writes_order": False},
+        }
+
+    monkeypatch.setattr(ops_cli, "build_context", lambda: FakeContext())
+    monkeypatch.setattr(ops_cli, "build_ops_watchdog", fake_watchdog)
+
+    result = CliRunner().invoke(app, ["ops", "watchdog", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["diagnostic"] == "ops_watchdog"
+    assert payload["status"] == "ok"
+    assert calls["include_account"] is False
+    assert calls["jobs_path"] is None
+    assert calls["env_file"] is None
+    assert calls["closed"] is True
+
+
+def test_ops_watchdog_supervise_reports_child_timeout(monkeypatch):
+    from astock_trading.platform.cli import app
+    import astock_trading.platform.cli.ops as ops_cli
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(ops_cli.subprocess, "run", fake_run)
+
+    result = CliRunner().invoke(
+        app,
+        ["ops", "watchdog-supervise", "--timeout-seconds", "5", "--json"],
+    )
+
+    assert result.exit_code == 124
+    payload = json.loads(result.output)
+    assert payload["status"] == "failed"
+    assert payload["reason"] == "ops_watchdog_timeout"
+    assert payload["timeout_seconds"] == 5
+
+
 def test_data_sources_coverage_help_via_bin_trade():
     root = Path(__file__).resolve().parents[3]
     cli = root / "bin" / "trade"
@@ -1520,6 +1926,25 @@ def test_data_sources_select_universe_help_via_bin_trade():
     assert "适配池" in result.stdout
     assert "--min-avg-amount" in result.stdout
     assert "--min-avg-amplitude" in result.stdout
+    assert "--json" in result.stdout
+
+
+def test_data_sources_replay_discovery_help_via_bin_trade():
+    root = Path(__file__).resolve().parents[3]
+    cli = root / "bin" / "trade"
+
+    result = subprocess.run(
+        [str(cli), "data-sources", "replay-discovery", "--help"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "历史发现" in result.stdout
+    assert "--lookback-days" in result.stdout
+    assert "--min-history-days" in result.stdout
+    assert "--write" in result.stdout
     assert "--json" in result.stdout
 
 
@@ -1909,6 +2334,19 @@ def test_agent_command_catalog_json_via_bin_trade():
     assert by_id["diagnose_recommendations"]["command"] == "atrade diagnose recommendations --json"
     assert by_id["diagnose_recommendations"]["risk_level"] == "read_only"
     assert by_id["diagnose_recommendations"]["writes_order"] is False
+    assert by_id["ops_watchdog"]["command"] == "atrade ops watchdog --json"
+    assert by_id["ops_watchdog"]["risk_level"] == "read_only"
+    assert by_id["ops_watchdog"]["writes_state"] is False
+    assert by_id["ops_watchdog"]["writes_order"] is False
+    assert by_id["ops_watchdog"]["options"]["--include-account"]["default"] is False
+    assert by_id["ops_watchdog_supervise"]["command"] == "atrade ops watchdog-supervise --json"
+    assert by_id["ops_watchdog_supervise"]["risk_level"] == "notification_write"
+    assert by_id["ops_watchdog_supervise"]["writes_state"] is True
+    assert by_id["ops_watchdog_supervise"]["writes_order"] is False
+    assert by_id["notify_ops_watchdog"]["command"] == "atrade notify ops-watchdog --json"
+    assert by_id["notify_ops_watchdog"]["risk_level"] == "notification_write"
+    assert by_id["notify_ops_watchdog"]["writes_state"] is True
+    assert by_id["notify_ops_watchdog"]["writes_order"] is False
     assert by_id["data_sources_diagnose"]["command"] == "atrade data-sources diagnose --json"
     assert by_id["data_sources_diagnose"]["risk_level"] == "read_only"
     assert by_id["data_sources_coverage"]["command"] == "atrade data-sources coverage --json"
@@ -1924,6 +2362,26 @@ def test_agent_command_catalog_json_via_bin_trade():
     )
     assert by_id["data_sources_select_universe"]["risk_level"] == "read_only"
     assert by_id["data_sources_select_universe"]["writes_state"] is False
+    assert by_id["data_sources_replay_discovery"]["command"] == (
+        "atrade data-sources replay-discovery START END --source tushare "
+        "--adjustflag 3 --write --json"
+    )
+    assert by_id["data_sources_replay_discovery"]["risk_level"] == "state_write"
+    assert by_id["data_sources_replay_discovery"]["writes_state"] is True
+    assert by_id["data_sources_replay_discovery"]["writes_order"] is False
+    assert by_id["data_sources_replay_discovery"]["options"]["--limit"]["default"] == 600
+    assert by_id["data_sources_index_discoveries"]["command"] == (
+        "atrade data-sources index-discoveries START END --write --json"
+    )
+    assert by_id["data_sources_index_discoveries"]["risk_level"] == "state_write"
+    assert by_id["data_sources_index_discoveries"]["writes_state"] is True
+    assert by_id["data_sources_index_discoveries"]["writes_order"] is False
+    assert by_id["data_sources_index_discoveries"]["state_events"] == ["signal_history_discoveries"]
+    assert by_id["backtest_batch"]["command"] == "atrade backtest-batch CODES START END --history-mirror --json"
+    assert by_id["backtest_batch"]["risk_level"] == "read_only"
+    assert by_id["backtest_batch"]["writes_state"] is False
+    assert by_id["backtest_batch"]["writes_order"] is False
+    assert by_id["backtest_batch"]["options"]["--preset"]["default"] == "攻_C_recovery_ma120_green_scale04"
     assert by_id["digest"]["command"] == "atrade digest --json"
     assert by_id["digest"]["risk_level"] == "read_only"
     assert by_id["llm_context_close"]["command"] == "atrade llm-context --mode close --json"
@@ -1948,6 +2406,14 @@ def test_agent_command_catalog_json_via_bin_trade():
         "candidate.rejected",
         "pool.demoted",
     ]
+    assert by_id["screener_run"]["options"]["--dry-run"]["default"] is False
+    assert by_id["screener_run"]["options"]["--scoring-timeout-seconds"]["default"] == (
+        "strategy.screening.screener_scoring_timeout_seconds"
+    )
+    assert by_id["screener_refresh"]["options"]["--dry-run"]["default"] is False
+    assert by_id["screener_refresh"]["options"]["--scoring-timeout-seconds"]["default"] == (
+        "strategy.screening.screener_scoring_timeout_seconds"
+    )
     assert by_id["opportunity_watch"]["options"]["--no-write"]["effect"] == "只比较，不更新机会监控状态文件"
     assert by_id["manual_followup"]["command"] == "atrade review manual-followup --json"
     assert by_id["manual_followup"]["risk_level"] == "read_only"
@@ -2176,6 +2642,47 @@ def test_notify_llm_summary_card_accepts_unavailable_evidence_marker(tmp_path):
     assert payload["status"] == "dry_run"
     assert payload["evidence_validation"]["evidence_ids"] == ["evt_compare_1"]
     assert payload["evidence_validation"]["unavailable_sections"] == ["系统与数据质量"]
+
+
+def test_notify_llm_summary_card_can_fill_malformed_evidence_marker(tmp_path):
+    from astock_trading.platform.cli import app
+
+    payload_path = tmp_path / "llm-summary.md"
+    payload_path.write_text("""## A股收盘复盘｜2026-05-17 15:55
+
+**今日闭环：部分完成**
+自动执行：禁止
+
+### 1. 系统与数据质量
+- 数据质量：降级；这里应使用证据编号但 LLM 没有给出合法编号
+
+### 4. 盘前 vs 收盘
+- 对比只用于复盘早盘判断质量，不作为自动交易依据（证据编号：evt_compare_1）
+""", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "notify",
+            "llm-summary-card",
+            "--mode",
+            "close",
+            "--payload",
+            str(payload_path),
+            "--fill-missing-evidence",
+            "--dry-run",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "dry_run"
+    assert payload["evidence_validation"]["ok"] is True
+    assert payload["evidence_validation"]["unavailable_sections"] == ["系统与数据质量"]
+    assert payload["evidence_normalization"]["autofilled_sections"] == ["系统与数据质量"]
+    system_field = next(field for field in payload["embed"]["fields"] if field["name"] == "🛡️ 系统与数据质量")
+    assert "证据编号：暂无可用数据" in system_field["value"]
 
 
 def test_notify_llm_summary_card_rejects_missing_evidence_id(tmp_path):

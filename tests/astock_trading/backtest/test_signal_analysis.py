@@ -135,6 +135,37 @@ def test_signal_alpha_summary_splits_unknown_route_by_bucket_and_market():
     assert report["by_market_unknown_bucket"]["RED"]["near_pullback_missing_confirm"]["sample_size"] == 1
 
 
+def test_signal_alpha_summary_groups_by_decision_and_veto_reasons():
+    signals = [
+        {
+            "code": "A",
+            "signal_date": "2025-01-01",
+            "primary_strategy_route": "trend_cooling_off",
+            "market_signal": "RED",
+            "decision_reasons": ["veto", "market_blocks_new_positions"],
+            "veto_reasons": ["below_ma20"],
+            "forward_returns": {"20d": 0.06},
+        },
+        {
+            "code": "B",
+            "signal_date": "2025-01-02",
+            "primary_strategy_route": "trend_cooling_off",
+            "market_signal": "RED",
+            "decision_reasons": ["veto"],
+            "veto_reasons": ["below_ma20", "ma20_trend_down"],
+            "forward_returns": {"20d": -0.02},
+        },
+    ]
+
+    report = signal_alpha_summary(signals, horizons=("20d",), bootstrap_iterations=40)
+
+    below_ma20 = report["by_veto_reason"]["below_ma20"]
+    assert below_ma20["sample_size"] == 2
+    assert below_ma20["horizons"]["20d"]["avg_return_pct"] == 2.0
+    assert report["by_veto_reason"]["ma20_trend_down"]["sample_size"] == 1
+    assert report["by_decision_reason"]["market_blocks_new_positions"]["sample_size"] == 1
+
+
 def test_signal_alpha_summary_reports_code_and_date_cluster_concentration():
     signals = [
         {

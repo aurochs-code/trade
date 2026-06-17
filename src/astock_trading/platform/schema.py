@@ -328,6 +328,20 @@ signal_history_snapshots = Table(
     Index("idx_signal_history_group", "history_group_id"),
 )
 
+signal_history_discoveries = Table(
+    "signal_history_discoveries",
+    metadata,
+    Column("snapshot_date", String(32), primary_key=True),
+    Column("history_group_id", String(128), primary_key=True),
+    Column("code", String(64), primary_key=True),
+    Column("source", String(32), primary_key=True),
+    Column("run_id", String(128), nullable=False),
+    Column("phase", String(32), nullable=False),
+    Column("created_at", String(64), nullable=False),
+    Index("idx_signal_history_discovery_code_date", "code", "snapshot_date"),
+    Index("idx_signal_history_discovery_date", "snapshot_date", "source"),
+)
+
 schema_version = Table(
     "_schema_version",
     metadata,

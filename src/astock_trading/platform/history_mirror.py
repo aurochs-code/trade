@@ -10,6 +10,7 @@ from typing import Any
 from astock_trading.platform.time import local_today_str, utc_now_iso
 
 SNAPSHOT_TYPES = ("market", "pool", "candidates", "decision")
+DISCOVERY_SNAPSHOT_TYPES = ("pool", "candidates", "decision")
 
 
 def archive_signal_history(
@@ -53,7 +54,88 @@ def archive_signal_history(
                 created_at,
             ),
         )
+    _replace_discovery_index(
+        conn,
+        snapshot_date=date_value,
+        history_group_id=group_id,
+        run_id=run_id,
+        phase=phase,
+        created_at=created_at,
+        sections=payloads,
+    )
     return group_id
+
+
+def rebuild_signal_history_discovery_index(
+    conn: Any,
+    *,
+    start: str,
+    end: str,
+    write: bool = False,
+) -> dict[str, Any]:
+    """从已有历史镜像重建 code/date 发现索引，避免回测扫描大 JSON。"""
+    rows = conn.execute(
+        """SELECT snapshot_date, history_group_id, run_id, phase,
+                  snapshot_type, payload_json, created_at
+           FROM signal_history_snapshots
+           WHERE snapshot_date >= ?
+             AND snapshot_date <= ?
+             AND snapshot_type IN ('pool', 'candidates', 'decision')""",
+        (start, end),
+    ).fetchall()
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        item = _row_to_dict(row)
+        snapshot_date = str(item.get("snapshot_date") or "")
+        group_id = str(item.get("history_group_id") or "")
+        snapshot_type = str(item.get("snapshot_type") or "")
+        if not snapshot_date or not group_id or snapshot_type not in DISCOVERY_SNAPSHOT_TYPES:
+            continue
+        group = groups.setdefault(
+            (snapshot_date, group_id),
+            {
+                "snapshot_date": snapshot_date,
+                "history_group_id": group_id,
+                "run_id": str(item.get("run_id") or ""),
+                "phase": str(item.get("phase") or ""),
+                "created_at": str(item.get("created_at") or ""),
+                "sections": {"pool": [], "candidates": [], "decision": []},
+            },
+        )
+        group["sections"][snapshot_type] = _decode_payload(item.get("payload_json"))
+
+    discovery_row_count = 0
+    for group in groups.values():
+        discovery_row_count += len(_discovery_index_rows(
+            snapshot_date=group["snapshot_date"],
+            history_group_id=group["history_group_id"],
+            run_id=group["run_id"],
+            phase=group["phase"],
+            created_at=group["created_at"],
+            sections=group["sections"],
+        ))
+        if write:
+            _replace_discovery_index(
+                conn,
+                snapshot_date=group["snapshot_date"],
+                history_group_id=group["history_group_id"],
+                run_id=group["run_id"],
+                phase=group["phase"],
+                created_at=group["created_at"],
+                sections=group["sections"],
+            )
+    if write and hasattr(conn, "commit"):
+        conn.commit()
+    return {
+        "diagnostic": "signal_history_discovery_index",
+        "status": "ok" if write else "dry_run",
+        "start": start,
+        "end": end,
+        "snapshot_row_count": len(rows),
+        "history_group_count": len(groups),
+        "discovery_row_count": discovery_row_count,
+        "write": bool(write),
+    }
 
 
 def diagnose_signal_history(
@@ -139,6 +221,73 @@ def load_signal_history_bundle(
         history_group_id=groups[-1]["history_group_id"],
     )
     return payload if payload.get("status") == "ok" else None
+
+
+def load_signal_history_bundles(
+    conn: Any,
+    *,
+    snapshot_dates: list[str],
+    phases: tuple[str, ...] = ("screener", "scoring"),
+) -> dict[str, dict[str, Any]]:
+    """批量读取历史信号镜像，按日期选择最新可用 group。"""
+    dates = sorted({str(item) for item in snapshot_dates if str(item)})
+    if not dates:
+        return {}
+    date_placeholders = ",".join("?" for _ in dates)
+    params: list[Any] = list(dates)
+    phase_filter = ""
+    if phases:
+        phase_placeholders = ",".join("?" for _ in phases)
+        phase_filter = f" AND phase IN ({phase_placeholders})"
+        params.extend(str(item) for item in phases)
+
+    rows = conn.execute(
+        f"""SELECT snapshot_date, history_group_id, run_id, phase,
+                  snapshot_type, payload_json, created_at
+           FROM signal_history_snapshots
+           WHERE snapshot_date IN ({date_placeholders})
+             {phase_filter}""",
+        tuple(params),
+    ).fetchall()
+    if not rows:
+        return {}
+
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    latest_key_by_date: dict[str, tuple[str, str]] = {}
+    latest_sort_by_date: dict[str, tuple[str, str]] = {}
+    for row in rows:
+        item = _row_to_dict(row)
+        snapshot_date = str(item.get("snapshot_date") or "")
+        group_id = str(item.get("history_group_id") or "")
+        if not snapshot_date or not group_id:
+            continue
+        key = (snapshot_date, group_id)
+        group = groups.setdefault(
+            key,
+            {
+                "status": "ok",
+                "snapshot_date": snapshot_date,
+                "history_group_id": group_id,
+                "run_id": str(item.get("run_id") or ""),
+                "phase": str(item.get("phase") or ""),
+                "created_at": str(item.get("created_at") or ""),
+                "sections": _empty_sections(),
+            },
+        )
+        snapshot_type = str(item.get("snapshot_type") or "")
+        if snapshot_type in group["sections"]:
+            group["sections"][snapshot_type] = _decode_payload(item.get("payload_json"))
+
+        sort_key = (str(item.get("created_at") or ""), group_id)
+        if sort_key >= latest_sort_by_date.get(snapshot_date, ("", "")):
+            latest_sort_by_date[snapshot_date] = sort_key
+            latest_key_by_date[snapshot_date] = key
+
+    return {
+        snapshot_date: groups[key]
+        for snapshot_date, key in sorted(latest_key_by_date.items())
+        if key in groups
+    }
 
 
 def archive_from_runtime_state(
@@ -282,6 +431,91 @@ def _empty_sections() -> dict[str, Any]:
         "candidates": [],
         "decision": [],
     }
+
+
+def _replace_discovery_index(
+    conn: Any,
+    *,
+    snapshot_date: str,
+    history_group_id: str,
+    run_id: str,
+    phase: str,
+    created_at: str,
+    sections: dict[str, Any],
+) -> None:
+    conn.execute(
+        "DELETE FROM signal_history_discoveries WHERE snapshot_date = ? AND history_group_id = ?",
+        (snapshot_date, history_group_id),
+    )
+    rows = _discovery_index_rows(
+        snapshot_date=snapshot_date,
+        history_group_id=history_group_id,
+        run_id=run_id,
+        phase=phase,
+        created_at=created_at,
+        sections=sections,
+    )
+    params = [
+        (
+            row["snapshot_date"],
+            row["history_group_id"],
+            row["code"],
+            row["source"],
+            row["run_id"],
+            row["phase"],
+            row["created_at"],
+        )
+        for row in rows
+    ]
+    sql = """REPLACE INTO signal_history_discoveries
+             (snapshot_date, history_group_id, code, source, run_id, phase, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)"""
+    if params and hasattr(conn, "executemany"):
+        conn.executemany(sql, params)
+        return
+    for item in params:
+        conn.execute(sql, item)
+
+
+def _discovery_index_rows(
+    *,
+    snapshot_date: str,
+    history_group_id: str,
+    run_id: str,
+    phase: str,
+    created_at: str,
+    sections: dict[str, Any],
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for source in DISCOVERY_SNAPSHOT_TYPES:
+        payload = sections.get(source) or []
+        if not isinstance(payload, list):
+            continue
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("code") or "").strip()
+            if not code:
+                continue
+            key = (code, source)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({
+                "snapshot_date": snapshot_date,
+                "history_group_id": history_group_id,
+                "code": code,
+                "source": source,
+                "run_id": run_id,
+                "phase": phase,
+                "created_at": created_at,
+            })
+    return rows
+
+
+def _row_to_dict(row: Any) -> dict[str, Any]:
+    return dict(getattr(row, "_mapping", row))
 
 
 def _code_not_found(code: str) -> dict[str, Any]:

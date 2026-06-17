@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.astock_trading.trade.ops_watchdog</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/USER/.local/state/a-stock-trading/bin/a_stock_ops_watchdog_supervise.py</string>
+    <string>--timeout-seconds</string>
+    <string>30</string>
+    <string>--atrade</string>
+    <string>/Users/USER/.local/bin/atrade</string>
+    <string>--python</string>
+    <string>/Users/USER/.local/share/uv/tools/a-stock-trading/bin/python</string>
+  </array>
+
+  <key>StartInterval</key>
+  <integer>600</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/USER</string>
+    <key>XDG_CONFIG_HOME</key>
+    <string>/Users/USER/.config</string>
+    <key>XDG_STATE_HOME</key>
+    <string>/Users/USER/.local/state</string>
+    <key>ASTOCK_ENV_FILE</key>
+    <string>/Users/USER/.local/state/a-stock-trading/config/.env</string>
+    <key>ASTOCK_CONFIG_DIR</key>
+    <string>/Users/USER/.local/state/a-stock-trading/config</string>
+    <key>ASTOCK_DISCORD_TIMEOUT_SECONDS</key>
+    <string>5</string>
+    <key>ASTOCK_DISCORD_MAX_RETRIES</key>
+    <string>1</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/USER/.local/state/a-stock-trading/logs/launchd/ops-watchdog.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/USER/.local/state/a-stock-trading/logs/launchd/ops-watchdog.err.log</string>
+</dict>
+</plist>

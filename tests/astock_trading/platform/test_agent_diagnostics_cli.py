@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 from astock_trading.market.store import MarketStore
 from astock_trading.platform.agent_diagnostics import (
     _next_window_date_from_schedule,
+    _schedule_failure_diagnosis,
+    candidate_pool_summary,
     diagnose_flow,
     diagnose_health,
     diagnose_schedule,
@@ -41,6 +43,71 @@ def test_next_window_date_uses_scheduled_trading_day_on_weekend_before_buy_windo
     )
 
     assert next_date == date(2026, 5, 25)
+
+
+def test_schedule_failure_diagnosis_classifies_native_screener_crash():
+    last_error = (
+        "Script exited with code 133\n"
+        "stderr:\n"
+        "/tmp/a_stock_screener_refresh_silent.sh: line 57: 2334 Trace/BPT trap: 5 \"${CMD[@]}\"\n"
+        "[a_stock_screener_refresh] failed exit=133 log=/tmp/logs/screener_refresh_20260615_151021.log\n"
+        "[FATAL:address_pool_manager.cc(67)] Check failed: !pool->IsInitialized().\n"
+        "#00 0x1142d046c  (libmini_racer.dylib+0x184046c)\n"
+    )
+
+    diagnosis = _schedule_failure_diagnosis(
+        {
+            "name": "A股候选池刷新",
+            "script": "a_stock_screener_refresh_silent.sh",
+            "last_status": "error",
+            "last_error": last_error,
+        }
+    )
+
+    assert diagnosis["exit_code"] == 133
+    assert diagnosis["error_type"] == "native_runtime_crash"
+    assert diagnosis["log_path"] == "/tmp/logs/screener_refresh_20260615_151021.log"
+    assert "libmini_racer 原生层崩溃" in diagnosis["root_cause_hint"]
+    assert diagnosis["recovery_action"]["command"] == "atrade screener refresh --json"
+
+
+def test_llm_schedule_context_keeps_failed_job_recovery_details():
+    from astock_trading.platform.llm_context import _automation_schedule_context
+
+    schedule = _automation_schedule_context({
+        "status": "warning",
+        "summary": "发现 1 个 A 股关键调度最近运行失败。",
+        "runtime_profile": {},
+        "runtime_contract": {},
+        "intraday_simulation": {},
+        "failed_jobs": [
+            {
+                "name": "A股候选池刷新",
+                "script": "a_stock_screener_refresh_silent.sh",
+                "last_status": "error",
+                "failure_diagnosis": {
+                    "summary": "Script exited with code 133",
+                    "exit_code": 133,
+                    "error_type": "native_runtime_crash",
+                    "log_path": "/tmp/logs/screener_refresh_20260615_151021.log",
+                    "root_cause_hint": "候选池刷新进程在 libmini_racer 原生层崩溃。",
+                    "recovery_action": {
+                        "type": "refresh_candidates",
+                        "label": "重新刷新候选和评分",
+                        "command": "atrade screener refresh --json",
+                        "risk_level": "state_write",
+                        "writes_state": True,
+                    },
+                },
+            }
+        ],
+    })
+
+    failure = schedule["failed_jobs"][0]
+    assert failure["script"] == "a_stock_screener_refresh_silent.sh"
+    assert failure["failure_diagnosis"]["error_type"] == "native_runtime_crash"
+    assert failure["failure_diagnosis"]["log_path"] == "/tmp/logs/screener_refresh_20260615_151021.log"
+    assert failure["failure_diagnosis"]["recovery_action"]["command"] == "atrade screener refresh --json"
 
 
 def test_diagnose_health_json_via_bin_trade(tmp_path, mysql_runtime):
@@ -177,6 +244,42 @@ def test_diagnose_flow_exposes_top_level_candidate_summary_and_entry_signals(tmp
         }
     ]
     assert payload["strategy"]["candidate_flow"]["candidate_summary"] == payload["candidate_summary"]
+
+
+def test_candidate_pool_summary_separates_diagnostic_and_execution_freshness():
+    class FakeResult:
+        def fetchall(self):
+            return [
+                {
+                    "pool_tier": "core",
+                    "count": 1,
+                    "last_scored_at": last_scored_at,
+                }
+            ]
+
+    class FakeConn:
+        def execute(self, *args, **kwargs):  # noqa: ARG002
+            return FakeResult()
+
+    now = datetime(2026, 6, 16, 10, 0, tzinfo=timezone.utc)
+    last_scored_at = (now - timedelta(hours=26)).isoformat()
+
+    summary = candidate_pool_summary(FakeConn(), now=now, max_age_days=3, max_execution_age_hours=24)
+
+    assert summary["stale"] is False
+    assert summary["max_age_days"] == 3
+    assert summary["execution_freshness"] == {
+        "scope": "paper_auto_readiness",
+        "latest_scored_at": last_scored_at,
+        "age_hours": 26.0,
+        "max_age_hours": 24,
+        "fresh": False,
+        "freshness_status": "stale",
+        "blocker": {
+            "reason": "scoring_inputs_stale",
+            "label": "候选池评分已过期",
+        },
+    }
 
 
 def test_diagnose_flow_paper_trial_summary_exposes_review_outcome(tmp_path, mysql_runtime):
@@ -2735,6 +2838,14 @@ def test_diagnose_schedule_reports_missed_intraday_catchup_jobs(tmp_path, mysql_
 def test_diagnose_schedule_reports_recent_failed_jobs(tmp_path, mysql_runtime):
     jobs_path = tmp_path / "jobs.json"
     conn = connect()
+    last_error = (
+        "Script exited with code 133\n"
+        "stderr:\n"
+        "/tmp/a_stock_screener_refresh_silent.sh: line 57: 2334 Trace/BPT trap: 5 \"${CMD[@]}\"\n"
+        "[a_stock_screener_refresh] failed exit=133 log=/tmp/logs/screener_refresh_20260615_151021.log\n"
+        "[FATAL:address_pool_manager.cc(67)] Check failed: !pool->IsInitialized().\n"
+        "#00 0x1142d046c  (libmini_racer.dylib+0x184046c)\n"
+    )
     jobs_path.write_text(
         json.dumps({
             "jobs": [
@@ -2746,6 +2857,7 @@ def test_diagnose_schedule_reports_recent_failed_jobs(tmp_path, mysql_runtime):
                     "state": "scheduled",
                     "last_run_at": "2026-05-25T09:15:16+08:00",
                     "last_status": "error",
+                    "last_error": last_error,
                     "next_run_at": "2026-05-26T09:15:00+08:00",
                 },
                 {
@@ -2775,6 +2887,12 @@ def test_diagnose_schedule_reports_recent_failed_jobs(tmp_path, mysql_runtime):
     assert payload["status"] == "warning"
     assert payload["summary"] == "发现 1 个 A 股关键调度最近运行失败。"
     assert [item["name"] for item in payload["failed_jobs"]] == ["A股盘前流水"]
+    failure = payload["failed_jobs"][0]["failure_diagnosis"]
+    assert failure["exit_code"] == 133
+    assert failure["error_type"] == "native_runtime_crash"
+    assert failure["log_path"] == "/tmp/logs/screener_refresh_20260615_151021.log"
+    assert "libmini_racer 原生层崩溃" in failure["root_cause_hint"]
+    assert failure["recovery_action"]["command"] == "atrade screener refresh --json"
     assert payload["missed_jobs"] == []
 
 

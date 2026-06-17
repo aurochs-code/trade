@@ -131,3 +131,20 @@ class TestRetryLogic:
         result = _api_request("POST", "/test", "fake_token", max_retries=3)
         assert result["id"] == "ok"
         assert mock_urlopen.call_count == 2
+
+    @patch("astock_trading.reporting.discord_sender.urllib.request.urlopen")
+    @patch("astock_trading.reporting.discord_sender.time.sleep")
+    def test_env_overrides_timeout_and_retry_count(self, mock_sleep, mock_urlopen):
+        """Ops watchdog can keep Discord sends bounded through env overrides."""
+        mock_urlopen.side_effect = TimeoutError("network timeout")
+
+        with patch.dict(os.environ, {
+            "ASTOCK_DISCORD_TIMEOUT_SECONDS": "4",
+            "ASTOCK_DISCORD_MAX_RETRIES": "1",
+        }):
+            result = _api_request("POST", "/test", "fake_token", max_retries=3)
+
+        assert "network timeout" in result["error"]
+        assert mock_urlopen.call_count == 1
+        assert mock_urlopen.call_args.kwargs["timeout"] == 4
+        assert mock_sleep.call_count == 0

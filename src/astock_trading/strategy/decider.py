@@ -15,6 +15,7 @@ from astock_trading.strategy.models import (
     MarketState,
     ScoreResult,
 )
+from astock_trading.strategy.route_policy import iter_route_policy_entries
 
 
 _DATA_QUALITY_RANK = {
@@ -106,8 +107,25 @@ class Decider:
                 notes=["一票否决"],
             )
 
+        route_policy_name, route_policy = self._route_policy_for_score(
+            market.signal,
+            score,
+            market,
+        )
+        route_policy_allows_market = _route_policy_allows_market_block(
+            route_policy,
+            market.signal,
+        )
+        if route_policy:
+            policy_score_min = route_policy.get("score_min")
+            if policy_score_min is not None:
+                route_buy_threshold = float(policy_score_min or buy_threshold)
+                if route_buy_threshold < buy_threshold:
+                    buy_threshold = route_buy_threshold
+                    notes.append(f"路线 {route_policy_name} 买入线 {buy_threshold:.1f}")
+
         # Market signal block
-        if market.signal in (MarketSignal.RED, MarketSignal.CLEAR):
+        if market.signal in (MarketSignal.RED, MarketSignal.CLEAR) and not route_policy_allows_market:
             notes.append(f"大盘 {market.signal.value}，禁止新开仓")
             if self._trial_buy_allowed(
                 score,
@@ -138,18 +156,12 @@ class Decider:
                 notes=notes,
             )
 
+        if route_policy_allows_market:
+            notes.append(f"显式路线策略允许 {market.signal.value} 小仓正式买入")
+
         # Weekly limit
         if weekly_buy_count >= self.weekly_max:
             notes.append(f"本周已买 {weekly_buy_count}/{self.weekly_max}")
-
-        route_policy_name, route_policy = self._route_policy_for_score(market.signal, score)
-        if route_policy:
-            policy_score_min = route_policy.get("score_min")
-            if policy_score_min is not None:
-                route_buy_threshold = float(policy_score_min or buy_threshold)
-                if route_buy_threshold < buy_threshold:
-                    buy_threshold = route_buy_threshold
-                    notes.append(f"路线 {route_policy_name} 买入线 {buy_threshold:.1f}")
 
         # Score-based decision
         if score.total >= buy_threshold and weekly_buy_count < self.weekly_max:
@@ -160,7 +172,16 @@ class Decider:
             remaining = max(0, self.total_max_pct - current_exposure_pct)
             position_pct = min(position_pct, remaining)
 
-            buy_blocks = self._buy_block_reasons(score, position_pct)
+            require_entry_signal = _route_policy_requires_entry_signal(
+                route_policy,
+                default=self.require_entry_signal_for_buy,
+            )
+            buy_blocks = self._buy_block_reasons(
+                score,
+                position_pct,
+                require_entry_signal=require_entry_signal,
+                route_policy=route_policy,
+            )
             if buy_blocks:
                 if self._trial_buy_allowed(
                     score,
@@ -277,6 +298,7 @@ class Decider:
         route_policy_route, route_policy_key, route_policy = self._route_policy_match(
             market.signal,
             score,
+            market,
         )
         if route_policy and route_policy.get("score_min") is not None:
             route_buy_threshold = float(route_policy.get("score_min") or buy_threshold)
@@ -296,7 +318,10 @@ class Decider:
         reason_keys: list[str] = []
         gates: dict[str, dict] = {}
 
-        market_blocked = market.signal in (MarketSignal.RED, MarketSignal.CLEAR)
+        market_blocked = (
+            market.signal in (MarketSignal.RED, MarketSignal.CLEAR)
+            and not _route_policy_allows_market_block(route_policy, market.signal)
+        )
         gates["market_regime"] = {
             "status": "blocked" if market_blocked else "pass",
             "signal": market.signal.value,
@@ -327,39 +352,51 @@ class Decider:
         if score.total < buy_threshold:
             reason_keys.append("score_below_buy_line" if score.total >= watch_threshold else "score_too_low")
 
-        entry_blocked = self.require_entry_signal_for_buy and not score.entry_signal
+        require_entry_signal = _route_policy_requires_entry_signal(
+            route_policy,
+            default=self.require_entry_signal_for_buy,
+        )
+        entry_blocked = require_entry_signal and not score.entry_signal
         gates["entry_signal"] = {
             "status": "blocked" if entry_blocked else "pass",
-            "required": self.require_entry_signal_for_buy,
+            "required": require_entry_signal,
             "triggered": bool(score.entry_signal),
             "reason_key": "entry_signal_missing" if entry_blocked else None,
         }
         if entry_blocked:
             reason_keys.append("entry_signal_missing")
 
+        min_data_quality_for_buy = _route_policy_min_data_quality(
+            route_policy,
+            self.min_data_quality_for_buy,
+        )
         score_quality = _quality_value(score.data_quality)
         quality_blocked = (
-            _quality_rank(score_quality) < _quality_rank(self.min_data_quality_for_buy)
+            _quality_rank(score_quality) < _quality_rank(min_data_quality_for_buy)
         )
         gates["data_quality"] = {
             "status": "blocked" if quality_blocked else "pass",
             "value": score_quality,
-            "minimum": self.min_data_quality_for_buy,
+            "minimum": min_data_quality_for_buy,
             "reason_key": "data_quality_below_min" if quality_blocked else None,
         }
         if quality_blocked:
             reason_keys.append("data_quality_below_min")
 
         missing = list(score.data_missing_fields or [])
+        max_missing_fields_for_buy = _route_policy_max_missing_fields(
+            route_policy,
+            self.max_missing_fields_for_buy,
+        )
         missing_too_many = (
-            self.max_missing_fields_for_buy is not None
-            and len(missing) > self.max_missing_fields_for_buy
+            max_missing_fields_for_buy is not None
+            and len(missing) > max_missing_fields_for_buy
         )
         critical_missing = sorted(self.critical_missing_fields_for_buy.intersection(missing))
         gates["missing_fields"] = {
             "status": "blocked" if missing_too_many or critical_missing else "pass",
             "fields": missing,
-            "max_allowed": self.max_missing_fields_for_buy,
+            "max_allowed": max_missing_fields_for_buy,
             "critical_missing": critical_missing,
         }
         if missing_too_many:
@@ -422,7 +459,14 @@ class Decider:
             "gates": gates,
         }
 
-    def _buy_block_reasons(self, score: ScoreResult, position_pct: float) -> list[str]:
+    def _buy_block_reasons(
+        self,
+        score: ScoreResult,
+        position_pct: float,
+        *,
+        require_entry_signal: bool | None = None,
+        route_policy: dict | None = None,
+    ) -> list[str]:
         reasons: list[str] = []
 
         if position_pct < self.min_position_pct_for_buy:
@@ -431,23 +475,32 @@ class Decider:
                 f"< {self.min_position_pct_for_buy:.1%}"
             )
 
-        if self.require_entry_signal_for_buy and not score.entry_signal:
+        entry_required = self.require_entry_signal_for_buy if require_entry_signal is None else require_entry_signal
+        if entry_required and not score.entry_signal:
             reasons.append("入场信号未触发")
 
+        min_data_quality_for_buy = _route_policy_min_data_quality(
+            route_policy,
+            self.min_data_quality_for_buy,
+        )
         score_quality = _quality_value(score.data_quality)
-        if _quality_rank(score_quality) < _quality_rank(self.min_data_quality_for_buy):
+        if _quality_rank(score_quality) < _quality_rank(min_data_quality_for_buy):
             reasons.append(
-                f"数据质量 {score_quality} 低于要求 {self.min_data_quality_for_buy}"
+                f"数据质量 {score_quality} 低于要求 {min_data_quality_for_buy}"
             )
 
         missing = list(score.data_missing_fields or [])
+        max_missing_fields_for_buy = _route_policy_max_missing_fields(
+            route_policy,
+            self.max_missing_fields_for_buy,
+        )
         if (
-            self.max_missing_fields_for_buy is not None
-            and len(missing) > self.max_missing_fields_for_buy
+            max_missing_fields_for_buy is not None
+            and len(missing) > max_missing_fields_for_buy
         ):
             reasons.append(
                 f"关键数据缺失过多：{len(missing)} "
-                f"> {self.max_missing_fields_for_buy}"
+                f"> {max_missing_fields_for_buy}"
             )
 
         critical_missing = sorted(self.critical_missing_fields_for_buy.intersection(missing))
@@ -535,20 +588,33 @@ class Decider:
     def _regime_rules(self, signal: MarketSignal) -> dict:
         return dict(self.market_regime_overlays.get(signal.value) or {})
 
-    def _route_policy_for_score(self, signal: MarketSignal, score: ScoreResult) -> tuple[str, dict]:
-        route, _key, policy = self._route_policy_match(signal, score)
+    def _route_policy_for_score(
+        self,
+        signal: MarketSignal,
+        score: ScoreResult,
+        market: MarketState | None = None,
+    ) -> tuple[str, dict]:
+        route, _key, policy = self._route_policy_match(signal, score, market)
         return route, policy
 
-    def _route_policy_match(self, signal: MarketSignal, score: ScoreResult) -> tuple[str, str, dict]:
+    def _route_policy_match(
+        self,
+        signal: MarketSignal,
+        score: ScoreResult,
+        market: MarketState | None = None,
+    ) -> tuple[str, str, dict]:
         route_names = []
         primary = _primary_route_name(score)
         if primary:
             route_names.append(primary)
         route_names.extend(route for route in _active_route_names(score) if route and route not in route_names)
         for route in route_names:
-            for key in (f"{signal.value}:{route}", f"*:{route}", route):
-                policy = self.route_execution_policy.get(key)
-                if isinstance(policy, dict) and _route_policy_allows_action(policy, "BUY"):
+            for key, policy in iter_route_policy_entries(self.route_execution_policy, signal.value, route):
+                if (
+                    _route_policy_allows_action(policy, "BUY")
+                    and _route_policy_matches_score(policy, score.total)
+                    and _route_policy_matches_phase(policy, market)
+                ):
                     return route, key, policy
         return "", "", {}
 
@@ -603,6 +669,110 @@ def _route_policy_allows_action(policy: dict, action: str) -> bool:
     if actions is None:
         return action == "BUY"
     return action in {str(item) for item in actions or () if str(item)}
+
+
+def _route_policy_matches_score(policy: dict, score_total: float) -> bool:
+    try:
+        score = float(score_total or 0.0)
+    except (TypeError, ValueError):
+        score = 0.0
+    score_min = policy.get("score_min")
+    if score_min is not None and score < float(score_min or 0.0):
+        return False
+    score_max = policy.get("score_max")
+    if score_max is not None and score > float(score_max or 0.0):
+        return False
+    return True
+
+
+def _route_policy_matches_phase(policy: dict, market: MarketState | None) -> bool:
+    detail = getattr(market, "detail", {}) if market else {}
+    if not isinstance(detail, dict):
+        detail = {}
+    if policy.get("require_above_ma120") is not None:
+        if bool(detail.get("above_ma120")) is not bool(policy.get("require_above_ma120")):
+            return False
+    min_ma120_slope = policy.get("min_index_ma120_slope_20d_pct")
+    if min_ma120_slope is not None:
+        slope = _float_or_none(detail.get("index_ma120_slope_20d_pct"))
+        if slope is None or slope < float(min_ma120_slope):
+            return False
+    phases = {str(item) for item in policy.get("phase_buckets", []) or [] if str(item)}
+    if not phases:
+        return True
+    phase = _market_phase_bucket_from_detail(detail)
+    return phase in phases
+
+
+def _route_policy_requires_entry_signal(policy: dict, *, default: bool) -> bool:
+    if policy and policy.get("require_entry_signal") is not None:
+        return bool(policy.get("require_entry_signal"))
+    return bool(default)
+
+
+def _route_policy_min_data_quality(policy: dict | None, default: str | DataQuality) -> str:
+    if policy and policy.get("min_data_quality_for_buy") is not None:
+        return _quality_value(policy.get("min_data_quality_for_buy"))
+    return _quality_value(default)
+
+
+def _route_policy_max_missing_fields(policy: dict | None, default: int | None) -> int | None:
+    if policy and "max_missing_fields_for_buy" in policy:
+        value = policy.get("max_missing_fields_for_buy")
+        return None if value is None else int(value)
+    return default
+
+
+def _route_policy_allows_market_block(policy: dict, signal: MarketSignal) -> bool:
+    if signal != MarketSignal.RED:
+        return False
+    return bool(policy and policy.get("allow_market_blocked"))
+
+
+def _market_phase_bucket_from_detail(detail: dict) -> str:
+    if not isinstance(detail, dict):
+        return "unknown"
+    explicit = str(detail.get("market_phase_bucket") or "")
+    if explicit:
+        return explicit
+
+    deviation = _float_or_none(detail.get("index_ma20_deviation_pct"))
+    if deviation is None:
+        price = _float_or_none(detail.get("price") or detail.get("index_price"))
+        ma20 = _float_or_none(detail.get("ma20") or detail.get("index_ma20"))
+        if price is not None and ma20 and ma20 > 0:
+            deviation = (price / ma20 - 1) * 100
+    slope = _float_or_none(
+        detail.get("index_ma20_slope_5d_pct")
+        or detail.get("ma20_slope_5d_pct")
+        or detail.get("slope_5d_pct")
+    )
+    if deviation is None or slope is None:
+        return "unknown"
+
+    if deviation < -5:
+        distance = "deep_below_ma20"
+    elif deviation < 0:
+        distance = "below_ma20"
+    elif deviation <= 3:
+        distance = "near_ma20"
+    else:
+        distance = "extended_above_ma20"
+
+    if slope >= 0.5:
+        trend = "slope_up"
+    elif slope <= -0.5:
+        trend = "slope_down"
+    else:
+        trend = "slope_flat"
+    return f"{distance}_{trend}"
+
+
+def _float_or_none(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _primary_route_name(score: ScoreResult) -> str:
