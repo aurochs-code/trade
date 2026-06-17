@@ -274,6 +274,110 @@ def test_signal_alpha_summary_groups_by_market_phase_route_score_bucket():
     assert bucket["horizons"]["20d"]["avg_return_pct"] == 6.0
 
 
+def test_signal_alpha_summary_groups_whitelisted_signal_slices_by_year():
+    signals = [
+        {
+            "code": "A",
+            "signal_date": "2022-01-04",
+            "score": 5.2,
+            "primary_strategy_route": "trend_cooling_off",
+            "market_signal": "RED",
+            "veto_reasons": ["below_ma20"],
+            "technical_snapshot": {
+                "volume_ratio": 2.4,
+                "deviation_rate": -2.0,
+                "ma20_slope": 0.006,
+                "momentum_5d": 4.0,
+                "rsi": 55,
+            },
+            "market_context": {"market_phase_bucket": "below_ma20_slope_up"},
+            "forward_returns": {"20d": 0.06},
+        },
+        {
+            "code": "B",
+            "signal_date": "2023-01-04",
+            "score": 4.8,
+            "primary_strategy_route": "trend_cooling_off",
+            "market_signal": "RED",
+            "veto_reasons": ["below_ma20"],
+            "technical_snapshot": {
+                "volume_ratio": 0.9,
+                "deviation_rate": -7.0,
+                "ma20_slope": -0.002,
+                "momentum_5d": -1.0,
+                "rsi": 28,
+            },
+            "market_context": {"market_phase_bucket": "deep_below_ma20_slope_down"},
+            "forward_returns": {"20d": -0.03},
+        },
+    ]
+
+    report = signal_alpha_summary(
+        signals,
+        horizons=("20d",),
+        bootstrap_iterations=40,
+        signal_slices=("volume_ratio_bucket", "deviation_ma20_bucket", "ma20_slope_bucket", "rsi_bucket"),
+    )
+
+    assert report["by_slice"]["volume_ratio_bucket"]["2.0-3.0"]["yearly"]["2022"]["sample_size"] == 1
+    assert report["by_slice"]["volume_ratio_bucket"]["<1.2"]["yearly"]["2023"]["sample_size"] == 1
+    assert report["by_slice"]["deviation_ma20_bucket"]["-5-0"]["yearly"]["2022"]["sample_size"] == 1
+    assert report["by_slice"]["ma20_slope_bucket"]["<0"]["yearly"]["2023"]["sample_size"] == 1
+    assert report["by_slice"]["rsi_bucket"]["<30"]["yearly"]["2023"]["sample_size"] == 1
+
+
+def test_signal_alpha_summary_reports_stable_weak_market_candidate_buckets():
+    stable_rows = []
+    for year in ("2022", "2023"):
+        for idx in range(80):
+            stable_rows.append({
+                "code": f"{idx:06d}",
+                "signal_date": f"{year}-01-{(idx % 28) + 1:02d}",
+                "primary_strategy_route": "trend_cooling_off",
+                "market_signal": "RED",
+                "veto_reasons": ["below_ma20"],
+                "technical_snapshot": {
+                    "volume_ratio": 2.4,
+                    "deviation_rate": -2.0,
+                    "ma20_slope": 0.006,
+                    "momentum_5d": 4.0,
+                    "rsi": 55,
+                },
+                "forward_returns": {"20d": 0.05},
+            })
+    noisy_non_parent_rows = [
+        {
+            "code": f"X{idx:05d}",
+            "signal_date": "2023-02-01",
+            "primary_strategy_route": "trend_cooling_off",
+            "market_signal": "RED",
+            "veto_reasons": ["consecutive_outflow"],
+            "technical_snapshot": {"volume_ratio": 3.5},
+            "forward_returns": {"20d": 0.20},
+        }
+        for idx in range(80)
+    ]
+
+    report = signal_alpha_summary(
+        [*stable_rows, *noisy_non_parent_rows],
+        horizons=("20d",),
+        bootstrap_iterations=40,
+        signal_slices=("volume_ratio_bucket",),
+    )
+
+    candidates = report["candidate_weak_market_buckets"]["items"]
+    assert candidates == [
+        {
+            "dimension": "volume_ratio_bucket",
+            "slice_key": "2.0-3.0",
+            "parent_reasons": ["below_ma20"],
+            "required_years": ["2022", "2023"],
+            "overall_avg_return_pct": 5.0,
+            "yearly_avg_return_pct": {"2022": 5.0, "2023": 5.0},
+        }
+    ]
+
+
 def test_compare_backtest_signal_reports_surfaces_win_rate_and_trade_delta():
     baseline = {
         "total_return_pct": 1.2,

@@ -64,6 +64,7 @@ class BacktestBatchConfig:
     batch_timeout_seconds: float = 240.0
     split_on_timeout: bool = True
     signal_output_limit: int = 200
+    signal_slices: tuple[str, ...] = ()
     progress_log: bool = False
 
 
@@ -158,6 +159,7 @@ def run_batched_backtest(
             "stamp_tax_bps": cfg.stamp_tax_bps,
             "transfer_fee_bps": cfg.transfer_fee_bps,
             "slippage_bps": cfg.slippage_bps,
+            "signal_slices": list(cfg.signal_slices or ()),
         },
         "coverage": {
             "requested_codes": len(normalized_codes),
@@ -178,7 +180,7 @@ def run_batched_backtest(
             for item in successful_batches
         ],
         "failed_batches": failed_batches,
-        "signal_alpha": signal_alpha_summary(all_signals),
+        "signal_alpha": signal_alpha_summary(all_signals, signal_slices=cfg.signal_slices),
         "signal_validation": {
             "sample_size": len(all_signals),
             "signals": visible_signals,
@@ -403,6 +405,7 @@ def _run_batch_in_process(
             "stamp_tax_bps": config.stamp_tax_bps,
             "transfer_fee_bps": config.transfer_fee_bps,
             "slippage_bps": config.slippage_bps,
+            "signal_slices": list(config.signal_slices or ()),
             "result_path": result_path,
         }),
     )
@@ -494,6 +497,7 @@ def _run_backtest_child(queue: Any, payload: dict[str, Any]) -> None:
                 stamp_tax_bps=payload.get("stamp_tax_bps"),
                 transfer_fee_bps=payload.get("transfer_fee_bps"),
                 slippage_bps=payload.get("slippage_bps"),
+                signal_slices=tuple(payload.get("signal_slices") or ()),
             )
         with open(payload["result_path"], "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False)

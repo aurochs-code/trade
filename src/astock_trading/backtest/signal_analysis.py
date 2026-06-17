@@ -16,12 +16,14 @@ def signal_alpha_summary(
     bootstrap_iterations: int = 500,
     bootstrap_confidence: float = 0.95,
     bootstrap_seed: int = 20260613,
+    signal_slices: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any]:
     """Summarize forward-return quality for recorded strategy signals."""
     rows = [dict(item) for item in signals]
     scored_rows = _rows_with_score_bucket(rows)
     phased_rows = _rows_with_market_phase(scored_rows)
-    return {
+    slices = tuple(str(item).strip() for item in (signal_slices or ()) if str(item).strip())
+    report = {
         "overall": _group_summary(
             rows,
             horizons=horizons,
@@ -119,6 +121,260 @@ def signal_alpha_summary(
             bootstrap_seed=bootstrap_seed,
         ),
     }
+    if slices:
+        report["by_slice"] = _signal_slice_summaries(
+            rows,
+            slices,
+            horizons=horizons,
+            bootstrap_iterations=bootstrap_iterations,
+            bootstrap_confidence=bootstrap_confidence,
+            bootstrap_seed=bootstrap_seed,
+        )
+        report["candidate_weak_market_buckets"] = _candidate_weak_market_buckets(
+            rows,
+            slices,
+            horizons=horizons,
+            bootstrap_iterations=bootstrap_iterations,
+            bootstrap_confidence=bootstrap_confidence,
+            bootstrap_seed=bootstrap_seed,
+        )
+    return report
+
+
+_SIGNAL_SLICE_WHITELIST = {
+    "veto_reason",
+    "decision_reason",
+    "market_signal",
+    "market_phase_bucket",
+    "route",
+    "score_bucket",
+    "volume_ratio_bucket",
+    "deviation_ma20_bucket",
+    "ma20_slope_bucket",
+    "momentum_5d_bucket",
+    "rsi_bucket",
+}
+
+_WEAK_MARKET_PARENT_REASONS = ("below_ma20", "ma20_trend_down")
+_WEAK_MARKET_REQUIRED_YEARS = ("2022", "2023")
+
+
+def _signal_slice_summaries(
+    rows: list[dict[str, Any]],
+    slices: tuple[str, ...],
+    *,
+    horizons: tuple[str, ...],
+    bootstrap_iterations: int,
+    bootstrap_confidence: float,
+    bootstrap_seed: int,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for dimension in _validated_signal_slices(slices):
+        groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            for value in _slice_values(row, dimension):
+                groups[value].append(row)
+        result[dimension] = {
+            value: _slice_group_summary(
+                items,
+                horizons=horizons,
+                bootstrap_iterations=bootstrap_iterations,
+                bootstrap_confidence=bootstrap_confidence,
+                bootstrap_seed=bootstrap_seed,
+            )
+            for value, items in sorted(groups.items())
+        }
+    return result
+
+
+def _slice_group_summary(
+    rows: list[dict[str, Any]],
+    *,
+    horizons: tuple[str, ...],
+    bootstrap_iterations: int,
+    bootstrap_confidence: float,
+    bootstrap_seed: int,
+) -> dict[str, Any]:
+    yearly_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        year = _signal_year(row)
+        if year:
+            yearly_groups[year].append(row)
+    return {
+        "overall": _group_summary(
+            rows,
+            horizons=horizons,
+            bootstrap_iterations=bootstrap_iterations,
+            bootstrap_confidence=bootstrap_confidence,
+            bootstrap_seed=bootstrap_seed,
+        ),
+        "yearly": {
+            year: _group_summary(
+                items,
+                horizons=horizons,
+                bootstrap_iterations=bootstrap_iterations,
+                bootstrap_confidence=bootstrap_confidence,
+                bootstrap_seed=bootstrap_seed,
+            )
+            for year, items in sorted(yearly_groups.items())
+        },
+    }
+
+
+def _candidate_weak_market_buckets(
+    rows: list[dict[str, Any]],
+    slices: tuple[str, ...],
+    *,
+    horizons: tuple[str, ...],
+    bootstrap_iterations: int,
+    bootstrap_confidence: float,
+    bootstrap_seed: int,
+) -> dict[str, Any]:
+    horizon = "20d" if "20d" in horizons else horizons[-1]
+    weak_rows = [row for row in rows if _weak_market_parent_reasons(row)]
+    by_slice = _signal_slice_summaries(
+        weak_rows,
+        slices,
+        horizons=(horizon,),
+        bootstrap_iterations=bootstrap_iterations,
+        bootstrap_confidence=bootstrap_confidence,
+        bootstrap_seed=bootstrap_seed,
+    )
+    items: list[dict[str, Any]] = []
+    for dimension, groups in by_slice.items():
+        for slice_key, summary in groups.items():
+            yearly = summary.get("yearly") or {}
+            if not _weak_bucket_is_stable(yearly, horizon):
+                continue
+            yearly_avg = {
+                year: yearly[year]["horizons"][horizon]["avg_return_pct"]
+                for year in _WEAK_MARKET_REQUIRED_YEARS
+            }
+            items.append({
+                "dimension": dimension,
+                "slice_key": slice_key,
+                "parent_reasons": _candidate_parent_reasons(weak_rows, dimension, slice_key),
+                "required_years": list(_WEAK_MARKET_REQUIRED_YEARS),
+                "overall_avg_return_pct": summary["overall"]["horizons"][horizon]["avg_return_pct"],
+                "yearly_avg_return_pct": yearly_avg,
+            })
+    items.sort(key=lambda item: (-float(item["overall_avg_return_pct"]), item["dimension"], item["slice_key"]))
+    return {
+        "scope_parent_reasons": list(_WEAK_MARKET_PARENT_REASONS),
+        "criteria": {
+            "required_years": list(_WEAK_MARKET_REQUIRED_YEARS),
+            "min_sample_size_per_year": 80,
+            "min_unique_codes_per_year": 25,
+            "max_top_code_sample_pct": 25.0,
+            "min_date_cluster_count_per_year": 8,
+            "max_average_cluster_size": 15.0,
+            "horizon": horizon,
+            "avg_return_ci_low_pct": "> 0",
+        },
+        "items": items,
+    }
+
+
+def _weak_bucket_is_stable(yearly: dict[str, Any], horizon: str) -> bool:
+    for year in _WEAK_MARKET_REQUIRED_YEARS:
+        summary = yearly.get(year)
+        if not summary:
+            return False
+        concentration = summary.get("concentration") or {}
+        horizon_summary = (summary.get("horizons") or {}).get(horizon) or {}
+        sample_size = int(summary.get("sample_size") or 0)
+        date_cluster_count = int(concentration.get("date_cluster_count") or 0)
+        if sample_size < 80:
+            return False
+        if int(concentration.get("unique_codes") or 0) < 25:
+            return False
+        if float(concentration.get("top_code_sample_pct") or 0.0) > 25.0:
+            return False
+        if date_cluster_count < 8:
+            return False
+        if date_cluster_count and sample_size / date_cluster_count > 15.0:
+            return False
+        if float(horizon_summary.get("avg_return_ci_low_pct") or 0.0) <= 0:
+            return False
+    return True
+
+
+def _candidate_parent_reasons(rows: list[dict[str, Any]], dimension: str, slice_key: str) -> list[str]:
+    reasons: set[str] = set()
+    for row in rows:
+        if slice_key not in _slice_values(row, dimension):
+            continue
+        reasons.update(_weak_market_parent_reasons(row))
+    return sorted(reasons)
+
+
+def _weak_market_parent_reasons(row: dict[str, Any]) -> list[str]:
+    values = [
+        *(_row_list(row, "veto_reasons")),
+        *(_row_list(row, "decision_reasons")),
+    ]
+    return [reason for reason in _WEAK_MARKET_PARENT_REASONS if reason in values]
+
+
+def _validated_signal_slices(slices: tuple[str, ...]) -> tuple[str, ...]:
+    invalid = sorted({item for item in slices if item not in _SIGNAL_SLICE_WHITELIST})
+    if invalid:
+        raise ValueError(f"unsupported signal_slices: {', '.join(invalid)}")
+    return tuple(dict.fromkeys(slices))
+
+
+def _slice_values(row: dict[str, Any], dimension: str) -> list[str]:
+    if dimension == "veto_reason":
+        return _row_list(row, "veto_reasons")
+    if dimension == "decision_reason":
+        return _row_list(row, "decision_reasons")
+    if dimension == "market_signal":
+        return [str(row.get("market_signal") or "unknown")]
+    if dimension == "market_phase_bucket":
+        context = row.get("market_context") if isinstance(row.get("market_context"), dict) else {}
+        return [str(context.get("market_phase_bucket") or "unknown")]
+    if dimension == "route":
+        return [str(row.get("primary_strategy_route") or "unknown")]
+    if dimension == "score_bucket":
+        return [_score_bucket(row.get("score"))]
+    technical = row.get("technical_snapshot") if isinstance(row.get("technical_snapshot"), dict) else {}
+    # 研究切片阈值是事先固定的粗粒度档位，避免为单次回测结果拟合连续阈值。
+    if dimension == "volume_ratio_bucket":
+        return [_bucket_number(technical.get("volume_ratio"), ((1.2, "<1.2"), (2.0, "1.2-2.0"), (3.0, "2.0-3.0")), ">=3.0")]
+    if dimension == "deviation_ma20_bucket":
+        return [_bucket_number(technical.get("deviation_rate"), ((-5.0, "<-5"), (0.0, "-5-0"), (5.0, "0-5"), (10.0, "5-10")), ">=10")]
+    if dimension == "ma20_slope_bucket":
+        return [_bucket_number(technical.get("ma20_slope"), ((0.0, "<0"), (0.005, "0-0.005"), (0.01, "0.005-0.01")), ">=0.01")]
+    if dimension == "momentum_5d_bucket":
+        return [_bucket_number(technical.get("momentum_5d"), ((0.0, "<0"), (3.0, "0-3"), (5.0, "3-5")), ">=5")]
+    if dimension == "rsi_bucket":
+        return [_bucket_number(technical.get("rsi"), ((30.0, "<30"), (50.0, "30-50"), (70.0, "50-70")), ">=70")]
+    return ["unknown"]
+
+
+def _row_list(row: dict[str, Any], key: str) -> list[str]:
+    values = row.get(key) or []
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, Iterable):
+        return []
+    return [str(value) for value in values if str(value or "").strip()]
+
+
+def _bucket_number(value: Any, thresholds: tuple[tuple[float, str], ...], fallback: str) -> str:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "unknown"
+    for upper_bound, label in thresholds:
+        if numeric < upper_bound:
+            return label
+    return fallback
+
+
+def _signal_year(row: dict[str, Any]) -> str:
+    raw = str(row.get("signal_date") or "")
+    return raw[:4] if len(raw) >= 4 and raw[:4].isdigit() else "unknown"
 
 
 def _multi_value_summaries_by_key(

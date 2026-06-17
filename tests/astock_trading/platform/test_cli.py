@@ -2382,6 +2382,9 @@ def test_agent_command_catalog_json_via_bin_trade():
     assert by_id["backtest_batch"]["writes_state"] is False
     assert by_id["backtest_batch"]["writes_order"] is False
     assert by_id["backtest_batch"]["options"]["--preset"]["default"] == "攻_C_recovery_ma120_green_scale04"
+    assert by_id["backtest"]["options"]["--signal-slices"]["type"] == "csv"
+    assert by_id["backtest_record_run"]["options"]["--signal-slices"]["type"] == "csv"
+    assert by_id["backtest_batch"]["options"]["--signal-slices"]["type"] == "csv"
     assert by_id["digest"]["command"] == "atrade digest --json"
     assert by_id["digest"]["risk_level"] == "read_only"
     assert by_id["llm_context_close"]["command"] == "atrade llm-context --mode close --json"

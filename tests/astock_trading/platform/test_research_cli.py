@@ -292,6 +292,50 @@ def test_backtest_cli_preserves_preset_research_fields_when_not_overridden(monke
     assert saved["run_kwargs"]["execute_watch_trial_position_pct"] is None
 
 
+def test_backtest_cli_passes_signal_slices(monkeypatch):
+    from astock_trading.platform.cli import app
+    import astock_trading.backtest.engine as engine_module
+
+    saved: dict = {}
+
+    def fake_run_backtest(**kwargs):
+        saved["run_kwargs"] = kwargs
+        return {
+            "preset": kwargs["preset"],
+            "initial_cash": kwargs["initial_cash"],
+            "final_value": 100000.0,
+            "total_return_pct": 0.0,
+            "annual_return_pct": 0.0,
+            "max_drawdown_pct": 0.0,
+            "win_rate_pct": 0.0,
+            "total_trades": 0,
+            "buy_trades": 0,
+            "sell_trades": 0,
+            "positions_open": 0,
+            "trade_log": [],
+            "trades": [],
+            "equity_curve": [],
+        }
+
+    monkeypatch.setattr(engine_module, "run_backtest", fake_run_backtest)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "backtest",
+            "600000",
+            "2026-01-02",
+            "2026-01-05",
+            "--signal-slices",
+            "volume_ratio_bucket,rsi_bucket",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert saved["run_kwargs"]["signal_slices"] == ("volume_ratio_bucket", "rsi_bucket")
+
+
 def test_replay_production_cli_runs_reachable_history_mirror_backtest(monkeypatch):
     from astock_trading.platform.cli import app
     import astock_trading.backtest.engine as engine_module

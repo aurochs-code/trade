@@ -751,6 +751,7 @@ class BacktestConfig:
     scale_in_aggressive_phase_buckets: tuple[str, ...] = ()
     trade_record_limit: int | None = 50
     signal_record_limit: int | None = 50
+    signal_slices: tuple[str, ...] = ()
     include_signal_alpha: bool = True
     load_financials: bool = True
     progress_log: bool = False
@@ -3592,7 +3593,7 @@ class BacktestEngine:
             },
             "execution_funnel": self._execution_funnel,
             "signal_alpha": (
-                signal_alpha_summary(self._signal_records)
+                signal_alpha_summary(self._signal_records, signal_slices=self.cfg.signal_slices)
                 if self.cfg.include_signal_alpha
                 else {"skipped": True, "sample_size": len(self._signal_records)}
             ),
@@ -4063,6 +4064,7 @@ def run_backtest(
     scale_in_aggressive_phase_buckets: tuple[str, ...] | list[str] | None = None,
     trade_record_limit: int | None = 50,
     signal_record_limit: int | None = 50,
+    signal_slices: tuple[str, ...] | list[str] | None = None,
     include_signal_alpha: bool = True,
     load_financials: bool = True,
     reachable_only: bool = False,
@@ -4190,6 +4192,8 @@ def run_backtest(
         cfg.execute_watch_trial_position_pct = float(execute_watch_trial_position_pct)
     cfg.trade_record_limit = trade_record_limit
     cfg.signal_record_limit = signal_record_limit
+    if signal_slices is not None:
+        cfg.signal_slices = tuple(str(item) for item in signal_slices if str(item))
     cfg.include_signal_alpha = bool(include_signal_alpha)
     cfg.score_dimension_mode = score_dimension_mode
     if commission_bps is not None:

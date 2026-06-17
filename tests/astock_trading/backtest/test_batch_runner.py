@@ -332,3 +332,36 @@ def test_batched_backtest_respects_signal_output_limit_for_full_unknown_review()
         batch_runner=runner,
     )
     assert len(report["signal_validation"]["signals"]) == 4
+
+
+def test_batched_backtest_aggregates_requested_signal_slices():
+    def runner(codes: list[str], **kwargs):
+        return {
+            "total_return_pct": 0.0,
+            "max_drawdown_pct": 0.0,
+            "win_rate_pct": 0.0,
+            "signal_validation": {
+                "sample_size": 1,
+                "signals": [
+                    {
+                        "code": codes[0],
+                        "signal_date": "2022-01-04",
+                        "primary_strategy_route": "trend_cooling_off",
+                        "market_signal": "RED",
+                        "technical_snapshot": {"volume_ratio": 2.4},
+                        "forward_returns": {"20d": 0.05},
+                    }
+                ],
+            },
+        }
+
+    report = run_batched_backtest(
+        ["002138"],
+        "2022-01-01",
+        "2022-12-31",
+        BacktestBatchConfig(batch_size=1, signal_slices=("volume_ratio_bucket",)),
+        batch_runner=runner,
+    )
+
+    assert report["config"]["signal_slices"] == ["volume_ratio_bucket"]
+    assert report["signal_alpha"]["by_slice"]["volume_ratio_bucket"]["2.0-3.0"]["yearly"]["2022"]["sample_size"] == 1
